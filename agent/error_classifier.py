@@ -123,6 +123,20 @@ _BILLING_PATTERNS = [
     "not available on the free tier",
 ]
 
+# Structured provider codes that mean the account cannot serve paid traffic
+# until credits/subscription capacity is restored. xAI returns its explicit
+# Grok spending-limit signal as HTTP 403 rather than 402.
+_BILLING_ERROR_CODES = frozenset({
+    "insufficient_quota",
+    "billing_not_active",
+    "payment_required",
+    "insufficient_credits",
+    "no_usable_credits",
+    "balance_depleted",
+    "model_not_supported_on_free_tier",
+    "personal-team-blocked:spending-limit",
+})
+
 # Patterns that indicate rate limiting (transient, will resolve)
 _RATE_LIMIT_PATTERNS = [
     "rate limit",
@@ -884,7 +898,8 @@ def _classify_by_status(
         # OpenRouter 403 "key limit exceeded" is actually billing. Other
         # providers also use 403 for account-plan or credit exhaustion.
         if (
-            "key limit exceeded" in error_msg
+            error_code.lower() in _BILLING_ERROR_CODES
+            or "key limit exceeded" in error_msg
             or "spending limit" in error_msg
             or any(p in error_msg for p in _BILLING_PATTERNS)
         ):
@@ -1269,15 +1284,7 @@ def _classify_by_error_code(
             should_rotate_credential=True,
         )
 
-    if code_lower in {
-        "insufficient_quota",
-        "billing_not_active",
-        "payment_required",
-        "insufficient_credits",
-        "no_usable_credits",
-        "balance_depleted",
-        "model_not_supported_on_free_tier",
-    }:
+    if code_lower in _BILLING_ERROR_CODES:
         return result_fn(
             FailoverReason.billing,
             retryable=False,
