@@ -3029,6 +3029,10 @@ def extract_api_error_context(error: Exception) -> Dict[str, Any]:
         if isinstance(reason, str) and reason.strip():
             context["reason"] = reason.strip()
         message = payload.get("message") or payload.get("error_description")
+        if not message and isinstance(payload.get("error"), str):
+            # xAI uses a top-level string ``error`` beside a structured
+            # ``code`` (for example personal-team-blocked:spending-limit).
+            message = payload.get("error")
         if isinstance(message, str) and message.strip():
             context["message"] = message.strip()
         for key in ("resets_at", "reset_at"):
