@@ -26,8 +26,9 @@ registry.register(
     description=(
         "Universal desktop control via cua-driver (macOS, Windows, Linux). Works with any "
         "tool-capable model (Anthropic, OpenAI, OpenRouter, local vLLM, "
-        "etc.). Background computer-use: does NOT steal the user's cursor "
-        "or keyboard focus."
+        "etc.). Background/semantic operation does not move the user's pointer "
+        "or steal focus; raw foreground delivery requires a separate bounded "
+        "human grant."
     ),
 )
 

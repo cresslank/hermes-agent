@@ -46,6 +46,8 @@ import re
 import struct
 import sys
 import threading
+import time
+from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
 from tools.computer_use.backend import (
@@ -136,48 +138,114 @@ def _is_blocked_type(text: str) -> Optional[str]:
 # Backend selection — env-swappable for tests
 # ---------------------------------------------------------------------------
 
-# Per-process cached backend; lazily instantiated on first call.
+# Backends are owned by an authoritative Hermes run key (task_id when present,
+# otherwise session_id), not by the Python process. Each entry carries its own
+# sticky target/snapshot and cua-driver session, so concurrent subagents cannot
+# overwrite one another's active window.
 _backend_lock = threading.Lock()
+_BACKEND_IDLE_TTL_SECONDS = 15 * 60
+_MAX_BACKEND_RUNS = 32
+
+
+@dataclass
+class _BackendEntry:
+    backend: ComputerUseBackend
+    call_lock: threading.RLock = field(default_factory=threading.RLock)
+    last_used: float = field(default_factory=time.monotonic)
+    # 0 = denied, 1+ = bounded remaining uses, -1 = rest of this run.
+    foreground_uses: int = 0
+
+
+_backends: Dict[str, _BackendEntry] = {}
+# Deprecated single-backend test seam. Production state lives in `_backends`;
+# the default run mirrors here for backwards-compatible embedders/tests.
 _backend: Optional[ComputerUseBackend] = None
 # Session-scoped approval state.
 _session_auto_approve = False
 _always_allow: set = set()  # action names the user unlocked for the session
 
 
-def _get_backend() -> ComputerUseBackend:
-    global _backend
+def _run_key(kwargs: Dict[str, Any]) -> str:
+    task_id = str(kwargs.get("task_id") or "").strip()
+    session_id = str(kwargs.get("session_id") or "").strip()
+    if task_id:
+        return f"task:{task_id[:240]}"
+    if session_id:
+        return f"session:{session_id[:237]}"
+    return "default"
+
+
+def _stop_backend(backend: ComputerUseBackend) -> None:
+    try:
+        backend.stop()
+    except Exception:
+        logger.debug("computer_use backend cleanup failed", exc_info=True)
+
+
+def _prune_backends_locked(now: float) -> List[ComputerUseBackend]:
+    stale: List[ComputerUseBackend] = []
+    keys = sorted(_backends, key=lambda k: _backends[k].last_used)
+    for key in keys:
+        entry = _backends[key]
+        expired = now - entry.last_used > _BACKEND_IDLE_TTL_SECONDS
+        over_cap = len(_backends) > _MAX_BACKEND_RUNS
+        if not expired and not over_cap:
+            continue
+        if not entry.call_lock.acquire(blocking=False):
+            continue
+        try:
+            stale.append(entry.backend)
+            _backends.pop(key, None)
+        finally:
+            entry.call_lock.release()
+    return stale
+
+
+def _get_backend_entry(run_key: str = "default") -> _BackendEntry:
     with _backend_lock:
-        if _backend is None:
+        stale = _prune_backends_locked(time.monotonic())
+        entry = _backends.get(run_key)
+        if entry is None:
             backend_name = os.environ.get("HERMES_COMPUTER_USE_BACKEND", "cua").lower()
             if backend_name in {"cua", "cua-driver", ""}:
                 from tools.computer_use.cua_backend import CuaDriverBackend
-                _backend = CuaDriverBackend()
+                backend: ComputerUseBackend = CuaDriverBackend()
             elif backend_name == "noop":  # pragma: no cover
-                _backend = _NoopBackend()
+                backend = _NoopBackend()
             else:
                 raise RuntimeError(f"Unknown HERMES_COMPUTER_USE_BACKEND={backend_name!r}")
             try:
-                _backend.start()
+                backend.start()
             except Exception:
-                # Don't cache a backend whose start() failed (e.g. a lazy
-                # dependency install was declined / failed). The next call
-                # retries cleanly instead of returning a half-initialised
-                # backend.
-                _backend = None
                 raise
+            entry = _BackendEntry(backend=backend)
+            _backends[run_key] = entry
+        entry.last_used = time.monotonic()
+    for backend in stale:
+        _stop_backend(backend)
+    return entry
+
+
+def _get_backend(run_key: str = "default") -> ComputerUseBackend:
+    """Compatibility helper used by tests and non-registry callers."""
+    global _backend
+    if run_key == "default" and _backend is not None:
         return _backend
+    backend = _get_backend_entry(run_key).backend
+    if run_key == "default":
+        _backend = backend
+    return backend
 
 
 def reset_backend_for_tests() -> None:  # pragma: no cover
-    """Test helper — tear down the cached backend."""
+    """Test helper — tear down every run-owned backend."""
     global _backend, _session_auto_approve, _always_allow
     with _backend_lock:
-        if _backend is not None:
-            try:
-                _backend.stop()
-            except Exception:
-                pass
-        _backend = None
+        backends = [entry.backend for entry in _backends.values()]
+        _backends.clear()
+    for backend in backends:
+        _stop_backend(backend)
+    _backend = None
     _session_auto_approve = False
     _always_allow = set()
 
@@ -235,6 +303,85 @@ class _NoopBackend(ComputerUseBackend):  # pragma: no cover
 # Dispatch
 # ---------------------------------------------------------------------------
 
+def authorize_foreground_for_run(
+    *,
+    task_id: str = "",
+    session_id: str = "",
+    uses: Optional[int] = None,
+) -> None:
+    """Trusted host API for a bounded foreground capability.
+
+    ``uses=None`` grants the rest of this run; a positive integer grants that
+    many raw/focused actions. This function is intentionally not registered as
+    a model tool.
+    """
+    key = _run_key({"task_id": task_id, "session_id": session_id})
+    entry = _get_backend_entry(key)
+    with entry.call_lock:
+        entry.foreground_uses = -1 if uses is None else max(0, int(uses))
+
+
+def release_backend_for_run(*, task_id: str = "", session_id: str = "") -> bool:
+    """End a run-owned cua-driver session and remove its sticky target state."""
+    global _backend
+    key = _run_key({"task_id": task_id, "session_id": session_id})
+    with _backend_lock:
+        entry = _backends.pop(key, None)
+        if key == "default" and entry is not None and _backend is entry.backend:
+            _backend = None
+    if entry is None:
+        return False
+    with entry.call_lock:
+        _stop_backend(entry.backend)
+    return True
+
+
+def _request_foreground_approval(action: str, args: Dict[str, Any]) -> Tuple[Optional[str], int]:
+    cb = _approval_callback
+    if cb is None:
+        return json.dumps({
+            "error": "foreground authorization required",
+            "code": "foreground_authorization_required",
+            "action": action,
+            "hint": (
+                "Ask the user to authorize bounded foreground Computer Use for this run. "
+                "Approval may briefly activate the target workspace/window; each raw action "
+                "conditionally restores the previous focus afterward."
+            ),
+        }), 0
+    summary = (
+        f"Authorize bounded foreground Computer Use for {args.get('app', 'the target')}? "
+        "Raw actions may briefly switch workspace/focus and then conditionally restore it."
+    )
+    try:
+        verdict = cb(action, args, summary)
+    except Exception as e:
+        logger.warning("foreground approval callback failed: %s", e)
+        verdict = "deny"
+    if verdict == "approve_once":
+        return None, 1
+    if verdict in {"approve_session", "always_approve"}:
+        # Even "always" is narrowed to this authoritative run. A persistent
+        # generic tool approval is not a persistent focus-steal capability.
+        return None, -1
+    return json.dumps({
+        "error": "foreground authorization denied",
+        "code": "foreground_authorization_denied",
+        "action": action,
+    }), 0
+
+
+def _uses_foreground_capability(action: str, args: Dict[str, Any]) -> bool:
+    if action in {"type", "key"}:
+        return True
+    if action in {"click", "double_click", "right_click", "middle_click"}:
+        return args.get("element") is None
+    if action == "drag":
+        return args.get("from_element") is None or args.get("to_element") is None
+    if action == "scroll":
+        return args.get("element") is None
+    return False
+
 def handle_computer_use(args: Dict[str, Any], **kwargs) -> Any:
     """Main entry point — dispatched by tools.registry.
 
@@ -265,15 +412,30 @@ def handle_computer_use(args: Dict[str, Any], **kwargs) -> Any:
                     "hint": "Destructive system shortcuts are hard-blocked.",
                 })
 
-    # Approval gate (destructive actions only).
-    if action in _DESTRUCTIVE_ACTIONS:
+    run_key = _run_key(kwargs)
+    foreground_grant = 0
+
+    # A focus/workspace-switch grant is separate from generic mutation
+    # approval. Generic session auto-approval never implies this capability.
+    if action == "focus_app" and bool(args.get("raise_window")):
+        err, foreground_grant = _request_foreground_approval(action, args)
+        if err is not None:
+            return err
+    elif action in _DESTRUCTIVE_ACTIONS:
         err = _request_approval(action, args)
         if err is not None:
             return err
 
     # Dispatch to backend.
     try:
-        backend = _get_backend()
+        backend = _get_backend(run_key)
+        with _backend_lock:
+            entry = _backends.get(run_key)
+            # Preserve the historical _get_backend monkeypatch seam used by
+            # adapters/tests while still wrapping that backend in run state.
+            if entry is None or entry.backend is not backend:
+                entry = _BackendEntry(backend=backend)
+                _backends[run_key] = entry
     except Exception as e:
         return json.dumps({
             "error": f"computer_use backend unavailable: {e}",
@@ -281,11 +443,28 @@ def handle_computer_use(args: Dict[str, Any], **kwargs) -> Any:
                     "If a Python dependency is missing, the error above shows the exact install command.",
         })
 
-    try:
-        return _dispatch(backend, action, args)
-    except Exception as e:
-        logger.exception("computer_use %s failed", action)
-        return json.dumps({"error": f"{action} failed: {e}"})
+    with entry.call_lock:
+        if foreground_grant:
+            entry.foreground_uses = foreground_grant
+        foreground_authorized = entry.foreground_uses != 0
+        setter = getattr(entry.backend, "set_foreground_authorized", None)
+        if callable(setter):
+            setter(foreground_authorized)
+        try:
+            result = _dispatch(entry.backend, action, args)
+        except Exception as e:
+            logger.exception("computer_use %s failed", action)
+            result = json.dumps({"error": f"{action} failed: {e}"})
+        finally:
+            if callable(setter):
+                setter(False)
+            entry.last_used = time.monotonic()
+        if (
+            entry.foreground_uses > 0
+            and _uses_foreground_capability(action, args)
+        ):
+            entry.foreground_uses -= 1
+        return result
 
 
 def _request_approval(action: str, args: Dict[str, Any]) -> Optional[str]:
@@ -561,6 +740,16 @@ def _capture_response(cap: CaptureResult, max_elements: int = _DEFAULT_MAX_ELEME
         + (f" window={cap.window_title!r}" if cap.window_title else ""),
         f"{total_elements} interactable element(s):",
     ]
+    capture_status = cap.meta.get("capture_status") if cap.meta else None
+    if capture_status and capture_status != "current":
+        summary_lines.append(
+            f"capture_status={capture_status}; accessibility tree and pixels have separate freshness"
+        )
+    if cap.meta.get("code") == "capture_foreground_required":
+        summary_lines.append(
+            "fresh target pixels are unavailable without foreground authorization; "
+            "no workspace/window activation was attempted"
+        )
     if element_index:
         summary_lines.extend(element_index)
     # Multimodal and AX paths both reference `summary`; build it once up-front
@@ -614,6 +803,7 @@ def _capture_response(cap: CaptureResult, max_elements: int = _DEFAULT_MAX_ELEME
                 "total_elements": total_elements,
                 "summary": "\n".join(summary_lines),
                 "vision_unavailable": True,
+                "meta": cap.meta,
             }
             if truncated_elements:
                 payload["truncated_elements"] = truncated_elements
@@ -640,7 +830,8 @@ def _capture_response(cap: CaptureResult, max_elements: int = _DEFAULT_MAX_ELEME
             ],
             "text_summary": summary,
             "meta": {"mode": cap.mode, "width": response_width, "height": response_height,
-                     "elements": total_elements, "png_bytes": cap.png_bytes_len},
+                     "elements": total_elements, "png_bytes": cap.png_bytes_len,
+                     "capture": cap.meta},
         }
     # AX-only (or image-missing fallback): text path actually carries the
     # `elements` array, so the truncation note applies here.
@@ -659,6 +850,7 @@ def _capture_response(cap: CaptureResult, max_elements: int = _DEFAULT_MAX_ELEME
         "elements": [_element_to_dict(e) for e in visible_elements],
         "total_elements": total_elements,
         "summary": summary,
+        "meta": cap.meta,
     }
     if truncated_elements:
         payload["truncated_elements"] = truncated_elements

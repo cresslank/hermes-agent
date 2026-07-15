@@ -72,7 +72,10 @@ COMPUTER_USE_SCHEMA: Dict[str, Any] = {
                 "description": (
                     "Optional. Limit capture/action to a specific app "
                     "(by name, e.g. 'Safari', or bundle ID, "
-                    "'com.apple.Safari'). If omitted, operates on the "
+                    "'com.apple.Safari'). Use 'title:<exact or unique text>' "
+                    "to initially select one of several windows owned by the "
+                    "same app; subsequent actions bind to its exact target ID. "
+                    "If omitted, operates on the "
                     "frontmost app's window. Pass app='screen' (or "
                     "'desktop') to capture the OS desktop/shell surface — "
                     "e.g. to see the wallpaper or click the taskbar. Note: "
@@ -196,10 +199,11 @@ COMPUTER_USE_SCHEMA: Dict[str, Any] = {
             "raise_window": {
                 "type": "boolean",
                 "description": (
-                    "Only for action='focus_app'. If true, brings the "
-                    "window to front (DISRUPTS the user). Default false "
-                    "— input is routed to the app without raising, "
-                    "matching the background co-work model."
+                    "Only for action='focus_app'. If true, requests a separate "
+                    "human-approved foreground capability for this run. It does "
+                    "not immediately raise the window; later raw actions may "
+                    "briefly activate it and conditionally restore prior focus. "
+                    "Default false — background/semantic operation only."
                 ),
             },
             # ── return shape ───────────────────────────────────────

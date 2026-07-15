@@ -438,6 +438,42 @@ class CDPSupervisor:
             task_id=self.task_id,
         )
 
+    def call_cdp(
+        self,
+        method: str,
+        params: Optional[Dict[str, Any]] = None,
+        *,
+        session_id: Optional[str] = None,
+        timeout: float = 10.0,
+    ) -> Dict[str, Any]:
+        """Thread-safe synchronous bridge for an exact CDP session.
+
+        This is the narrow transport seam used by ``BrowserProfileBroker``.
+        The broker owns context/global locking and target-to-surface identity;
+        this method only schedules one protocol call on the supervisor loop.
+        """
+        loop = self._loop
+        if loop is None or not loop.is_running():
+            raise RuntimeError("CDP supervisor loop is not running")
+        with self._state_lock:
+            if not self._active:
+                raise RuntimeError("CDP supervisor is not active")
+
+        async def _call() -> Dict[str, Any]:
+            return await self._cdp(
+                method,
+                dict(params or {}),
+                session_id=session_id,
+                timeout=timeout,
+            )
+
+        from agent.async_utils import safe_schedule_threadsafe
+
+        future = safe_schedule_threadsafe(_call(), loop)
+        if future is None:
+            raise RuntimeError("CDP supervisor loop unavailable")
+        return future.result(timeout=timeout + 1.0)
+
     def respond_to_dialog(
         self,
         action: str,

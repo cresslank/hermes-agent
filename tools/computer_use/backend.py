@@ -65,6 +65,11 @@ class CaptureResult:
     # When None, downstream consumers fall back to base64-prefix
     # sniffing for back-compat with older drivers.
     image_mime_type: Optional[str] = None
+    # Structured backend metadata: target identity/workspace and capture
+    # availability. In particular, Linux/GNOME uses this to distinguish a
+    # current pixel capture from a fresh AX-only observation when the target
+    # lives on an inactive workspace.
+    meta: Dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
