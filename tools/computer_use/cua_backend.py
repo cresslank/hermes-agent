@@ -233,6 +233,25 @@ def _is_macos() -> bool:
     return sys.platform == "darwin"
 
 
+def _is_native_wayland() -> bool:
+    """Return whether input is being delivered through native Wayland."""
+    return sys.platform == "linux" and (
+        os.environ.get("XDG_SESSION_TYPE", "").lower() == "wayland"
+        or bool(os.environ.get("WAYLAND_DISPLAY"))
+    )
+
+
+_NATIVE_WAYLAND_INPUT_TOOLS = frozenset({
+    "click",
+    "double_click",
+    "drag",
+    "scroll",
+    "type_text",
+    "press_key",
+    "hotkey",
+})
+
+
 def cua_driver_binary_available() -> bool:
     """True if `cua-driver` is on $PATH or HERMES_CUA_DRIVER_CMD resolves."""
     return bool(shutil.which(_CUA_DRIVER_CMD))
@@ -1641,6 +1660,11 @@ class CuaDriverBackend(ComputerUseBackend):
         elif from_xy is not None and to_xy is not None:
             args["from_x"], args["from_y"] = int(from_xy[0]), int(from_xy[1])
             args["to_x"], args["to_y"] = int(to_xy[0]), int(to_xy[1])
+            # These fields were previously dropped for coordinate drags,
+            # even though they are part of the backend contract.
+            args["button"] = button
+            if modifiers:
+                args["modifier"] = modifiers
         else:
             return ActionResult(ok=False, action="drag",
                                 message="drag requires from_element/to_element or from_coordinate/to_coordinate.")
@@ -2078,6 +2102,19 @@ class CuaDriverBackend(ComputerUseBackend):
         args["element_token"] = token
 
     def _action(self, name: str, args: Dict[str, Any]) -> ActionResult:
+        if _is_native_wayland() and name in _NATIVE_WAYLAND_INPUT_TOOLS:
+            if self._active_window_id is None:
+                return ActionResult(
+                    ok=False,
+                    action=name,
+                    message=(
+                        f"No active window_id for native Wayland {name}; "
+                        "call capture() or focus_app() first."
+                    ),
+                )
+            args = dict(args)
+            args["window_id"] = self._active_window_id
+            args["delivery_mode"] = "foreground"
         # Attach the snapshot's element_token whenever the call carries
         # an element_index and the target tool advertises support.
         self._maybe_attach_element_token(name, args)
