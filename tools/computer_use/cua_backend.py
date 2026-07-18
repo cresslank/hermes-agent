@@ -1137,7 +1137,7 @@ def _ingest_windows(raw_windows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
             z_index = int(w.get("z_index") or 0)
         except (TypeError, ValueError):
             z_index = 0
-        windows.append({
+        record = {
             "app_name": str(w.get("app_name") or ""),
             "pid": pid_int,
             "window_id": window_id_int,
@@ -1152,7 +1152,13 @@ def _ingest_windows(raw_windows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
             "sticky": w.get("sticky"),
             "monitor": w.get("monitor"),
             "capture_current": w.get("capture_current", w.get("is_on_screen", True)),
-        })
+        }
+        identity_capabilities = w.get("identity_capabilities")
+        if isinstance(identity_capabilities, list):
+            record["identity_capabilities"] = [
+                value for value in identity_capabilities if isinstance(value, str)
+            ]
+        windows.append(record)
     return windows
 
 
@@ -1425,7 +1431,7 @@ class CuaDriverBackend(ComputerUseBackend):
             for key in (
                 "window_id", "native_window_id", "target_id", "helper_epoch",
                 "workspace_index", "workspace_active", "sticky", "monitor",
-                "capture_current",
+                "capture_current", "identity_capabilities",
             )
             if target.get(key) is not None
         }

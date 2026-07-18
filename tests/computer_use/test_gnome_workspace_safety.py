@@ -43,6 +43,11 @@ def _window(*, visible: bool = False) -> Dict[str, Any]:
         "sticky": False,
         "monitor": 1,
         "capture_current": visible,
+        "identity_capabilities": [
+            "exact-target-v2",
+            "foreground-revalidate-v1",
+            "unoccluded-target-v1",
+        ],
     }
 
 
@@ -95,6 +100,18 @@ def test_ingest_preserves_epoch_workspace_and_native_identity():
     assert window["workspace_index"] == 11
     assert window["monitor"] == 1
     assert window["capture_current"] is False
+    assert window["identity_capabilities"] == [
+        "exact-target-v2",
+        "foreground-revalidate-v1",
+        "unoccluded-target-v1",
+    ]
+
+
+def test_ingest_drops_non_string_identity_capabilities():
+    raw = _window()
+    raw["identity_capabilities"] = ["exact-target-v2", 7, None, "ok"]
+    [window] = _ingest_windows([raw])
+    assert window["identity_capabilities"] == ["exact-target-v2", "ok"]
 
 
 def test_inactive_workspace_som_returns_fresh_tree_without_requesting_pixels():
