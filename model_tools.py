@@ -1163,6 +1163,17 @@ def handle_function_call(
         except Exception as _mw_err:
             logger.debug("tool_request middleware error: %s", _mw_err)
 
+    _computer_use_context_token = None
+    if function_name == "computer_use":
+        try:
+            from tools.computer_use.tool import bind_run_backend_context
+            _computer_use_context_token = bind_run_backend_context(
+                task_id=task_id,
+                session_id=session_id,
+                tool_call_id=tool_call_id,
+            )
+        except Exception:
+            _computer_use_context_token = None
     try:
         if function_name in _AGENT_LOOP_TOOLS:
             return json.dumps({"error": f"{function_name} must be handled by the agent loop"})
@@ -1270,12 +1281,17 @@ def handle_function_call(
                     )
             else:
                 def _dispatch(next_args: Dict[str, Any]) -> Any:
-                    return registry.dispatch(
-                        function_name, next_args,
-                        task_id=task_id,
-                        session_id=session_id,
-                        user_task=user_task,
-                    )
+                    dispatch_kwargs = {
+                        "task_id": task_id,
+                        "session_id": session_id,
+                        "user_task": user_task,
+                    }
+                    # tool_call_id is deliberately threaded only to the
+                    # computer_use handler; many legacy handlers do not
+                    # accept arbitrary kwargs.
+                    if function_name == "computer_use":
+                        dispatch_kwargs["tool_call_id"] = tool_call_id
+                    return registry.dispatch(function_name, next_args, **dispatch_kwargs)
             from hermes_cli.middleware import run_tool_execution_middleware
 
             result = run_tool_execution_middleware(
@@ -1350,6 +1366,13 @@ def handle_function_call(
         error_msg = f"Error executing {function_name}: {str(e)}"
         logger.exception(error_msg)
         return json.dumps({"error": _sanitize_tool_error(error_msg)}, ensure_ascii=False)
+    finally:
+        if _computer_use_context_token is not None:
+            try:
+                from tools.computer_use.tool import reset_run_backend_context
+                reset_run_backend_context(_computer_use_context_token)
+            except Exception:
+                pass
 
 
 # =============================================================================

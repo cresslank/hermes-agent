@@ -63,8 +63,13 @@ class CaptureResult:
     # (cua-driver-rs emits `mimeType` on every image part as of
     # trycua/cua#1961 — Surface 7 of NousResearch/hermes-agent#47072).
     # When None, downstream consumers fall back to base64-prefix
-    # sniffing for back-compat with older drivers.
+    # sniffing for back-compat with older cua-driver builds.
     image_mime_type: Optional[str] = None
+    # Additive target/capture metadata.  GNOME-aware drivers use this to
+    # carry the exact target proof established in the same capture
+    # transaction.  Older drivers leave it empty and retain the historical
+    # response shape.
+    meta: Dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -202,7 +207,21 @@ class ComputerUseBackend(ABC):
 
     @abstractmethod
     def focus_app(self, app: str, raise_window: bool = False) -> ActionResult:
-        """Route input to `app` (by name or bundle ID). Default: focus without raise."""
+        """Select or focus an application/window target."""
+
+    def focus_exact(
+        self, pid: int, window_id: int, raise_window: bool = False,
+    ) -> ActionResult:
+        """Focus the established exact target when the backend supports it.
+
+        This additive hook deliberately has a typed default rather than
+        synthesizing an app-string lookup, which could select another
+        same-app window.
+        """
+        return ActionResult(
+            ok=False, action="focus_app", code="exact_target_unsupported",
+            message="backend cannot focus an exact target",
+        )
 
     # ── Native-value mutation ────────────────────────────────────────
     @abstractmethod
@@ -211,6 +230,37 @@ class ComputerUseBackend(ABC):
 
         `element` is the 1-based SOM index returned by a prior capture call.
         """
+
+    # ── Trusted target context (optional, additive) ─────────────────
+    #
+    # These hooks deliberately are not abstract: third-party/test backends
+    # predating the run-context contract remain instantiable, while Hermes
+    # can fail closed for native-capability detection when they are absent.
+    def get_target_proof(self) -> Optional[Dict[str, Any]]:
+        """Return the backend-established exact target proof, if any."""
+        return None
+
+    def get_snapshot_tokens(self) -> Dict[int, str]:
+        """Return the current snapshot's opaque element-token map."""
+        return {}
+
+    def recapture_exact(self, target_proof: Any, mode: str = "som") -> CaptureResult:
+        """Recapture the established target without retargeting.
+
+        Backends that cannot prove this operation should leave the default in
+        place; the Hermes run-context then returns a typed stale/unsupported
+        result instead of synthesising a pid/window capture call.
+        """
+        raise NotImplementedError("exact recapture is not supported by this backend")
+
+    def requires_incarnation_target_proof(self) -> bool:
+        """Whether privileged actions require helper-incarnation identity.
+
+        Most backends have an OS-native exact window handle.  Cua on native
+        Wayland must additionally bind the helper epoch, opaque target id and
+        exact-target capabilities so a reused pid/window pair cannot retarget.
+        """
+        return False
 
     # ── Timing ──────────────────────────────────────────────────────
     def wait(self, seconds: float) -> ActionResult:

@@ -1252,14 +1252,29 @@ def _ingest_windows(raw_windows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
             continue
         z_raw = w.get("z_index")
         z_index = z_raw if isinstance(z_raw, (int, float)) and not isinstance(z_raw, bool) else 0
-        windows.append({
+        normalized = {
             "app_name": w.get("app_name", ""),
             "pid": pid_int,
             "window_id": window_id_int,
             "off_screen": not w.get("is_on_screen", True),
             "title": w.get("title", ""),
             "z_index": z_index,
-        })
+        }
+        # Preserve identity fields when a GNOME/helper-aware driver supplies
+        # them.  Do not add absent optional keys: older callers/tests rely on
+        # the historical normalized window shape.
+        for key in (
+            "helper_epoch", "epoch", "target_id", "target_identity",
+            "native_window_id", "identity_capabilities", "capabilities",
+            "capability_manifest", "workspace", "workspace_id",
+            "workspace_index", "workspace_active", "monitor", "monitor_id",
+            "is_active", "capture_current", "transient_for_window_id",
+            "transient_for_target_id", "is_attached_dialog", "is_modal",
+            "window_type", "x", "y", "width", "height",
+        ):
+            if key in w:
+                normalized[key] = w[key]
+        windows.append(normalized)
     return windows
 
 
@@ -1279,7 +1294,7 @@ class CuaDriverBackend(ComputerUseBackend):
         self._last_app: Optional[str] = None  # last app name targeted via capture/focus_app
         # Exact identity for capture_after. App names may be generic on Linux
         # (for example, multiple unrelated Qt windows can say Qt6Application).
-        self._last_target: Optional[Dict[str, Optional[int]]] = None
+        self._last_target: Optional[Dict[str, Any]] = None
         # Surface 6 of NousResearch/hermes-agent#47072: per-snapshot
         # `element_index -> element_token` map populated on capture().
         # Action tools (click/scroll/set_value/...) attach the matching
@@ -1373,6 +1388,88 @@ class CuaDriverBackend(ComputerUseBackend):
         self._last_target = None
         self._snapshot_tokens = {}
 
+    def get_target_proof(self) -> Optional[Dict[str, Any]]:
+        """Return the immutable target identity currently selected by Cua."""
+        if self._last_target is not None:
+            return dict(self._last_target)
+        if self._active_pid is not None and self._active_window_id is not None:
+            return {"pid": self._active_pid, "window_id": self._active_window_id}
+        return None
+
+    def get_snapshot_tokens(self) -> Dict[int, str]:
+        return dict(self._snapshot_tokens)
+
+    def requires_incarnation_target_proof(self) -> bool:
+        return bool(sys.platform.startswith("linux") and os.environ.get("WAYLAND_DISPLAY"))
+
+    @staticmethod
+    def _target_records_match(expected: Dict[str, Any], actual: Dict[str, Any]) -> bool:
+        """Compare every proof field the established target made available."""
+        def normalize_scalar(value: Any) -> Any:
+            return None if value is None else str(value)
+
+        def normalize_caps(value: Any) -> Any:
+            if isinstance(value, dict):
+                return tuple(sorted(str(key) for key in value))
+            if isinstance(value, (list, tuple, set, frozenset)):
+                return tuple(sorted(str(item) for item in value))
+            return normalize_scalar(value)
+
+        aliases = {
+            "helper_epoch": ("helper_epoch", "epoch"),
+            "target_id": ("target_id", "target_identity"),
+            "workspace_id": ("workspace_id", "workspace"),
+            "monitor_id": ("monitor_id", "monitor"),
+        }
+        for key in ("pid", "window_id", "native_window_id"):
+            if key in expected and expected.get(key) != actual.get(key):
+                return False
+        for canonical, names in aliases.items():
+            if canonical in expected or any(name in expected for name in names):
+                expected_value = next((expected.get(name) for name in names if name in expected), None)
+                actual_value = next((actual.get(name) for name in names if name in actual), None)
+                if normalize_scalar(expected_value) != normalize_scalar(actual_value):
+                    return False
+        expected_caps = expected.get(
+            "identity_capabilities",
+            expected.get("capabilities", expected.get("capability_manifest")),
+        )
+        if any(key in expected for key in ("identity_capabilities", "capabilities", "capability_manifest")):
+            actual_caps = actual.get(
+                "identity_capabilities",
+                actual.get("capabilities", actual.get("capability_manifest")),
+            )
+            if normalize_caps(expected_caps) != normalize_caps(actual_caps):
+                return False
+        return True
+
+    def recapture_exact(self, target_proof: Any, mode: str = "som") -> CaptureResult:
+        """Recapture an established pid/window without app-name retargeting."""
+        if hasattr(target_proof, "as_dict"):
+            expected = dict(target_proof.as_dict())
+        elif isinstance(target_proof, dict):
+            expected = dict(target_proof)
+        else:
+            return self._failed_capture(mode, "stale_target: invalid target proof")
+        current = self.get_target_proof() or {}
+        if not self._target_records_match(expected, current):
+            return self._failed_capture(mode, "stale_target: target proof changed")
+        cap = self.capture(
+            mode=mode,
+            pid=expected.get("pid"),
+            window_id=expected.get("window_id"),
+        )
+        if cap.width <= 0 and not cap.png_b64 and not cap.elements:
+            return cap
+        # Compare against the fresh capture transaction before retaining any
+        # state.  Reinstalling the prior proof here would hide helper-epoch,
+        # workspace, or target-id drift behind a matching pid/window pair.
+        actual = self.get_target_proof() or {}
+        if not self._target_records_match(expected, actual):
+            return self._failed_capture(mode, "stale_target: recapture changed target identity")
+        cap.meta["target"] = dict(actual)
+        return cap
+
     def _failed_capture(self, mode: str, message: str = "") -> CaptureResult:
         """Return an empty capture after disarming any prior target context."""
         self._clear_active_target()
@@ -1385,6 +1482,7 @@ class CuaDriverBackend(ComputerUseBackend):
             app="",
             window_title=message,
             png_bytes_len=0,
+            meta={"code": "capture_failed", "message": message},
         )
 
     def _call_capture_tool(self, name: str, args: Dict[str, Any]) -> Dict[str, Any]:
@@ -1642,10 +1740,7 @@ class CuaDriverBackend(ComputerUseBackend):
         # the same app rather than falling back to the frontmost window.
         if app or not self._last_app:
             self._last_app = app_name
-        self._last_target = {
-            "pid": self._active_pid,
-            "window_id": self._active_window_id,
-        }
+        self._last_target = dict(target)
 
         # Step 2: capture.
         png_b64: Optional[str] = None
@@ -1854,6 +1949,7 @@ class CuaDriverBackend(ComputerUseBackend):
             window_title=window_title,
             png_bytes_len=png_bytes_len,
             image_mime_type=image_mime_type,
+            meta={"target": dict(self._last_target or {})},
         )
 
     # ── Pointer ────────────────────────────────────────────────────
@@ -2156,18 +2252,51 @@ class CuaDriverBackend(ComputerUseBackend):
             self._active_window_id = target["window_id"]
             self._snapshot_tokens = {}
             self._last_app = target["app_name"]  # retained for back-compat diagnostics
-            self._last_target = {
-                "pid": self._active_pid,
-                "window_id": self._active_window_id,
-            }
+            self._last_target = dict(target)
             return ActionResult(
                 ok=True, action="focus_app",
                 message=f"Targeted {target['app_name']} (pid {self._active_pid}, "
                         f"window {self._active_window_id}) without raising window.",
+                meta={"target": dict(self._last_target)},
             )
         self._clear_active_target()
         return ActionResult(ok=False, action="focus_app",
                             message=f"No on-screen window found for app '{app}'.")
+
+    def focus_exact(
+        self, pid: int, window_id: int, raise_window: bool = False,
+    ) -> ActionResult:
+        """Select the established window without an app-name re-match."""
+        try:
+            windows = self._load_windows()
+        except Exception:
+            self._clear_active_target()
+            raise
+        target = next(
+            (
+                window for window in windows
+                if window.get("pid") == int(pid)
+                and window.get("window_id") == int(window_id)
+            ),
+            None,
+        )
+        if target is None:
+            self._clear_active_target()
+            return ActionResult(
+                ok=False, action="focus_app", code="stale_target",
+                message=f"Exact target pid={pid}, window_id={window_id} is unavailable.",
+            )
+        self._active_pid = target["pid"]
+        self._active_window_id = target["window_id"]
+        self._snapshot_tokens = {}
+        self._last_app = target["app_name"]
+        self._last_target = dict(target)
+        return ActionResult(
+            ok=True, action="focus_app",
+            message=f"Targeted {target['app_name']} (pid {self._active_pid}, "
+                    f"window {self._active_window_id}) without app-name retargeting.",
+            meta={"target": dict(self._last_target)},
+        )
 
     # ── App lifecycle ────────────────────────────────────────────────
     #

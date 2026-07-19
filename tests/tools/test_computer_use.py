@@ -2249,6 +2249,11 @@ class TestCaptureAfterExactTarget:
     def test_dispatch_capture_after_reuses_metadata_resolved_identity(self, monkeypatch):
         from tools.computer_use import tool as computer_use_tool
 
+        # This fixture exercises the non-Wayland compatibility path.  Native
+        # Wayland intentionally requires helper-incarnation identity, covered
+        # by test_computer_use_run_context.py.
+        monkeypatch.delenv("WAYLAND_DISPLAY", raising=False)
+
         windows = [
             {"app_name": "Qt6Application", "pid": 100, "window_id": 1,
              "is_on_screen": True, "title": "Other Qt App", "z_index": 0},
