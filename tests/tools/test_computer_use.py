@@ -2390,7 +2390,7 @@ class TestCuaEnvironmentScrubbing:
             "At least one safe environment variable should be preserved"
 
 
-class TestClickButtonPassthrough:
+class TestPointerButtonPassthrough:
     """Surface 5 (NousResearch/hermes-agent#47072) — `middle_click` must
     actually reach cua-driver as a middle button, not silently degrade to
     left. Pre-fix, the backend's `click()` chose the tool by name
@@ -2399,7 +2399,8 @@ class TestClickButtonPassthrough:
     cua-driver. Post-fix, the backend always passes a normalised
     `button: "left"|"right"|"middle"` to cua-driver's `click` tool
     (trycua/cua#1961 click.button enum), and rejects unknown buttons
-    instead of silently mapping them.
+    instead of silently mapping them. Drag tests inspect the final MCP payload
+    to enforce the same lossless button and modifier mapping.
     """
 
     def _backend_with_active_target(self):
@@ -2478,6 +2479,44 @@ class TestClickButtonPassthrough:
         assert args["button"] == "right"
         assert args["x"] == 10 and args["y"] == 20
         assert args["window_id"] == 222
+
+    def test_coordinate_drag_preserves_button_and_modifiers(self):
+        backend = self._backend_with_active_target()
+        res = backend.drag(
+            from_xy=(10, 20),
+            to_xy=(30, 40),
+            button="right",
+            modifiers=["shift", "ctrl"],
+        )
+        assert res.ok
+        name, args = backend._session.call_tool.call_args.args
+        assert name == "drag"
+        assert args["button"] == "right"
+        assert args["modifier"] == ["shift", "ctrl"]
+
+    def test_element_drag_preserves_middle_button(self):
+        backend = self._backend_with_active_target()
+        res = backend.drag(from_element=5, to_element=7, button="middle")
+        assert res.ok
+        name, args = backend._session.call_tool.call_args.args
+        assert name == "drag"
+        assert args["button"] == "middle"
+        assert "modifier" not in args
+
+    def test_default_drag_keeps_legacy_payload_shape(self):
+        backend = self._backend_with_active_target()
+        res = backend.drag(from_xy=(10, 20), to_xy=(30, 40))
+        assert res.ok
+        _, args = backend._session.call_tool.call_args.args
+        assert "button" not in args
+        assert "modifier" not in args
+
+    def test_unknown_drag_button_rejected_no_tool_call(self):
+        backend = self._backend_with_active_target()
+        res = backend.drag(from_xy=(10, 20), to_xy=(30, 40), button="bogus")
+        assert not res.ok
+        assert "expected" in res.message.lower()
+        backend._session.call_tool.assert_not_called()
 
     def test_coordinate_drag_and_scroll_keep_the_captured_window(self):
         backend = self._backend_with_active_target()
