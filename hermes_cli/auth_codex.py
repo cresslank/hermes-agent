@@ -13,6 +13,7 @@ from __future__ import annotations
 import logging
 import hashlib
 import json
+import math
 import os
 import threading
 import time
@@ -516,6 +517,84 @@ def _codex_usage_probe_url(base_url: Optional[str]) -> str:
     return prefix + "/usage"
 
 
+_CODEX_RATE_LIMIT_REACHED_TYPES = frozenset({
+    "rate_limit_reached",
+    "workspace_owner_credits_depleted",
+    "workspace_member_credits_depleted",
+    "workspace_owner_usage_limit_reached",
+    "workspace_member_usage_limit_reached",
+})
+
+
+def _codex_usage_payload_quota_restored(payload: Any) -> Optional[bool]:
+    """Interpret the Codex ``/usage`` recovery fields conservatively.
+
+    Codex's generated ``RateLimitStatusPayload`` keeps purchased credits, spend control, and the
+    ordinary plan windows separate.  Its recovery predicate treats strict boolean
+    ``credits.unlimited || credits.has_credits`` as usable (``balance`` is an optional decimal
+    string for display), but never across an explicit spend-control/reached-type/upsell blocker.
+    """
+    if not isinstance(payload, dict):
+        return None
+
+    spend_control = payload.get("spend_control")
+    if spend_control is not None:
+        if not isinstance(spend_control, dict) or not isinstance(
+                spend_control.get("reached"), bool):
+            return None
+        if spend_control["reached"]:
+            return False
+
+    reached_type = payload.get("rate_limit_reached_type")
+    if reached_type is not None:
+        if not isinstance(reached_type, dict):
+            return None
+        kind = reached_type.get("type")
+        if kind in _CODEX_RATE_LIMIT_REACHED_TYPES:
+            return False
+        # A future or malformed non-null blocker is not evidence that cooldown can be cleared.
+        return None
+    if payload.get("rate_limit_upsell") is not None:
+        return False
+
+    rate_limit = payload.get("rate_limit")
+    if not isinstance(rate_limit, dict):
+        return None
+    worst_used: Optional[float] = None
+    for key in ("primary_window", "secondary_window"):
+        window = rate_limit.get(key)
+        if window is None:
+            continue
+        if not isinstance(window, dict):
+            return None
+        used = window.get("used_percent")
+        if used is None:
+            continue
+        if (not isinstance(used, (int, float)) or isinstance(used, bool)
+                or not math.isfinite(float(used)) or not 0.0 <= float(used) <= 100.0):
+            return None
+        worst_used = max(worst_used or 0.0, float(used))
+
+    # Preserve the existing healthy-window path.  ``allowed=false`` / ``limit_reached=true``
+    # describe exhausted included-plan usage and can legitimately coexist with paid credits.
+    if worst_used is not None and worst_used < 100.0:
+        return True
+
+    credits = payload.get("credits")
+    if credits is not None:
+        if not isinstance(credits, dict):
+            return None
+        has_credits, unlimited = credits.get("has_credits"), credits.get("unlimited")
+        if not isinstance(has_credits, bool) or not isinstance(unlimited, bool):
+            return None
+        balance = credits.get("balance")
+        if balance is not None and not isinstance(balance, str):
+            return None
+        if has_credits or unlimited:
+            return True if isinstance(rate_limit.get("allowed"), bool) else None
+    return False if worst_used is not None else None
+
+
 def _probe_codex_quota_restored(
     access_token: Any, *, base_url: Optional[str] = None,
     min_interval_seconds: float = CODEX_QUOTA_PROBE_MIN_INTERVAL_SECONDS) -> Optional[bool]:
@@ -552,14 +631,7 @@ def _probe_codex_quota_restored(
         with _codex_http_client(timeout=10.0) as client:
             response = client.get(_codex_usage_probe_url(base_url), headers=headers)
         if response.status_code == 200:
-            rate_limit = (response.json() or {}).get("rate_limit") or {}
-            worst_used: Optional[float] = None
-            for key in ("primary_window", "secondary_window"):
-                used = (rate_limit.get(key) or {}).get("used_percent")
-                if isinstance(used, (int, float)):
-                    worst_used = max(worst_used or 0.0, float(used))
-            if worst_used is not None:
-                result = worst_used < 100.0
+            result = _codex_usage_payload_quota_restored(response.json() or {})
         elif response.status_code == 429:
             result = False
     except Exception:

@@ -110,6 +110,98 @@ def _usage_payload(primary_used: float, secondary_used: float) -> dict:
 # ---------------------------------------------------------------------------
 
 
+def _probe_response(monkeypatch, payload, status_code=200):
+    _patch_httpx(monkeypatch, _StubResponse(status_code, payload))
+    token = _jwt({"exp": time.time() + 3600})
+    return _probe_codex_quota_restored(token, min_interval_seconds=0)
+
+
+def _exhausted_usage(**extra):
+    payload = {
+        "rate_limit": {
+            "allowed": False,
+            "limit_reached": True,
+            "primary_window": {"used_percent": 100.0},
+            "secondary_window": {"used_percent": 100.0},
+        },
+    }
+    payload.update(extra)
+    return payload
+
+
+def test_probe_preserves_healthy_window_and_exact_exhaustion_boundary(monkeypatch):
+    assert _probe_response(monkeypatch, _usage_payload(99.99, 20.0)) is True
+    assert _probe_response(monkeypatch, _usage_payload(100.0, 20.0)) is False
+
+
+def test_probe_recovers_exhausted_plan_with_confirmed_paid_credits(monkeypatch):
+    payload = _exhausted_usage(
+        credits={"has_credits": True, "unlimited": False, "balance": "12.345"},
+    )
+
+    # These describe exhausted included-plan usage; Codex permits the separate paid balance.
+    assert payload["rate_limit"]["allowed"] is False
+    assert payload["rate_limit"]["limit_reached"] is True
+    assert _probe_response(monkeypatch, payload) is True
+
+
+@pytest.mark.parametrize(
+    "credits, expected",
+    [
+        ({"has_credits": False, "unlimited": False, "balance": "0"}, False),
+        ({"has_credits": False, "unlimited": False, "balance": "10"}, False),
+        ({"has_credits": False, "unlimited": True, "balance": None}, True),
+        # Balance is optional/display-only in Codex's schema; the strict boolean is authoritative.
+        ({"has_credits": True, "unlimited": False, "balance": None}, True),
+        ({"has_credits": "true", "unlimited": False, "balance": "10"}, None),
+        ({"has_credits": True, "unlimited": "false", "balance": "10"}, None),
+        ({"has_credits": True, "unlimited": False, "balance": 10}, None),
+        ("malformed", None),
+    ],
+)
+def test_probe_credit_states_are_strict(credits, expected, monkeypatch):
+    assert _probe_response(monkeypatch, _exhausted_usage(credits=credits)) is expected
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        [],
+        {},
+        {"rate_limit": "malformed", "credits": {"has_credits": True, "unlimited": False}},
+        {"rate_limit": {"primary_window": {"used_percent": "unknown"}}},
+        {"rate_limit": {"primary_window": {"used_percent": float("nan")}}},
+        {"rate_limit": {"primary_window": {"used_percent": -1}}},
+        {
+            "rate_limit": {"primary_window": {"used_percent": 100}},
+            "credits": {"has_credits": True, "unlimited": False, "balance": "10"},
+        },
+        _exhausted_usage(rate_limit_reached_type={"type": "future_unknown_restriction"}),
+    ],
+)
+def test_probe_unknown_or_malformed_usage_is_not_recovery(payload, monkeypatch):
+    assert _probe_response(monkeypatch, payload) is None
+
+
+def test_probe_paid_credits_stop_at_explicit_restriction_boundary(monkeypatch):
+    credits = {"has_credits": True, "unlimited": False, "balance": "25.00"}
+    allowed = _exhausted_usage(credits=credits, spend_control={"reached": False})
+    blocked = _exhausted_usage(credits=credits, spend_control={"reached": True})
+    reached_type = _exhausted_usage(
+        credits=credits,
+        rate_limit_reached_type={"type": "workspace_member_usage_limit_reached"},
+    )
+    upsell = _exhausted_usage(credits=credits, rate_limit_upsell={"type": "buy_more"})
+
+    assert _probe_response(monkeypatch, allowed) is True
+    assert _probe_response(monkeypatch, blocked) is False
+    assert _probe_response(monkeypatch, reached_type) is False
+    assert _probe_response(monkeypatch, upsell) is False
+
+
+@pytest.mark.parametrize("status_code, expected", [(401, None), (403, None), (429, False), (500, None)])
+def test_probe_http_errors_never_confirm_recovery(status_code, expected, monkeypatch):
+    assert _probe_response(monkeypatch, {}, status_code) is expected
 
 
 def test_probe_sends_chatgpt_account_id_from_jwt(monkeypatch):
@@ -244,6 +336,31 @@ def test_resolver_recovers_when_probe_confirms_reset(tmp_path, monkeypatch):
     assert entry["last_error_reset_at"] is None
 
 
+def test_resolver_clears_cooldown_from_live_paid_credit_probe(tmp_path, monkeypatch):
+    hermes_home = tmp_path / "hermes"
+    store = _pool_only_rate_limited_store()
+    token = _jwt({"exp": time.time() + 3600})
+    store["credential_pool"]["openai-codex"][0]["access_token"] = token
+    _write_auth_store(hermes_home, store)
+    monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+    _patch_httpx(
+        monkeypatch,
+        _StubResponse(
+            200,
+            _exhausted_usage(
+                credits={"has_credits": True, "unlimited": False, "balance": "8.50"},
+            ),
+        ),
+    )
+
+    resolved = resolve_codex_runtime_credentials()
+
+    assert resolved["api_key"] == token
+    entry = json.loads((hermes_home / "auth.json").read_text())[
+        "credential_pool"
+    ]["openai-codex"][0]
+    assert entry["last_status"] is None
+    assert entry["last_error_reset_at"] is None
 
 
 # ---------------------------------------------------------------------------
