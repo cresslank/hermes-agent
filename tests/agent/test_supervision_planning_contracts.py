@@ -42,6 +42,10 @@ def ref(path, text, start=0, end=None):
 
 @pytest.fixture
 def planning(native, tmp_path, monkeypatch):
+    return make_planning(native, tmp_path, monkeypatch)
+
+
+def make_planning(native, tmp_path, monkeypatch, *, configure=None):
     from agent.owned_delegation import Consumer, OwnerGrant, install_owner, scoped_file_policy
     from tools.delegation_control_store import SQLiteControlStore
     from agent.tool_executor import _dispatch_authorized_once, _ManagedToolResult, _ToolCallRef, _finalize_tool_batch
@@ -58,6 +62,9 @@ def planning(native, tmp_path, monkeypatch):
     user = (f"- Maintain `{plan}` with `{goal}` and `{method}`.\n"
             f"- Assess `{source}` in a separate conversation, not continuing the parent transcript; native workspace guidance is allowed.\n"
             f"- Discretionary background research about `{source}` may be omitted; report uncertainty.")
+    goal_text, input_text, method_text = "Assess the supplied source and return its limitations.", "Synthetic source: a bounded background observation.\n", "Read the same local source for optional background."
+    if configure is not None:
+        user = configure(native, user, goal_text)
     rt = accept(a, user)
     with bind_subagent_parent(a):
         listing = json.loads(todo_tool([
@@ -69,12 +76,17 @@ def planning(native, tmp_path, monkeypatch):
     gap = ref(source_id, user, clauses[2]["start"], clauses[2]["end"])
     policy = scoped_file_policy((str(tmp_path),))
     gap_id = next(r.id for r in rt.requirements if r.start == gap["start"])
-    consumers = {k: Consumer(k, "optional", requirement_ids=(gap_id,)) for k in ("research", "parent:"+a.session_id)}
-    revision = [1]
-    owner = install_owner(a, store=SQLiteControlStore(lambda: sqlite3.connect(a._session_db.db_path)),
-        grant=OwnerGrant(str(native.rig.home), "fixture-supervisor", True, True),
-        consumer_resolver=consumers.get, policy=policy, revision_provider=lambda: tuple(revision),
-        consumer_inventory=lambda: tuple(consumers.values()))
+    consumers, revision = {}, [1]
+    if configure is None:
+        consumers = {k: Consumer(k, "optional", requirement_ids=(gap_id,)) for k in ("research", "parent:"+a.session_id)}
+        owner = install_owner(a, store=SQLiteControlStore(lambda: sqlite3.connect(a._session_db.db_path)),
+            grant=OwnerGrant(str(native.rig.home), "fixture-supervisor", True, True),
+            consumer_resolver=consumers.get, policy=policy, revision_provider=lambda: tuple(revision),
+            consumer_inventory=lambda: tuple(consumers.values()))
+    else:
+        from agent.owned_delegation import owner_of
+        owner = owner_of(a)
+        policy = owner._policy if owner else SimpleNamespace(policy_id="host.owned-parent-read.v1")
     native.rig.config["supervision"]["planning"] = {"allow_discretionary_readonly_labels": True}
     (native.rig.home / "config.yaml").write_text(json.dumps(native.rig.config))
     monkeypatch.setattr("agent.tool_executor._pre_tool_block", lambda agent, r: (None, r.args))
@@ -100,7 +112,6 @@ def planning(native, tmp_path, monkeypatch):
         if settle:
             _finalize_tool_batch(a, history, "default", 1, DEFAULT_BUDGET)
         return ident, result
-    goal_text, input_text, method_text = "Assess the supplied source and return its limitations.", "Synthetic source: a bounded background observation.\n", "Read the same local source for optional background."
     for path, text in [(goal,goal_text),(source,input_text),(method,method_text)]:
         _, result = call("write_file", {"path": str(path), "content": text})
         assert not json.loads(result).get("error")
@@ -113,13 +124,14 @@ def planning(native, tmp_path, monkeypatch):
         with bind_subagent_parent(a):
             return json.loads(todo_tool(store=a._todo_store))["work_map_sources"]["planning_records"]
     read_op = {"tool_name":"read_file", "arguments":{"path":str(source)}, "route_id":"native:read_file"}
-    req = dict(obligation="optional", consumer_refs=["research"], consumer_set_closed=True, effect_policy_id=policy.policy_id)
+    refs = ["research"] if configure is None else ["job:research"]
+    req = dict(obligation="optional", consumer_refs=refs, consumer_set_closed=True, effect_policy_id=policy.policy_id)
     delegation = dict(type="delegation_candidate",local_id="review",todo_id="candidate",parent_next_todo_id="parent",
         candidate_span=ref(goal,goal_text),acceptance_refs=[acceptance],input_refs=[ref(source,input_text)],dependency_todo_ids=[],
         required_resource_ref=acceptance, operation={"tool_name":"delegate_task","route_id":"native:delegate_task",
         "arguments":{"tasks":[{"goal":goal_text,"context":input_text,"supervision":req}]}})
     expansion = dict(type="optional_expansion",local_id="next",gap_refs=[gap],completion_criteria_refs=[gap],
-        source_method_ref=ref(method,method_text),operation=read_op,consumer_refs=["research"],effect_policy_id=policy.policy_id,obligation_request="optional")
+        source_method_ref=ref(method,method_text),operation=read_op,consumer_refs=refs,effect_policy_id=policy.policy_id,obligation_request="optional")
     def pass_commit(index, *, close=True):
         # Distinct real line-window operations; an unchanged dedup stub is not a
         # complete native source inventory and is tested separately as ineligible.
@@ -140,7 +152,7 @@ def planning(native, tmp_path, monkeypatch):
         return row
     return SimpleNamespace(native=native, a=a, rt=rt, call=call, commit=commit, inventory=inventory,
         history=history, delegation=delegation, expansion=expansion, pass_commit=pass_commit,
-        consumers=consumers, revision=revision, policy=policy, owner=owner, source=source, plan=plan)
+        consumers=consumers, revision=revision, policy=policy, owner=owner, source=source, plan=plan, user=user)
 
 
 def test_f05_commit_plugin_next_request_then_ordinary_launch(planning, monkeypatch):

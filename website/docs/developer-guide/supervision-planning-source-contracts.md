@@ -82,10 +82,15 @@ silently equated. Acceptance has 1–2 full accepted clauses; the resource refer
 must be one of them and explicitly contain the literal **separate conversation**.
 This narrow resource spelling is not a general prose intent classifier.
 
-Native `OwnedDelegationOwner.planning_preflight` shares `_launch_controls` with
-actual launch; it cannot construct children, resolve credentials, reserve slots,
-charge spawn budget or manufacture handles. Current profile/session, read-only
-policy, closed native consumer controls, exposed read/delegation tools, input
+Native `ConfiguredDelegationOwner.planning_preflight` resolves the exact accepted
+job/goal using the same `launch_resolution` and `_launch_controls` as actual
+launch. It binds the candidate operation (including context, request and native
+route), source pins and native revisions in its detached view. It reads under the
+runtime/registration/control fences, without filling the launch-only `resolving`
+map. It cannot construct children, resolve credentials, reserve slots, charge
+spawn budget or manufacture handles. The generic explicitly installed owner
+retains its trusted-host preflight API; it is not the configured inventory source.
+Current profile/session, read-only policy, closed native consumer controls, exposed read/delegation tools, input
 policy, remaining native iteration budget, depth, spawn pause and read-only
 one-shot budget checks all apply. Declared dependencies must be completed todos;
 unknown/unresolved parent dependencies veto. This is declared readiness, not proof
@@ -133,15 +138,60 @@ supervision:
     allow_discretionary_readonly_labels: true
 ```
 
-This flag is not a worker cancellation grant. The already installed native owner
-must also provide `install_owner(..., consumer_inventory=callback)`, returning a
-bounded tuple of the **entire current controlled Consumer set**. The proposed
-consumer refs plus the implicit parent must exactly match this positive inventory
-and the live resolver. The owner must control all consumers. Missing inventory,
-unknown/required obligations, result/effect/cleanup/corroboration requirements,
-unaccounted consumers, absent requirement links or a different linked gap scope
-veto. `Consumer.requires_corroboration` is explicit and also protects worker
-cancellation. Existing installers without the inventory retain baseline behavior.
+This flag is not a worker cancellation grant. Configured production preflight
+uses the accepted **whole-work census** below, not `install_owner`, the requested
+subset, a model's `consumer_set_closed`, or an inventory callback. Proposed refs
+must equal **all** declared job refs; the implicit native parent is their
+conservative obligation/requirement union. The complete inventory's requirement
+links must equal the named gaps (extra linked obligations veto too). Any
+unknown/required/result/effect/cleanup/corroboration/handoff consumer vetoes.
+Already owned work, attached native children, native live-subagent records and
+retained async records for the parent veto this minimum proposed-work census.
+Native inventory lock contention, missing ownership and inventories over 1024
+records abstain rather than assuming absence. No worker is adopted or cancelled.
+
+### Authenticated `hermes-owned-delegation-v2` census
+
+The original `hermes-owned-delegation-v1` input and `hermes-work-map-v1` grammar
+are unchanged. **v1 has no corroboration field and no whole-work completeness
+assertion**; its `Consumer` defaults do not authorize F08. v1 can still authorize
+its original launches and F05's non-stopping route advice.
+
+The additional v2 contract is accepted **only at authenticated input ingress**,
+not from plans, tool/web returns, copied user prose or ordinary model arguments.
+It is bounded to new, parent-only jobs in the current native work/instruction:
+
+- Exactly one `hermes-owned-delegation-v2` fenced JSON object in an authenticated
+  instruction of at most 8192 UTF-8 bytes. A mixed v1/v2 or repeated block grants
+  nothing. Duplicate/unknown keys, wrong types and incomplete rows reject all.
+- Envelope keys are exactly `version: 2`,
+  `inventory_scope: "current_work_parent_only"`, `complete: true`, and `jobs`.
+  `complete` explicitly declares the entire current-work consumer inventory,
+  **not just the caller's next proposed subset**. There are 1–4 unique jobs.
+- Each job has exactly `ref`, `goal`, `requirements`, `consumer_scope`,
+  `obligation`, `requires_result`, `requires_effects`, `requires_cleanup`,
+  `requires_handoff`, **and `requires_corroboration`**. Every `requires_*` field
+  must be an explicit JSON boolean; missing is not false. `consumer_scope` is
+  exactly `parent_only`; `obligation` is `required`, `optional` or `unknown`.
+- `ref` matches `job:[A-Za-z0-9_-]{1,64}`. Goal is a nonempty string of at most
+  240 characters. `requirements` contains 1–4 unique `{start, end}` integer
+  pairs resolving to whole accepted clauses in this same instruction. No source
+  identity, session, epoch or revision is accepted from the sender.
+- The existing configured owned-delegation policy must explicitly select
+  `consumer_contract: authenticated-parent-only.v2` (the other policy fields,
+  version, read roots and grants remain unchanged). A v1 policy does not opt in
+  to v2, nor does selecting v2 turn old declarations into complete inventories.
+- Ingress seals immutable records with the native instruction/work identity and
+  original source digest. Preflight rechecks this seal and enumerates all records
+  independently of requested refs. Every new authenticated instruction clears
+  the prior census, including an instruction without a replacement.
+
+The census describes consumer obligations, not source truth, evidence sufficiency,
+corroboration quality or F20 requirement completion. Multiple optional consumers
+can qualify only together with their complete, exact gap accounting. A main-agent
+annex cannot issue this contract or upgrade missing consumer facts. Generic hosts
+that explicitly install their own trusted resolver/inventory retain the existing
+API, but that extension is not evidence of configured-native coverage.
 
 Advice changes only `proposed -> advised`; the parent still decides. A later exact
 ordinary `withdraw_expansion` commit records `withdrawn_by_parent`. Neither advice

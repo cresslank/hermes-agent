@@ -282,6 +282,7 @@ class PlanningGraph:
         if (not isinstance(owner, OwnedDelegationOwner) or owner._grant.profile != self.rt.revision.profile
                 or "read_file" not in getattr(agent, "valid_tool_names", ())):
             return None
+        goal = ""
         if optional:
             config = load_config_readonly() or {}
             section = config.get("supervision", {}) if type(config) is dict else {}
@@ -302,7 +303,9 @@ class PlanningGraph:
                     or task["context"] != "\n".join(self.refs(d["input_refs"], 16))):
                 return None
             request = task["supervision"]
-        view = owner.planning_preflight(agent, request, require_inventory=optional)
+            goal = task["goal"]
+        view = owner.planning_preflight(agent, request, require_inventory=optional,
+            goal=goal, operation=d["operation"])
         if not view or not view["closed"]:
             return None
         if optional:
@@ -311,7 +314,7 @@ class PlanningGraph:
             linked = set(self.rt.action_requirements(d["operation"]["arguments"]))
             accounted = {i for c in view["consumers"] for i in c["requirement_ids"]}
             if (view["obligation"] != "optional" or not linked or not linked <= gaps
-                    or not gaps <= accounted or any(c["obligation"] != "optional" for c in view["consumers"])):
+                    or gaps != accounted or any(c["obligation"] != "optional" for c in view["consumers"])):
                 return None
             if not owner._policy.permits("read_file", d["operation"]["arguments"]):
                 return None

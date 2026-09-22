@@ -250,14 +250,14 @@ class OwnedDelegationOwner:
         if snapshot['cancel_requested'] or snapshot['settled']:
             raise ControlDenied('Child dispatch is sealed')
 
-    def _launch_controls(self, parent, request, ancestor=None):
+    def _launch_controls(self, parent, request, ancestor=None, *, resolver=None):
         refs = list(request['consumer_refs']) if request else []
         parent_ref = 'parent:' + str(getattr(parent, 'session_id', self.parent_session_id))
         if parent_ref not in refs:
             refs.append(parent_ref)
         consumers = []
         for ref in refs:
-            consumer = self._resolve(ref)
+            consumer = (self._resolve if resolver is None else resolver)(ref)
             if not isinstance(consumer, Consumer) or consumer.ref != ref:
                 consumer = Consumer(ref)
             consumers.append({**dataclasses.asdict(consumer), 'requirement_ids': list(consumer.requirement_ids)})
@@ -277,7 +277,7 @@ class OwnedDelegationOwner:
             raise ControlDenied('Nested work must inherit the read-only policy')
         return consumers, closed, obligation, restricted
 
-    def planning_preflight(self, parent, request, *, require_inventory=False):
+    def planning_preflight(self, parent, request, *, require_inventory=False, goal="", operation=None):
         """Observe the same launch restrictions, without constructing or reserving work."""
         request = validate_request(request)
         with self._lock:

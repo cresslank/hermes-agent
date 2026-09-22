@@ -6,7 +6,7 @@ work maps and todo prose cannot issue it. No persisted worker is adopted.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 import json
 from pathlib import Path
 import re
@@ -39,7 +39,11 @@ def accept_consumer_contracts(runtime, origin):
     a replacement contract. New contracts authorize NEW launches only.
     """
     from agent.supervision_context import _strict_object, is_accepted_origin
+    from agent.owned_delegation_planning import accept_inventory
     runtime.owned_consumer_contracts = {}
+    runtime.owned_planning_inventory = None
+    if accept_inventory(runtime, origin):
+        return
     if not is_accepted_origin(origin) or len(origin.text.encode("utf-8")) > 1200:
         return
     blocks = re.findall(r"(?m)^```hermes-owned-delegation-v1\n(.*?)^```\s*$", origin.text, re.S)
@@ -78,6 +82,7 @@ def accept_consumer_contracts(runtime, origin):
 
 
 def _policy(runtime, registration, *, deadline=None):
+    from agent.owned_delegation_planning import CONSUMERS_V2
     from hermes_cli.config_cached import current_config_readonly
     from hermes_constants import hermes_home_key
     if runtime.closed or hermes_home_key() != runtime.revision.profile or not registration.active:
@@ -96,7 +101,7 @@ def _policy(runtime, registration, *, deadline=None):
             or type(policy) is not dict
             or set(policy) != {"version", "allow_optional_readonly", "consumer_contract", "read_roots"}
             or policy["version"] != VERSION or policy["allow_optional_readonly"] is not True
-            or policy["consumer_contract"] != CONSUMERS
+            or policy["consumer_contract"] not in (CONSUMERS, CONSUMERS_V2)
             or type(policy["read_roots"]) is not list or not 1 <= len(policy["read_roots"]) <= 8
             or any(type(p) is not str or not Path(p).is_absolute() for p in policy["read_roots"])):
         return None
@@ -175,6 +180,10 @@ class ConfiguredDelegationOwner(OwnedDelegationOwner):
         with control_fence(self.runtime.lock, deadline), control_fence(self.registration.fence, deadline):
             return super().request_semantic_cancel(handle, **kwargs)
 
+    def planning_preflight(self, parent, request, *, require_inventory=False, goal="", operation=None):
+        from agent.owned_delegation_planning import planning_preflight
+        return planning_preflight(self, parent, request, require_inventory=require_inventory, goal=goal, operation=operation)
+
     def launch(self, parent, child, request=None, *, goal=""):
         request = validate_request(request)
         # Legacy launches remain genuinely legacy, including on an enabled host.
@@ -184,19 +193,10 @@ class ConfiguredDelegationOwner(OwnedDelegationOwner):
         with self.runtime.lock, self.registration.fence, self._lock:
             if not self.current():
                 raise ControlDenied("Configured owner authority unavailable")
-            record = None
-            if request and len(request["consumer_refs"]) == 1 and binding_of(parent) is None:
-                record = getattr(self.runtime, "owned_consumer_contracts", {}).get(request["consumer_refs"][0])
-            if (record is None or record.goal != goal or record.instruction_event != self.runtime.revision.instruction_event
-                    or record.work_id != self.runtime.revision.work_id):
-                # A request alone can narrow dispatch, never close unknown consumers.
-                self.resolving.clear()
-            else:
-                consumer = record.consumer
-                if record.requires_handoff:
-                    consumer = replace(consumer, obligation="required")
-                self.resolving.update({record.ref: consumer,
-                    "parent:" + self.parent_session_id: replace(consumer, ref="parent:" + self.parent_session_id)})
+            from agent.owned_delegation_planning import launch_resolution
+            record, resolved = launch_resolution(self, parent, request, goal)
+            self.resolving.clear()
+            self.resolving.update(resolved)
             try:
                 handle = super().launch(parent, child, request, goal=goal)
                 if record is not None and record.goal == goal:
