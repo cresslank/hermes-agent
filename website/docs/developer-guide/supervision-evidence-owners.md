@@ -91,6 +91,40 @@ settlement seam remains the sole receipt sink; no second durable store is added.
 Native consumption is not upstream success, source truth or whole-corpus coverage.
 LCM downstream fusion/diversity/coverage/computation validators remain authoritative.
 
+LCM rank selection remains pending through diversity, hydration, exact-reference
+validation, seen-ref filtering, response caps and serialization. Its effect digest
+is SHA-256 of the **exact UTF-8 serialized `lcm_recall` response** returned to the
+caller, not the fused candidate list. The selected winner must survive and the
+final delivered identity order/subset must differ from the ordinarily shaped
+baseline. Otherwise the owner vetoes the selection and returns that baseline.
+The common durable receipt records `consumed` only after acknowledgment succeeds;
+failed persistence never authorizes the optional view.
+
+## Exact history read boundary
+
+Request-local visibility includes model-visible content and structured tool-call
+arguments (including provider function-call items), but not hidden reasoning.
+`history_source_visibility(ref, excerpt)` reports exact-ref availability separately
+from source-text visibility. An already available handle stays on the ordinary
+`lcm_expand` path without a semantic recovery decision. Missing or oversized
+visibility remains unknown, not evidence of absence.
+
+`history_read_fence=supervision.history-read.v1` advertises the host-owner
+`begin_history_expansion(selection)` context manager. Only the bound LCM execution
+owner may enter it, once per selected receipt, around its existing single bounded
+local `lcm_expand` call. It accepts no executable callback, search, command, new
+scope, or deadline. Entry revalidates the exact selection under the runtime
+revision lock and granting registration fence; both remain held through the local
+read and serialize instruction admission and registration revocation. Never put
+provider HTTP or waiting inside this lease. After leaving it, the LCM owner still
+checks bytes, role, session, lineage, offsets, current source row and the original
+deadline before acknowledgment. Selection or lease acquisition alone is not
+consumption; an expansion cannot acknowledge without a read lease.
+
+`test_supervision_lcm_consumption.py` exercises these boundaries with ordinary
+recall/grep, real request assembly, the full provider registry/MockTransport and
+independent reads of real SessionDB receipts.
+
 ## Configured typed MCP results
 
 `supervision.mcp-results.v1` registers a pure plugin-side typed result projection.

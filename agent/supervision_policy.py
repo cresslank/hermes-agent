@@ -118,6 +118,7 @@ class SupervisionRuntime:
         self._native_verification_requests = {}
         self.receipts = OrderedDict()
         self.owner_selections = {}
+        self.owner_reads = set()
         self.history_visibility = None
         self.incidents = set()
         self.opportunities = OrderedDict()
@@ -793,6 +794,7 @@ class SupervisionRuntime:
         for proposal, _, _ in self.owner_selections.values():
             self._settle(proposal, "rejected", "owner_unacknowledged")
         self.owner_selections.clear()
+        self.owner_reads.clear()
 
     def acknowledge_owner(self, target_id, receipt_id, candidate_ids, effect_digest):
         """Owner postvalidation, not the judge, acknowledges an exact consumed view.
@@ -809,12 +811,14 @@ class SupervisionRuntime:
             if tuple(candidate_ids) != ids:
                 return None
             self.owner_selections.pop(receipt_id)
+            read_started = receipt_id in self.owner_reads
+            self.owner_reads.discard(receipt_id)
             from agent.supervision_mcp import consumption_fence
             with registration.fence, consumption_fence(self.opportunities.get(target_id)):
                 failure = self._validate(proposal, registration, acknowledging=True)
                 if failure:
                     return self._settle(proposal, *failure)
-                if effect_digest is None:
+                if effect_digest is None or (proposal.action == Action.EXPAND_ONE_OWNED_REF and not read_started):
                     return self._settle(proposal, "rejected", "owner_postvalidation")
                 self.incidents.add(proposal.incident_id)
                 return self._settle(proposal, "applied", "owner_consumed:" + effect_digest)

@@ -73,6 +73,7 @@ class SupervisionFacade:
                         "owner_capabilities": self._owner_capabilities() if version == VERSION else [],
                         "owner_deadline": True,
                         "exact_expansion": "supervision.exact-expansion.v1",
+                        "history_read_fence": "supervision.history-read.v1",
                         "owner_consumption": "supervision.owner-consumption.v1",
                         "mcp_results": "supervision.mcp-results.v1",
                         "grants": sorted(self._registration.grants) if self._registration and self._registration.active else [],
@@ -302,6 +303,20 @@ class SupervisionFacade:
         receipt = runtime.acknowledge_owner(owner + ":" + acknowledgment["request_id"],
             acknowledgment["receipt_id"], acknowledgment["candidate_ids"], digest)
         return project(receipt) if receipt else None
+
+    def begin_history_expansion(self, selection):
+        from agent.supervision_history_read import begin_history_expansion
+        return begin_history_expansion(self, selection)
+
+    def history_source_visibility(self, ref, excerpt):
+        if self._context.plugin_id != "hermes-lcm":
+            return None
+        runtime = self._active_runtime()
+        if runtime is None or runtime.revision.profile != self._context._manager.scope_key:
+            return None
+        runtime._assert_owner(tool_worker=True)
+        from agent.supervision_history import source_visibility
+        return source_visibility(runtime, ref, excerpt)
 
     def history_source_absent(self, ref, excerpt):
         if self._context.plugin_id != "hermes-lcm":

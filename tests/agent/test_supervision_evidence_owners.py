@@ -263,7 +263,9 @@ def test_f14_native_rank_preserves_every_object_score_and_tail(vertical):
     actual, status = _lcm_recall_rerank(None, "Claim", incoming, window=8, deadline=v.runtime.clock() + 1,
                                       config=v.engine._config, supervision=v.engine.supervision, engine=v.engine,
                                       scope={"session_scope": "all"})
-    assert status == "applied" and actual[0] is incoming[7]
+    assert status == "selected" and actual[0] is incoming[7]
+    assert all(r.status == "accepted" and r.reason == "owner_selected"
+               for r in v.runtime.receipts.values())
     assert actual[8:] == incoming[8:]
     assert len(actual) == len(incoming)
     assert all(any(item is original for original in incoming) for item in actual)
