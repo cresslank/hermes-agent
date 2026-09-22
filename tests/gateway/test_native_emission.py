@@ -1,7 +1,6 @@
 """Real Gateway callers and Telegram formatting/splitting/edit owners over loopback."""
 import asyncio
 from contextlib import asynccontextmanager
-import hashlib
 import json
 from types import SimpleNamespace
 
@@ -9,7 +8,7 @@ import pytest
 
 from agent.native_emission import EmissionIdentity, NativeEmissionScope, complete_exact_batch
 from gateway.config import PlatformConfig, Platform
-from gateway.platforms.base import MessageEvent, SendResult
+from gateway.platforms.base import MessageEvent
 from gateway.session import SessionSource
 from gateway.stream_consumer import GatewayStreamConsumer, StreamConsumerConfig
 from plugins.platforms.telegram.adapter import TelegramAdapter
