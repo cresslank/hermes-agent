@@ -207,13 +207,17 @@ def test_progress_or_changed_target_cannot_become_loop(native):
 def build_child(native, monkeypatch, tmp_path):
     from agent.owned_delegation import Consumer, OwnerGrant, install_owner, scoped_file_policy
     from tools.delegation_control_store import SQLiteControlStore
-    from tests.agent.test_owned_delegation_bridge import Child, DDL
+    from tests.agent.test_owned_delegation_bridge import Child
+    from hermes_state import SessionDB
     from tools import delegate_tool as dt
     db = tmp_path / "control.db"
-    with sqlite3.connect(db) as conn:
-        conn.executescript(DDL)
-    store = SQLiteControlStore(lambda: sqlite3.connect(db))
     parent = native.rig.agent
+    session_db = SessionDB(db)
+    try:
+        session_db.create_session(parent.session_id, "cli")
+    finally:
+        session_db.close()
+    store = SQLiteControlStore(lambda: sqlite3.connect(db))
     policy = scoped_file_policy((str(tmp_path),))
     consumers = {"parent:" + parent.session_id: Consumer("parent:" + parent.session_id, "optional"),
                  "research": Consumer("research", "optional")}
