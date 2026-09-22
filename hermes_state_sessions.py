@@ -771,6 +771,26 @@ class SessionSessionsMixin:
         """Persisted YOLO flag; False on any parse failure (resume must never enable the bypass)."""
         return bool(_parse_model_config((session_meta or {}).get("model_config")).get("yolo_mode"))
 
+    def control_generation_available(self, *, deadline=None):
+        """Pure, non-adopting generation check for optional control connections.
+
+        Unlike the ordinary writer detector, unknown WAL identity is a denial,
+        not permission to inspect descriptors, capture, repair or adopt sidecars.
+        A replaced sidecar must fence controls before any writer sets the sticky
+        loss flag. Recheck this at transaction admission AND before commit.
+        """
+        from hermes_state_common import stat_db_file_identity
+        recorded = self._db_sidecar_identity or {}
+        if (self._wal_active and any(recorded.get(s) is None for s in ("-wal", "-shm"))):
+            return False
+        return ((deadline is None or time.monotonic() < deadline)
+                and self.read_only is False and self._conn is not None
+                and not self._read_conns_closed and not self._db_replaced
+                and not self._db_wal_generation_lost and self._db_file_identity is not None
+                and stat_db_file_identity(self.db_path) == self._db_file_identity
+                and all(ident is not None and stat_db_file_identity(str(self.db_path) + suffix) == ident
+                        for suffix, ident in recorded.items()))
+
     def control_session_generation(self, session_id: str, *, deadline=None, connection=None):
         """Current active membership for optional controls, never an accounting read.
 
@@ -780,13 +800,8 @@ class SessionSessionsMixin:
         No schema, repairs, token flushes or second authority store belong here.
         """
         from hermes_cli.sqlite_safe_read import _live_lock
-        from hermes_state_common import stat_db_file_identity
         def available():
-            return ((deadline is None or time.monotonic() < deadline)
-                    and self.read_only is False and self._conn is not None
-                    and not self._read_conns_closed and not self._db_replaced
-                    and not self._db_wal_generation_lost and self._db_file_identity is not None
-                    and stat_db_file_identity(self.db_path) == self._db_file_identity)
+            return self.control_generation_available(deadline=deadline)
         # The ordinary tracked opener/closer holds this registry mutex. Take it
         # without waiting and retain it through close so cleanup cannot outwait
         # the action. Inspect application_id through SQL, not the raw-header

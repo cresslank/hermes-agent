@@ -208,6 +208,10 @@ class _Live:
     snapshot: dict
     parent_child_id: str | None = None
     milestone_pending: bool = False
+    completed_dispatches: set[str] = dataclasses.field(default_factory=set)
+    completed_handoffs: set[str] = dataclasses.field(default_factory=set)
+    finish_pending: bool = False
+    finalization_failed: bool = False
 
 
 class OwnedDelegationOwner:
@@ -223,14 +227,19 @@ class OwnedDelegationOwner:
         self._lock = threading.RLock()
         self._live: dict[str, _Live] = {}
 
-    def _commit(self, live, change, *, deadline=None):
+    def _commit(self, live, change, *, deadline=None, finalizer=False):
+        if live.finalization_failed:
+            raise ControlDenied('Owned lifecycle outcome is unknown')
         old = live.snapshot
         new = copy.deepcopy(old)
         change(new)
         if new.get('candidate') is None:
             new['semantic_observation'] = None
         new['control_revision'] = old['control_revision'] + 1
-        if deadline is None:
+        if finalizer:
+            commit = getattr(self._store, 'compare_and_swap_finalizer', self._store.compare_and_swap)
+            commit(new, old['control_revision'])
+        elif deadline is None:
             self._store.compare_and_swap(new, old['control_revision'])
         else:
             self._store.compare_and_swap(new, old['control_revision'], deadline=deadline)
@@ -336,7 +345,7 @@ class OwnedDelegationOwner:
                         effect_contracts={c.tool_name: c.version for c in self._policy.contracts} if restricted else {},
                         effect_class='read_only' if restricted else 'unknown', cancel_requested=False,
                         settled=False, worker_finished=False, processes_stopped=False, effects_reconciled=False,
-                        inflight=0, handoffs=[], cleanup_pending=False, candidate=None, receipts={},
+                        inflight=0, dispatches={}, handoffs=[], cleanup_pending=False, candidate=None, receipts={},
                         objective=str(goal)[:16000], latest_milestone='',
                         semantic_observation=None, priority=0)
             if ancestor:
@@ -345,7 +354,8 @@ class OwnedDelegationOwner:
                 self._store.create(snap)
             except BaseException:
                 if ancestor:
-                    self._commit(ancestor, lambda s: s['handoffs'].remove(child_id))
+                    ancestor.completed_handoffs.add(child_id)
+                    self._recover_lifecycle(ancestor)
                 raise
             live = _Live(handle, child, snap, ancestor.handle.child_id if ancestor else None)
             self._live[child_id] = live
@@ -371,7 +381,22 @@ class OwnedDelegationOwner:
 
     def status(self, handle):
         with self._lock:
-            return copy.deepcopy(self._get(handle).snapshot)
+            live = self._get(handle)
+            self._recover_lifecycle(live)
+            return copy.deepcopy(live.snapshot)
+
+    def reconcile_lifecycle(self, handle):
+        """Retry only observed native exits/finish; never replay work or adopt it.
+
+        Status and finish also drive this bounded, nonwaiting recovery path.
+        Process loss loses these facts: persisted inflight work stays unknown.
+        """
+        with self._lock:
+            return self._recover_lifecycle(self._get(handle))
+
+    def _recover_lifecycle(self, live):
+        from agent.owned_delegation_finalizers import recover_lifecycle
+        return recover_lifecycle(self, live)
 
     def record_progress(self, handle, milestone: str):
         """Bounded owner-produced observation; never grants contribution authority."""
@@ -453,7 +478,14 @@ class OwnedDelegationOwner:
                         raise ControlDenied('Read-only children may only use owned nested spawn')
                 elif not self._policy.permits(name, args):
                     raise ControlDenied('Tool/parameters are outside the versioned read-only policy')
+            self._recover_lifecycle(live)
+            # Do not accumulate an unbounded recovery queue behind a writer.
+            if (live.finish_pending or live.snapshot['worker_finished'] or live.completed_dispatches
+                    or len(live.snapshot['dispatches']) >= 256):
+                raise ControlDenied('Owned dispatch accounting is pending')
+            dispatch_id = secrets.token_hex(16)
             def begin(s):
+                s['dispatches'][dispatch_id] = name == 'delegate_task'
                 s['inflight'] += 1
                 s['latest_dispatch'] = name[:1000]
                 if name == 'delegate_task':
@@ -464,12 +496,10 @@ class OwnedDelegationOwner:
             yield
         finally:
             with self._lock:
-                def end(s):
-                    s['inflight'] -= 1
-                    if name == 'delegate_task':
-                        s['handoffs'].remove('dispatch:nested')
-                    self._settle(s)
-                self._commit(live, end)
+                # The body really exited. Retain this exact fact until CAS
+                # commits, so cleanup contention cannot overwrite its result.
+                live.completed_dispatches.add(dispatch_id)
+                self._recover_lifecycle(live)
                 notify = live.milestone_pending and live.snapshot['inflight'] == 0
                 if notify:
                     live.milestone_pending = False
@@ -488,19 +518,8 @@ class OwnedDelegationOwner:
     def finish(self, handle, *, worker_finished=True):
         with self._lock:
             live = self._get(handle)
-            def change(s):
-                s['worker_finished'] = s['worker_finished'] or worker_finished
-                self._settle(s)
-            self._commit(live, change)
-            if live.snapshot['settled'] and live.parent_child_id:
-                ancestor = self._live[live.parent_child_id]
-                def detach(s):
-                    if handle.child_id in s['handoffs']:
-                        s['handoffs'].remove(handle.child_id)
-                    self._settle(s)
-                self._commit(ancestor, detach)
-            if live.snapshot['settled']:
-                live.child = None
+            live.finish_pending = live.finish_pending or worker_finished
+            self._recover_lifecycle(live)
 
     def reconcile(self, handle, *, expected_revision, processes_stopped, effects_reconciled, completed_handoff=None):
         """Host cleanup owner only; never exposed as a supervisor proposal action."""

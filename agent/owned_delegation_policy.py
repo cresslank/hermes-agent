@@ -135,21 +135,28 @@ class ConfiguredDelegationOwner(OwnedDelegationOwner):
         # Bind to the supplied canonical SessionDB, never ambient async state or
         # a new DB. mode=rw cannot recreate a deleted profile/session database.
         def connect():
-            from hermes_state_common import stat_db_file_identity
-            if stat_db_file_identity(path) != db._db_file_identity:
+            if not db.control_generation_available():
                 raise ControlDenied("Configured owner database generation changed")
             # Optional controls run under the instruction/revocation fences.
-            # Every write must fail closed on contention, never start a 5s wait.
+            # Never start a 5s wait. Mandatory exits retain authentic completion
+            # facts for the owner's separate nonwaiting reconciliation path.
             conn = sqlite3.connect(path.as_uri() + "?mode=rw", uri=True, timeout=0)
             conn.execute("PRAGMA foreign_keys=ON")
             return conn
         file_policy = scoped_file_policy(tuple(json.loads(policy_pin)["read_roots"]))
         policy = ReadOnlyPolicy("host.owned-parent-read.v1", (*file_policy.contracts,
             CapabilityContract("todo_list", "child-plan.v1", _plan_args)))
-        super().__init__(parent_session_id=str(runtime.agent().session_id), store=SQLiteControlStore(connect, authorize=self.current, wait_for_writer=False),
+        super().__init__(parent_session_id=str(runtime.agent().session_id), store=SQLiteControlStore(connect, authorize=self.current,
+                lifecycle_authorize=self.storage_current, wait_for_writer=False),
             grant=OwnerGrant(runtime.revision.profile, registration.plugin_id, True, True),
             consumer_resolver=self.resolving.get, policy=policy,
             revision_provider=lambda: (runtime.revision.instruction_event, runtime.revision.requirements, runtime.revision.evidence))
+
+    def storage_current(self, *, connection=None):
+        # Cleanup outlives config/registration revocation, but never its original
+        # database/session generation. This grants no semantic or launch rights.
+        return self.db.control_session_generation(self.parent_session_id,
+            connection=connection) == self.session_generation
 
     def current(self, *, deadline=None, connection=None):
         agent = self.runtime.agent()

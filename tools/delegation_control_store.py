@@ -21,12 +21,13 @@ class ControlDeadlineExpired(ValueError):
 
 class SQLiteControlStore:
     def __init__(self, connect: Callable | None = None, *, authorize: Callable | None = None,
-                 wait_for_writer: bool = True):
+                 wait_for_writer: bool = True, lifecycle_authorize: Callable | None = None):
         if connect is None:
             from tools.async_delegation import _connect
             connect = _connect
         self._connect = connect
         self._authorize = authorize
+        self._lifecycle_authorize = lifecycle_authorize
         self._wait_for_writer = wait_for_writer
 
     def _budget(self, conn, deadline):
@@ -57,23 +58,39 @@ class SQLiteControlStore:
                     (snapshot['child_id'], snapshot['parent_session_id'], snapshot['generation'],
                      snapshot['control_revision'], json.dumps(snapshot, sort_keys=True), time.time()),
                 )
+                self._authority(conn)
         finally:
             conn.close()
 
+    def compare_and_swap_finalizer(self, snapshot: dict, expected_revision: int) -> None:
+        # One nonwaiting mandatory-accounting attempt, not a renewed semantic
+        # action budget. The live owner retains completed facts on SQLITE_BUSY.
+        self._compare_and_swap(snapshot, expected_revision, lifecycle=True)
+
     def compare_and_swap(self, snapshot: dict, expected_revision: int, *, deadline: float | None = None) -> None:
+        self._compare_and_swap(snapshot, expected_revision, deadline=deadline)
+
+    def _compare_and_swap(self, snapshot, expected_revision, *, deadline=None, lifecycle=False):
+        def authority(conn):
+            if lifecycle or deadline is None:
+                if self._lifecycle_authorize is not None and not self._lifecycle_authorize(connection=conn):
+                    raise ControlConflict('Delegation storage generation unavailable')
+            elif deadline is not None:
+                self._authority(conn, deadline)
+
         if snapshot['control_revision'] != expected_revision + 1:
             raise ControlConflict('Control revisions must advance exactly once')
         conn = self._connect()
         try:
             with conn:
+                if lifecycle:
+                    conn.execute('PRAGMA busy_timeout=0')
                 self._budget(conn, deadline)
                 conn.execute('BEGIN IMMEDIATE')
                 self._budget(conn, deadline)
-                if deadline is not None:
-                    # Recheck session membership after contention, in the very
-                    # transaction that will publish the semantic control effect.
-                    self._authority(conn, deadline)
-                    self._budget(conn, deadline)
+                # Recheck in the very transaction that publishes the effect.
+                authority(conn)
+                self._budget(conn, deadline)
                 result = conn.execute(
                     "UPDATE delegation_controls SET control_revision=?,snapshot_json=?,updated_at=? "
                     "WHERE child_id=? AND parent_session_id=? AND generation=? AND control_revision=?",
@@ -82,8 +99,7 @@ class SQLiteControlStore:
                 )
                 if result.rowcount != 1:
                     raise ControlConflict('Stale delegation control revision')
-                if deadline is not None:
-                    self._authority(conn, deadline)
+                authority(conn)
                 # Commit may itself wait in rollback-journal mode. It gets only
                 # what remains, never the earlier BEGIN's full busy timeout.
                 self._budget(conn, deadline)
