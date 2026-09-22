@@ -383,15 +383,22 @@ class NativeViewsBinding:
         task = self._task()
         if not task or not f.get('source_ref'):
             return None
+        source = self.views.result_source(f['source_ref'], scope=request['scope'], revision=request['revision'])
+        if source is None or request['scope'] != scope_key(self.runtime):
+            return None
         rows = [{**b, 'text': b['excerpt'], 'neighbors_complete': True} for b in f['candidates']]
         ids = tuple(b['id'] for b in rows)
         facts = dict(question=task[1], source_ref=f['source_ref'], oversized=True, structured=True,
             source_immutable=True, critical_fields_complete=True, mandatory_ids=f['required_ids'],
             baseline_ids=ids, candidates=rows, omitted_count=0)
+        def validate(p):
+            if (self.views.result_source(f['source_ref'], scope=request['scope'], revision=request['revision']) is not source or
+                    p.evidence_refs != (f['source_ref'],) or p.metadata.get('source_ref') != f['source_ref']):
+                return None
+            return self._selection(p, 'F16', ids, f['required_ids'])
         return self._request('oversized_structured_result', facts, action=Action.SELECT_WINDOWS,
             refs=(f['source_ref'],), candidates=ids, required=f['required_ids'],
-            revision=request['revision'], deadline=request['deadline'],
-            validate=lambda p: self._selection(p, 'F16', ids, f['required_ids']))
+            revision=request['revision'], deadline=request['deadline'], validate=validate)
 
     def rank_candidates(self, request):
         return None  # Evidence ranking belongs to the evidence owner, not this adapter.

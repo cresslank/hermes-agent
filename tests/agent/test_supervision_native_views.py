@@ -97,7 +97,9 @@ def native(tmp_path, monkeypatch, request):
             monkeypatch.setattr(logger, field, getattr(logger, field))
     probe_before = getattr(sys.modules.get('tools.env_probe'), '_PROBE_THREAD', None)
     home = tmp_path / 'home'
-    home.mkdir()
+    if getattr(request, 'param', None) == 'long':
+        home = home / ('long-archive-path-' + 'x' * 100)
+    home.mkdir(parents=True)
     monkeypatch.setenv('HERMES_HOME', str(home))
     fields = '''target_id operation_ref operation contract ambiguous explicit_tool deterministic_route candidates
     mandatory_ids discovery_ids task_ref task rule_scope mandatory_match stage question source_ref oversized structured
@@ -114,7 +116,7 @@ def native(tmp_path, monkeypatch, request):
     manager = PluginManager(scope_key=str(home))
     facade = PluginContext(PluginManifest(name='fixture-views'), manager).supervision
     calls = []
-    mode = {'relation': 'progress_only'}
+    mode: dict = {'relation': 'progress_only'}
     async def handle(request):
         assert request.url == 'https://api.typesafe.ai/v1/systemone'
         body = json.loads(request.content)
@@ -123,7 +125,14 @@ def native(tmp_path, monkeypatch, request):
         calls.append((body, threading.current_thread().name))
         facts = body['state']['facts']
         if 'source_ref' in facts:
-            assert Path(facts['source_ref']).is_file(), 'archive must predate inference'
+            # Resolve the actual host-owned binding, not a plugin filesystem path.
+            owner = getattr(agent, '_supervision_views')
+            source = owner._result_sources[facts['source_ref']]
+            assert owner.result_source(facts['source_ref'], scope=source.scope, revision=source.revision) is source
+            assert Path(source.path).read_bytes() == source.original.encode('utf-8'), 'exact archive must predate inference'
+            assert owner.result_source(facts['source_ref'], scope='foreign', revision=source.revision) is None
+            assert owner.result_source(facts['source_ref'], scope=source.scope, revision='stale') is None
+            mode.setdefault('archives', []).append(source)
         answers = {}
         first = next(iter(body['questions'].values()))
         for key, q in body['questions'].items():
@@ -356,11 +365,86 @@ def test_skill_hint_requires_ready_proposal_over_served_ids(native, monkeypatch,
     assert any(r.reason == 'skill_details_required' for r in native.runtime.receipts.values())
 
 
+def result_archive_text():
+    return json.dumps({'output': ''.join('answer '+str(i)+' é'+('x'*179)+'\n' for i in range(22)) +
+                      'WARNING partial result; cleanup not run\n',
+                      'exit_code': 2, 'receipts': [{'status': 'not_run', 'mutation': 'none'}]}, ensure_ascii=False)
+
+
+def commit_result(native, raw, call_id):
+    a = native.agent
+    a.tools = _make_tool_defs('execute_code')
+    assistant = SimpleNamespace(content='', tool_calls=[_mock_tool_call(name='execute_code', call_id=call_id,
+        arguments=json.dumps({'code': call_id}))])
+    messages = []
+    with patch('model_tools.handle_function_call', return_value=raw):
+        a._execute_tool_calls_sequential(assistant, messages, 'task')
+    content = next(m['content'] for m in messages if m.get('role') == 'tool')
+    return json.JSONDecoder().raw_decode(content[content.index('{'):])[0]
+
+
+@pytest.mark.parametrize('native', ['short', 'long'], indirect=True)
+@pytest.mark.parametrize('case', ['wrong_evidence', 'wrong_metadata', 'stale_ref', 'overlong',
+                                  'profile', 'owner', 'revision', 'reset', 'expired', 'unload', 'no_op'])
+def test_result_reference_binding_rejects_wrong_or_stale_native_proposals(native, monkeypatch, case):
+    native.accept('Locate the answer in the report.')
+    raw = result_archive_text()
+    stale_ref = None
+    if case == 'stale_ref':
+        assert 'supervision_view' in commit_result(native, raw, 'previous-result')
+        stale_ref = native.calls[-1][0]['state']['facts']['source_ref']
+        assert not native.agent._supervision_views._result_sources
+        native.accept('Locate the answer in the report again.')
+    submit, replies, proposals = native.facade.submit, [], []
+    def changed(proposal):
+        proposal = copy.deepcopy(proposal)
+        if proposal['feature_id'] == 'F16':
+            proposals.append(proposal)
+            if case in ('wrong_evidence', 'stale_ref', 'overlong'):
+                proposal['evidence_refs'] = [stale_ref if case == 'stale_ref' else 'x' * 257 if case == 'overlong' else 'result:unknown']
+            if case in ('wrong_metadata', 'stale_ref'):
+                proposal['metadata']['source_ref'] = stale_ref or 'result:unknown'
+            if case == 'profile':
+                proposal['expected']['profile'] += '-foreign'
+            if case == 'owner':
+                proposal['owner'] = 'foreign-owner'
+            if case == 'revision':
+                proposal['expected']['evidence'] += 1
+            if case == 'reset':
+                native.agent._supervision_view_binding.reset()
+            if case == 'expired':
+                monkeypatch.setattr(native.runtime, 'clock', lambda: native.runtime.round_deadline + 1)
+            if case == 'unload':
+                native.facade.unregister()
+            if case == 'no_op':
+                ids = native.calls[-1][0]['state']['facts']['baseline_ids']
+                proposal['candidate_ids'] = ids
+                proposal['metadata']['selected_ids'] = ids
+        replies.append(submit(proposal))
+        return replies[-1]
+    monkeypatch.setattr(native.facade, 'submit', changed)
+    result = commit_result(native, raw, 'native-result')
+    native.drain()
+    assert result == json.loads(raw)
+    assert proposals and replies
+    source = native.mode['archives'][-1]
+    assert Path(source.path).read_bytes() == raw.encode('utf-8')
+    assert not native.agent._supervision_views._result_sources
+    if case != 'no_op':
+        assert not any(r.status == 'applied' and r.proposal_id == proposals[-1]['proposal_id'] for r in native.runtime.receipts.values())
+    if case in ('wrong_evidence', 'stale_ref'):
+        assert replies[-1]['reason'] == 'unbound_evidence'
+    if case == 'wrong_metadata':
+        assert any(r.reason == 'view_contract' for r in native.runtime.receipts.values())
+    if case == 'overlong':
+        assert replies[-1] == {'status': 'rejected', 'reason': 'invalid_proposal'}
+
+
+@pytest.mark.parametrize('native', ['short', 'long'], indirect=True)
 @pytest.mark.parametrize('name,concurrent', [('execute_code', False), ('tool_call', False), ('web_search', True)])
 def test_plugin_result_selection_after_archive_at_canonical_commit(native, name, concurrent):
     native.accept('Locate the answer in the report.')
-    raw = json.dumps({'output': ''.join('answer '+str(i)+' '+('x'*180)+'\n' for i in range(18)),
-                      'exit_code': 0, 'receipts': [{'status':'not_run'}]})
+    raw = result_archive_text()
     a = native.agent
     a.tools = _make_tool_defs(name)
     assistant = SimpleNamespace(content='', tool_calls=[_mock_tool_call(name=name, call_id='native-result')])
@@ -373,9 +457,25 @@ def test_plugin_result_selection_after_archive_at_canonical_commit(native, name,
     content = next(m['content'] for m in messages if m.get('role') == 'tool')
     result, _ = json.JSONDecoder().raw_decode(content[content.index('{'):])
     assert 'supervision_view' in result, native.bridge.supervisor.inspect()
-    assert Path(result['supervision_view']['full_output_ref']).read_text() == raw
-    assert result['receipts'] == [{'status':'not_run'}]
-    assert len([c for c in native.calls if 'F16/select' in c[0]['questions']]) == 1
+    source, = native.mode['archives']
+    assert result['supervision_view']['full_output_ref'] == source.path
+    assert Path(source.path).read_bytes() == raw.encode('utf-8')
+    assert source.original == raw and source.call_id == 'native-result' and source.tool_name == name
+    if 'long-archive-path-' in str(native.home):
+        assert len(source.path) > 256
+    original = json.loads(raw)
+    assert {k: v for k, v in result.items() if k not in ('output', 'supervision_view')} == {k: v for k, v in original.items() if k != 'output'}
+    spans = result['supervision_view']['spans']
+    assert result['output'] == ''.join(original['output'][s['start']:s['end']] for s in spans)
+    assert 'WARNING partial result; cleanup not run' in result['output']
+    assert len(result['output']) < len(original['output'])
+    body, = [c[0] for c in native.calls if 'F16/select' in c[0]['questions']]
+    assert set(body['state']['facts']['mandatory_ids']) <= {s['id'] for s in spans}
+    ref = body['state']['facts']['source_ref']
+    assert 0 < len(ref) <= 256 and ref != source.path
+    assert not native.agent._supervision_views._result_sources
+    assert native.agent._tool_guardrails._persisted_result_paths['native-result'] == source.path
+    assert any(r.status == 'applied' and r.reason == 'native_view' for r in native.runtime.receipts.values())
 
 
 def test_plugin_explicit_presentation_default_through_real_clarify(native):

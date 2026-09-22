@@ -125,6 +125,24 @@ content-fingerprinted artifact name; persistence failure returns baseline withou
 inference. Result-reference guardrails retain the full artifact path.
 Opaque, multimodal, huge-line and larger/incomplete pools retain existing behavior.
 
+The selection protocol's `source_ref` is an opaque, fresh `result:<uuid>` key, not
+that filesystem path. The result owner retains at most 32 in-flight mappings to
+immutable records containing the exact original string, full translated archive
+path, tool/call identity, scope and request revision. Only this owner can resolve
+the key; the native consumer requires that same retained record at observation
+and settlement, plus exact proposal evidence and metadata references. Existing
+profile/revision, owner/target, registration and deadline fences still apply.
+The mapping is removed in `finally` after each decision and cleared on reset or
+unload. Old keys cannot be reused even for identical output. A key or checksum
+alone grants no authority, and no global filesystem resolver is exposed.
+
+The host's 256-character proposal-reference limit is unchanged. Arbitrarily long
+supported archive paths remain intact in `supervision_view.full_output_ref` and
+the readback guardrails; they are never truncated or passed as bounded evidence
+identifiers. This uses the existing standalone F16 opaque-reference contract and
+requires no plugin codec change. It does not extend the spillover store's existing
+retention or remote-path verification guarantees.
+
 `owner.rank_retrieval(tuple(candidates), required_ids=(), complete=True)` accepts
 at most eight immutable owner candidates with `id`, `excerpt` (<=1,200 characters)
 and `source_ref`. It reorders the selected original records, retaining the entire
@@ -228,7 +246,15 @@ these native consumers, including positive F12/F13/F16/F18/F19 decisions. Supply
 reviewed source checkout path in the disposable test HOME's
 `.hermes/jev-supervisor-test-source`. Without that explicit dependency this optional
 cross-repository suite is skipped, not counted as integration proof. No runtime
-owner is monkeypatched to manufacture a successful proposal.
+owner is monkeypatched to manufacture a successful proposal. F16 cases cover
+ordinary and deliberately long archive roots through sequential execute-code,
+deferred tool-call and concurrent search consumers, exact UTF-8 archive readback
+before inference and after settlement, critical spans/neighbors and receipt
+siblings. Native negative controls submit wrong/stale/overlong references,
+metadata mismatches, foreign profile/owner/revision, reset, expiry and unload;
+all-block selections keep the ordinary baseline. The path-length controls must
+also be run under short and long disposable runner roots, since a test's own
+ordinary path can exceed 256 characters under a nested CI workspace.
 
 The native adapter intentionally leaves unsupported domains and uncertain evidence
 at baseline. The facade advertises `view_actions_version="supervision.view-actions.v1"`

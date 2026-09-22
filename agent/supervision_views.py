@@ -17,6 +17,7 @@ import json
 import re
 import time
 import threading
+import uuid
 from typing import Any
 
 from agent.supervision_catalog import Catalog, SkillView, fingerprint
@@ -39,6 +40,17 @@ class AuthorizedDefault:
     interpretations: tuple[dict, ...] = ()
 
 
+@dataclass(frozen=True)
+class ResultSource:
+    """Invocation-local binding; a digest or a plugin-supplied path is not authority."""
+    scope: str
+    revision: str
+    tool_name: str
+    call_id: str
+    original: str
+    path: str
+
+
 class SupervisionViews:
     def __init__(self, facade, *, scope: str, clock=time.monotonic, deadline_provider=None):
         self.facade, self.scope, self.clock = facade, scope, clock
@@ -50,6 +62,16 @@ class SupervisionViews:
         self.skills = SkillView()
         self.defaults: dict[str, AuthorizedDefault] = {}
         self.cache_identity = ""
+        self._result_lock = threading.Lock()
+        self._result_sources: dict[str, ResultSource] = {}
+
+    def result_source(self, ref: str, *, scope: str, revision: str):
+        """Resolve only a currently retained reference in this exact owner/scope."""
+        with self._result_lock:
+            source = self._result_sources.get(ref)
+            if source is not None and source.scope == scope == self.scope and source.revision == revision:
+                return source
+        return None
 
     def cycle_deadline(self):
         if self.deadline_provider is not None:
@@ -64,7 +86,9 @@ class SupervisionViews:
             self.deadline = None
 
     def reset(self, scope: str):
-        self.scope = scope
+        with self._result_lock:
+            self.scope = scope
+            self._result_sources.clear()
         self.tool_selection = None
         self.required_tools = ()
         self.skills = SkillView()
@@ -166,6 +190,7 @@ class SupervisionViews:
         status/receipt/side-effect fields are copied exactly. Opaque, multimodal,
         malformed, oversized-line and incomplete critical-span pools use baseline.
         """
+        scope = self.scope
         if not isinstance(original, str) or len(original) < 2400:
             return baseline
         try:
@@ -196,11 +221,25 @@ class SupervisionViews:
         path = extract_persisted_path(archive)
         if not path:
             return baseline
-        revision = fingerprint((self.scope, call_id, original))
-        answer = self._decide("select_windows", "oversized_structured_result", {
-            "tool_name": tool_name, "call_id": call_id, "candidates": tuple(blocks),
-            "required_ids": tuple(sorted(required)), "complete": True, "source_ref": path,
-        }, revision=revision)
+        revision = fingerprint((scope, call_id, original))
+        source = ResultSource(scope, revision, tool_name, call_id, original, path)
+        # Paths have no protocol-sized upper bound. Issue a fresh opaque key,
+        # retaining the exact source rather than truncating or hashing authority.
+        ref = "result:" + uuid.uuid4().hex
+        with self._result_lock:
+            if scope != self.scope or len(self._result_sources) >= 32:
+                return baseline
+            self._result_sources[ref] = source
+        try:
+            answer = self._decide("select_windows", "oversized_structured_result", {
+                "tool_name": tool_name, "call_id": call_id, "candidates": tuple(blocks),
+                "required_ids": tuple(sorted(required)), "complete": True, "source_ref": ref,
+            }, revision=revision)
+            if self.result_source(ref, scope=scope, revision=revision) is not source:
+                return baseline
+        finally:
+            with self._result_lock:
+                self._result_sources.pop(ref, None)
         selected = _selected(answer, tuple(b["id"] for b in blocks))
         if not selected:
             return baseline
