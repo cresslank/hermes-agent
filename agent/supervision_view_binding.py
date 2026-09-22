@@ -100,6 +100,12 @@ class NativeViewsBinding:
         self.skill_hints = {}
         self.skill_removals = {}
         self.skill_plan_origin = None
+        # Skill eligibility belongs to the accepted task/phase, not per-tool
+        # evidence refresh. Keep the last attempt (including a retired hint)
+        # until a relevant task, native phase or catalog event reopens it.
+        self.skill_scope = self._skill_task_scope()
+        self.skill_phase = None
+        self.skill_catalog_seen = None
         self.lock = threading.RLock()
         self.closed = False
         self.generation = 0
@@ -126,12 +132,30 @@ class NativeViewsBinding:
             pending, self.pending = self.pending, {}
             details, self.detail_requests = self.detail_requests, {}
             self.details.clear()
-            self.skill_hints.clear()
+            skills = self.views.skills
+            keep_skills = not self.closed and self.skill_scope == self._skill_task_scope()
+            if keep_skills:
+                # Registration revocation removes only that exact owner's hint.
+                # An evidence reset must not erase another owner's suggestion.
+                for plugin_id, (hint, _, _, registration) in tuple(self.skill_hints.items()):
+                    if not registration.active:
+                        if skills.owned_hints.get(plugin_id) is hint:
+                            skills.owned_hints.pop(plugin_id)
+                            if skills.hints.get(plugin_id) == hint.text:
+                                skills.hints.pop(plugin_id)
+                        self.skill_hints.pop(plugin_id)
+            else:
+                self.skill_hints.clear()
+                self.skill_phase = None
+                self.skill_catalog_seen = None
+            self.skill_scope = self._skill_task_scope()
             self.skill_removals.clear()
             if self.skill_plan_origin and self.skill_plan_origin[0] != self._skill_task_scope():
                 self.skill_plan_origin = None
             self.catalog_seen = None
             self.views.reset(scope_key(self.runtime))
+            if keep_skills:
+                self.views.skills = skills
             self.views.defaults.update({q: replace(d, scope=self.views.scope) for q, d in defaults.items()})
             self.clarification_slot = {**slot, 'scope': self.views.scope} if slot else None
         if self.status is not None:
@@ -351,14 +375,26 @@ class NativeViewsBinding:
                 answer = None if failure else validate(proposal)
                 if not failure and runtime.clock() >= deadline:
                     failure, answer = ('expired', 'view_deadline'), None
+                skill_state = None
                 if not failure and answer is not None and proposal.feature_id == 'F12':
+                    skills = self.views.skills
+                    skill_state = (skills.ranked_ids, dict(skills.hints), dict(skills.owned_hints),
+                                   dict(self.skill_hints))
                     answer = self._apply_skill_proposal(proposal, registration, revision, answer, generation)
                 if answer is None:
                     runtime._settle(proposal, *(failure or ('rejected', 'view_contract')))
                 else:
-                    runtime.incidents.add(proposal.incident_id)
-                    runtime._settle(proposal, 'applied', 'native_view')
-                    answer = {'revision': revision, **answer}
+                    receipt = runtime._settle(proposal, 'applied', 'native_view')
+                    if receipt.status == 'applied':
+                        runtime.incidents.add(proposal.incident_id)
+                        answer = {'revision': revision, **answer}
+                    else:
+                        # Request-local hints are reversible. A failed durable
+                        # settlement cannot retire or publish one as applied.
+                        if skill_state is not None:
+                            (skills.ranked_ids, skills.hints, skills.owned_hints,
+                             self.skill_hints) = skill_state
+                        answer = None
                 runtime.closed_targets.add(target)
                 return answer
 
@@ -368,7 +404,8 @@ class NativeViewsBinding:
             if self.closed or self.generation != generation:
                 return None
             skills = self.views.skills
-            if revision != skills.revision or self.views.scope != scope_key(self.runtime):
+            if (revision != skills.revision or not isinstance(skills.scope, str)
+                    or self.views.scope != scope_key(self.runtime)):
                 return None
             if proposal.metadata.get('feature_action') == 'rank_skill_ids':
                 task = self._task()
@@ -378,7 +415,7 @@ class NativeViewsBinding:
                 if not skills.rank(ids, revision=revision, plugin_id=registration.plugin_id, ambiguous=True):
                     return None
                 hint = SkillHint('hint:' + uuid.uuid4().hex, registration.plugin_id, registration.generation,
-                    self.views.scope, revision, ids[0], skills.hints[registration.plugin_id],
+                    skills.scope, revision, ids[0], skills.hints[registration.plugin_id],
                     content=self.details[proposal.target_id]['served_content'][ids[0]],
                     mandatory=any(c.required and c.id == ids[0] for c in skills.candidates))
                 # Bind the whole enumerated native phase, not a guessed skill/step link.
@@ -433,6 +470,16 @@ class NativeViewsBinding:
                 and [{k: v for k, v in t.items() if k != 'status'} for t in before]
                     == [{k: v for k, v in t.items() if k != 'status'} for t in after])
 
+    @staticmethod
+    def _phase_reopened(previous, current):
+        before, after = previous['todos'], current['todos']
+        # Bookkeeping revisions and progress toward completion do not create a
+        # new phase. A changed declaration or reopening terminal work does.
+        return ([{k: v for k, v in t.items() if k != 'status'} for t in before]
+                != [{k: v for k, v in t.items() if k != 'status'} for t in after]
+                or (all(t['status'] in ('completed', 'cancelled') for t in before)
+                    and any(t['status'] in ('pending', 'in_progress') for t in after)))
+
     def skill_phase_committed(self, messages):
         """A committed todo phase transition, not an every-turn semantic patrol.
 
@@ -466,6 +513,10 @@ class NativeViewsBinding:
         with self.runtime.lock:
             if self.closed or self.runtime.revision != expected:
                 return
+            previous = self.skill_plan_origin
+            if (previous is None or previous[0] != self._skill_task_scope()
+                    or self._phase_reopened(previous[1], finished)):
+                self.skill_phase = fingerprint(finished)
             self.skill_plan_origin = (self._skill_task_scope(), finished)
         if not self.skill_hints or self.views.scope != scope_key(self.runtime):
             return
@@ -703,15 +754,20 @@ class NativeViewsBinding:
         """One metadata ambiguity check per accepted scope, at request assembly."""
         if self.views.scope != scope_key(self.runtime):
             self.reset(preserve_defaults=True)
-        if self.closed or self.catalog_seen == self.views.scope:
+        if self.closed:
             return
-        self.catalog_seen = self.views.scope
         task = self._task()
         agent = self.runtime.agent()
         if not task or agent is None:
             return
         ref, text = task
         words = _words(text)
+        if self.catalog_seen != self.views.scope:
+            self.catalog_seen = self.views.scope
+            self._tools(ref, text, words, agent)
+        self._skills(ref, text, words)
+
+    def _tools(self, ref, text, words, agent):
         try:
             schemas = authorized_tool_schemas(agent)
             required = tuple(tool_id(s) for s in schemas if tool_id(s) in re.findall(r'\b[\w_]+\b', text))
@@ -738,12 +794,16 @@ class NativeViewsBinding:
                                                  scope=self.views.scope, include_deferred=True)
         except (ValueError, TypeError, AttributeError):
             pass
-        self._skills(ref, text, words)
 
     def _skills(self, ref, text, words):
         from tools.skills_tool import skills_list
         try:
             rows = json.loads(skills_list()).get('skills', [])
+            scope = fingerprint((self.skill_scope, self.skill_phase, self.runtime.revision.catalog))
+            catalog_key = (scope, fingerprint(rows))
+            if self.skill_catalog_seen == catalog_key:
+                return
+            self.skill_catalog_seen = catalog_key
             # Explicit names are mandatory matches: ordinary focused-skill rules win.
             if any(r['name'] in text for r in rows):
                 return
@@ -756,7 +816,7 @@ class NativeViewsBinding:
             facts = dict(task_ref=ref, task=text, rule_scope='Existing focused-skill rules; suggestions never load skills.',
                 ambiguous=True, mandatory_match=False, mandatory_ids=[], stage='metadata', candidates=candidates)
             ids = tuple(r['id'] for r in candidates)
-            revision = self.views.skills.catalog(tuple(SkillCandidate(r['id'], r['description']) for r in candidates), self.views.scope)
+            revision = self.views.skills.catalog(tuple(SkillCandidate(r['id'], r['description']) for r in candidates), scope)
             self._request('catalog_ambiguity', facts, action=Action.SELECT_SKILLS, refs=(ref,), candidates=ids,
                 revision=revision, validate=lambda p: self._selection(p, 'F12', ids))
         except (ValueError, TypeError, KeyError, AttributeError):

@@ -140,6 +140,22 @@ requirements and source history remain unchanged. A new identical-looking hint
 is a different object and cannot be removed by an old proposal. Ordinary scope
 reset/unload remains lifecycle cleanup, never an applied F12 removal receipt.
 
+Skill eligibility is separate from the per-tool evidence revision. Within the
+same accepted profile/lineage/work/run/instruction/requirements scope, ordinary
+request assembly preserves the skill view and its last catalog attempt, including
+successful retirement. Completing the phase or rewriting identical completed
+rows cannot issue another metadata/detail judgment or recreate its suggestion.
+A committed changed plan declaration, reopening terminal work, a newly accepted
+task/instruction, or a changed native catalog can reopen selection. This is a
+bounded current-scope identity, not a global skill blacklist. Unknown/uncommitted
+plans cannot reopen selection as a native phase. Registration unload revokes only
+that registration's exact owned hint, not another owner's suggestion.
+
+Admission, selection and settlement use the existing SessionDB receipt writer.
+If the final receipt cannot persist, the reversible skill-view change is restored;
+no new hint or retirement is exposed as a successful effect. No schema or separate
+retirement database is introduced.
+
 Empty, unbound, oversized or changed plans retain baseline. This path does not
 infer completed work from prose, force skill loading, inspect credential readiness,
 create a user turn, or perform an every-turn semantic check. Required focused

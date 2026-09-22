@@ -24,7 +24,8 @@ def todo(native, messages, items=None, concurrent=False):
         a._execute_tool_calls_concurrent(assistant, messages, 'task')
     else:
         a._execute_tool_calls_sequential(assistant, messages, 'task')
-    assert json.loads(messages[-1]['content'])['todos'] == a._todo_store.read()
+    result = next(m for m in reversed(messages) if m.get('role') == 'tool' and m.get('tool_call_id') == call.id)
+    assert json.loads(result['content'])['todos'] == a._todo_store.read()
 
 
 def ready(native):
@@ -72,6 +73,12 @@ def test_ready_hint_exact_removal_at_committed_native_phase(native, monkeypatch,
         proposals.append(copy.deepcopy(p))
         return submit(p)
     monkeypatch.setattr(native.facade, 'submit', capture)
+    todo(native, messages)  # ordinary evidence refresh before phase completion
+    assemble(native.agent, messages)
+    assert binding.skill_hints[hint.plugin_id] is entry
+    assert binding.views.skills.owned_hints[hint.plugin_id] is hint
+    assert binding.views.skills.hints['other-plugin'] == foreign
+    assert [b['state']['facts']['stage'] for b, _ in native.calls] == ['metadata', 'detail']
     todo(native, messages, [{**t, 'status': 'completed'} for t in items], concurrent)
     native.drain()
     assert skills.hints == {'other-plugin': foreign}, native.bridge.supervisor.inspect()
@@ -80,18 +87,39 @@ def test_ready_hint_exact_removal_at_committed_native_phase(native, monkeypatch,
     assert native.runtime.sources == sources and native.runtime.requirements == requirements
     assert len(removal_calls(native)) == 1
     body = removal_calls(native)[0]
-    assert observations[0]['event'] == 'task_revision'
+    unload, = [o for o in observations if o['event'] == 'task_revision' and o['facts'].get('stage') == 'unload']
+    assert unload['facts']['hint']['id'] == hint.id
     assert body['state']['facts']['stage'] == 'unload'
     assert body['state']['facts']['hint']['id'] == hint.id
     proposal, = [p for p in proposals if p['metadata']['feature_action'] == 'remove_own_hint']
     assert proposal['action'] == 'select_skills' and proposal['candidate_ids'] == []
     assert proposal['metadata']['hint_id'] == hint.id
     assert native.runtime.receipts[proposal['proposal_id']].status == 'applied'
+    from agent.supervision_receipts import lookup
+    persisted = lookup(native.runtime, proposal['proposal_id'])
+    assert persisted is not None and persisted[:2] == ('applied', 'native_view')
     assert not binding.skill_hints and not binding.skill_removals
     native.mode['retirement_trace'] = {'observations': observations, 'proposals': proposals,
         'receipt': vars(native.runtime.receipts[proposal['proposal_id']]), 'hint': vars(hint),
         'surviving_hints': dict(skills.hints), 'history_unchanged': messages[:len(originals)] == originals}
-    todo(native, messages)  # no applicable own hint -> no repeated semantic call
+    deadline = native.runtime.round_deadline
+    for extra_batch in (False, True):
+        if extra_batch:
+            todo(native, messages)  # unrelated evidence refresh, not a new phase
+        before_assembly = copy.deepcopy(messages)
+        result = assemble(native.agent, messages)
+        native.drain()
+        assert 'Optional skill candidate: alpha' not in str(result.api_messages)
+        assert foreign in str(result.api_messages)
+        assert binding.views.skills.hints == {'other-plugin': foreign}
+        assert not binding.skill_hints
+        assert messages == before_assembly
+        assert [b['state']['facts']['stage'] for b, _ in native.calls] == ['metadata', 'detail', 'unload']
+        if not extra_batch:
+            assert native.runtime.round_deadline == deadline  # assembly cannot renew the completion window
+    native.mode['retirement_trace']['next_request'] = result.api_messages
+    native.mode['retirement_trace']['next_request_hints'] = dict(binding.views.skills.hints)
+    native.mode['retirement_trace']['stages'] = [b['state']['facts']['stage'] for b, _ in native.calls]
     assert len(removal_calls(native)) == 1
 
 
@@ -135,6 +163,11 @@ def test_phase_producer_preserves_incomplete_required_and_absent_hints(native, c
     native.drain()
     assert not removal_calls(native)
     assert binding.views.skills.hints == before
+    if case in {'mandatory', 'must_keep', 'safety_hint', 'catalog_required', 'no_grant', 'no_policy'}:
+        calls = len(native.calls)
+        assemble(native.agent, messages)
+        assert binding.views.skills.hints == before
+        assert len(native.calls) == calls
 
 
 @pytest.mark.parametrize('case', ['remaining', 'hint_id', 'feature_action', 'feature_id', 'candidate', 'evidence',
@@ -194,9 +227,21 @@ def test_removal_consumer_rechecks_exact_identity_and_vetoes(native, monkeypatch
         assert receipt is None or receipt.status != 'applied'
 
 
-def test_old_task_plan_is_not_current_phase_authority(native):
-    messages, items, binding, _ = ready(native)
-    native.accept('Analyze weather observations.')  # new accepted task, old TodoStore retained
+@pytest.mark.parametrize('phase', ['old_task', 'uncommitted', 'empty', 'oversized'])
+def test_old_task_plan_is_not_current_phase_authority(native, phase):
+    if phase == 'old_task':
+        messages, items, binding, _ = ready(native)
+        native.accept('Analyze weather observations.')  # new task, old store retained
+    else:
+        skill_catalog(native)
+        messages = [{'role': 'user', 'content': 'Analyze weather observations.'}]
+        binding = native.agent._supervision_view_binding
+        items = [{'id': 'one', 'content': 'Analyze weather observations.', 'status': 'in_progress'}]
+        if phase == 'uncommitted':
+            native.agent._todo_store.write(items)
+        elif phase == 'oversized':
+            items = [{**items[0], 'id': str(i)} for i in range(9)]
+            todo(native, messages, items)
     assemble(native.agent, messages)
     entry, = binding.skill_hints.values()
     assert entry[2] is None
@@ -205,6 +250,119 @@ def test_old_task_plan_is_not_current_phase_authority(native):
     native.drain()
     assert not removal_calls(native)
     assert binding.views.skills.hints == before
+    assemble(native.agent, messages)
+    calls = len(native.calls)
+    todo(native, messages)
+    assemble(native.agent, messages)
+    assert not removal_calls(native)
+    assert len(native.calls) == calls
+
+
+@pytest.mark.parametrize('event', ['same_completed', 'changed_phase', 'reopened', 'catalog',
+                                  'steering', 'task', 'unload', 'uncommitted_plan'])
+def test_retirement_reopens_only_for_relevant_native_events(native, event):
+    messages, items, binding, entry = ready(native)
+    original_hint = entry[0]
+    finished = [{**t, 'status': 'completed'} for t in items]
+    todo(native, messages, finished)
+    assemble(native.agent, messages)
+    assert not binding.views.skills.hints
+    calls = len(native.calls)
+    previous_task_scope = binding.skill_scope
+    previous_phase = binding.skill_phase
+    def new_catalog():
+        path = native.home / 'skills' / 'epsilon' / 'SKILL.md'
+        path.parent.mkdir()
+        path.write_text('---\nname: epsilon\ndescription: Analyze weather observations and temperature.\n---\nCompare weather reports.\n')
+    def steering():
+        from agent.supervision_context import accepted_input_origin
+        assert native.agent.steer('Analyze weather forecasts.', origin=accepted_input_origin(
+            'Analyze weather forecasts.', kind='cli', continuation=True))
+        todo(native, messages)  # deliver through the ordinary tool-round boundary
+    transitions = {
+        'same_completed': lambda: todo(native, messages, finished),  # store revision alone is not a new phase
+        'changed_phase': lambda: todo(native, messages, [
+            {'id': 'next', 'content': 'Analyze another weather report.', 'status': 'pending'}]),
+        'reopened': lambda: todo(native, messages, items),
+        'catalog': new_catalog,
+        'steering': steering,
+        'task': lambda: native.accept('Analyze weather forecasts.'),
+        'unload': native.facade.unregister,
+        'uncommitted_plan': lambda: native.agent._todo_store.write(items),  # no committed producer
+    }
+    transitions[event]()
+    history = copy.deepcopy(messages)
+    result = assemble(native.agent, messages)
+    native.drain()
+    reopened = event in {'changed_phase', 'reopened', 'catalog', 'steering', 'task'}
+    assert ('Optional skill candidate: alpha' in str(result.api_messages)) is reopened
+    assert len(native.calls) == calls + (2 if reopened else 0)
+    assert messages == history
+    assert len(removal_calls(native)) == 1
+    if reopened:
+        new, = binding.skill_hints.values()
+        assert new[0].id != original_hint.id
+        assert new[0].plugin_id == original_hint.plugin_id
+        assert new[0].registration == original_hint.registration
+        if event in {'steering', 'task'}:
+            assert binding.skill_scope != previous_task_scope
+            assert new[2] is None  # previous task's plan cannot be rebound
+        if event in {'changed_phase', 'reopened'}:
+            assert binding.skill_phase != previous_phase
+            assert new[2] == native.agent._todo_store.snapshot()
+    else:
+        assert not binding.skill_hints
+    assemble(native.agent, messages)
+    assert len(native.calls) == calls + (2 if reopened else 0)
+
+
+@pytest.mark.parametrize('stage', ['rank_skill_ids', 'remove_own_hint'])
+@pytest.mark.parametrize('status', ['accepted', 'selected', 'applied'])
+def test_skill_effects_fail_closed_when_real_receipt_writer_is_locked(native, monkeypatch, stage, status):
+    import sqlite3
+    from agent.supervision_receipts import lookup
+    items, entry = [], None
+    if stage == 'remove_own_hint':
+        messages, items, binding, entry = ready(native)
+        before = dict(binding.views.skills.hints)
+    else:
+        skill_catalog(native)
+        messages = [{'role': 'user', 'content': 'Analyze weather observations.'}]
+        binding = native.agent._supervision_view_binding
+        before = {}
+    blocked = []
+    settle = native.runtime._settle
+    def locked(proposal, disposition, reason):
+        if proposal.metadata.get('feature_action') != stage or disposition != status:
+            return settle(proposal, disposition, reason)
+        # A real second connection blocks the canonical zero-wait writer. No DDL,
+        # fake persistence success, or replacement SessionDB/storage implementation.
+        with sqlite3.connect(native.agent._session_db.db_path, timeout=0) as conn:
+            conn.execute('BEGIN IMMEDIATE')
+            receipt = settle(proposal, disposition, reason)
+        blocked.append((proposal, receipt))
+        return receipt
+    monkeypatch.setattr(native.runtime, '_settle', locked)
+    if stage == 'remove_own_hint':
+        todo(native, messages, [{**t, 'status': 'completed'} for t in items])
+    else:
+        assemble(native.agent, messages)
+    native.drain()
+    proposal, receipt = blocked[0]
+    assert len(blocked) == 1
+    assert receipt.reason == 'storage_unavailable' and receipt.status != 'applied'
+    assert binding.views.skills.hints == before
+    persisted = lookup(native.runtime, proposal.proposal_id)
+    assert persisted is None or persisted[0] != 'applied'
+    if stage == 'remove_own_hint':
+        assert entry is not None
+        assert binding.skill_hints[entry[0].plugin_id] is entry
+        assert binding.views.skills.owned_hints[entry[0].plugin_id] is entry[0]
+    calls = len(native.calls)
+    result = assemble(native.agent, messages)
+    assert binding.views.skills.hints == before
+    assert ('Optional skill candidate: alpha' in str(result.api_messages)) is bool(before)
+    assert len(native.calls) == calls
 
 
 def test_ordinary_unhinted_todo_completion_is_silent(native):
