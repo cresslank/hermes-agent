@@ -26,6 +26,10 @@ from hermes_state_common import (
 logger = logging.getLogger("hermes_state")
 
 
+class ControlGenerationContended(RuntimeError):
+    """The nonwaiting generation probe could not acquire its tracking mutex."""
+
+
 def workspace_key(row: Dict[str, Any]) -> Optional[str]:
     """Workspace grouping key: git repo root, else cwd, else None (branch excluded: a checkout must not
     fragment history)."""
@@ -791,13 +795,16 @@ class SessionSessionsMixin:
                 and all(ident is not None and stat_db_file_identity(str(self.db_path) + suffix) == ident
                         for suffix, ident in recorded.items()))
 
-    def control_session_generation(self, session_id: str, *, deadline=None, connection=None):
+    def control_session_generation(self, session_id: str, *, deadline=None, connection=None,
+                                   raise_on_contention=False):
         """Current active membership for optional controls, never an accounting read.
 
         Do not use the pooled reader's writer-lock fallback or reopen a closed DB.
         A zero-wait connection bounds contention even for deadline-free producers;
         a supplied control transaction observes revocation after writer admission.
         No schema, repairs, token flushes or second authority store belong here.
+        Storage-only callers may distinguish mutex contention from a missing or
+        changed generation; optional controls retain the default None denial.
         """
         from hermes_cli.sqlite_safe_read import _live_lock
         def available():
@@ -807,6 +814,8 @@ class SessionSessionsMixin:
         # the action. Inspect application_id through SQL, not the raw-header
         # probe (which has its own unrelated mutex).
         if not _live_lock.acquire(blocking=False):
+            if raise_on_contention:
+                raise ControlGenerationContended("Session generation tracking mutex is busy")
             return None
         try:
             if not available():

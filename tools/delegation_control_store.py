@@ -15,6 +15,10 @@ class ControlConflict(ValueError):
     """The durable child revision changed or the identity already exists."""
 
 
+class ControlContention(ControlConflict):
+    """A generation probe was contended; rollback and close both succeeded."""
+
+
 class ControlDeadlineExpired(ValueError):
     """The propagated action deadline expired before durable commit."""
 
@@ -71,40 +75,58 @@ class SQLiteControlStore:
         self._compare_and_swap(snapshot, expected_revision, deadline=deadline)
 
     def _compare_and_swap(self, snapshot, expected_revision, *, deadline=None, lifecycle=False):
+        from hermes_state_sessions import ControlGenerationContended
+
+        contended = None
+
         def authority(conn):
+            nonlocal contended
             if lifecycle or deadline is None:
-                if self._lifecycle_authorize is not None and not self._lifecycle_authorize(connection=conn):
-                    raise ControlConflict('Delegation storage generation unavailable')
+                try:
+                    if self._lifecycle_authorize is not None and not self._lifecycle_authorize(connection=conn):
+                        raise ControlConflict('Delegation storage generation unavailable')
+                except ControlGenerationContended as exc:
+                    contended = exc
+                    raise
             elif deadline is not None:
                 self._authority(conn, deadline)
 
         if snapshot['control_revision'] != expected_revision + 1:
             raise ControlConflict('Control revisions must advance exactly once')
-        conn = self._connect()
         try:
-            with conn:
-                if lifecycle:
-                    conn.execute('PRAGMA busy_timeout=0')
-                self._budget(conn, deadline)
-                conn.execute('BEGIN IMMEDIATE')
-                self._budget(conn, deadline)
-                # Recheck in the very transaction that publishes the effect.
-                authority(conn)
-                self._budget(conn, deadline)
-                result = conn.execute(
-                    "UPDATE delegation_controls SET control_revision=?,snapshot_json=?,updated_at=? "
-                    "WHERE child_id=? AND parent_session_id=? AND generation=? AND control_revision=?",
-                    (snapshot['control_revision'], json.dumps(snapshot, sort_keys=True), time.time(),
-                     snapshot['child_id'], snapshot['parent_session_id'], snapshot['generation'], expected_revision),
-                )
-                if result.rowcount != 1:
-                    raise ControlConflict('Stale delegation control revision')
-                authority(conn)
-                # Commit may itself wait in rollback-journal mode. It gets only
-                # what remains, never the earlier BEGIN's full busy timeout.
-                self._budget(conn, deadline)
-        finally:
-            conn.close()
+            conn = self._connect()
+            try:
+                with conn:
+                    if lifecycle:
+                        conn.execute('PRAGMA busy_timeout=0')
+                    self._budget(conn, deadline)
+                    conn.execute('BEGIN IMMEDIATE')
+                    self._budget(conn, deadline)
+                    # Recheck in the very transaction that publishes the effect.
+                    authority(conn)
+                    self._budget(conn, deadline)
+                    result = conn.execute(
+                        "UPDATE delegation_controls SET control_revision=?,snapshot_json=?,updated_at=? "
+                        "WHERE child_id=? AND parent_session_id=? AND generation=? AND control_revision=?",
+                        (snapshot['control_revision'], json.dumps(snapshot, sort_keys=True), time.time(),
+                         snapshot['child_id'], snapshot['parent_session_id'], snapshot['generation'], expected_revision),
+                    )
+                    if result.rowcount != 1:
+                        raise ControlConflict('Stale delegation control revision')
+                    authority(conn)
+                    # Commit may itself wait in rollback-journal mode. It gets only
+                    # what remains, never the earlier BEGIN's full busy timeout.
+                    self._budget(conn, deadline)
+            finally:
+                conn.close()
+        except Exception as exc:
+            if contended is not None:
+                # Translate only after the transaction context rolled back AND
+                # close succeeded. A rollback/close failure is permanent ambiguity.
+                if exc is contended:
+                    raise ControlContention("Delegation generation probe contended") from exc
+                raise ControlConflict("Contended delegation rollback/close failed") from exc
+            raise
 
     def read(self, child_id: str) -> dict | None:
         conn = self._connect()

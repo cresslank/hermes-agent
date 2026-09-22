@@ -147,16 +147,19 @@ class ConfiguredDelegationOwner(OwnedDelegationOwner):
         policy = ReadOnlyPolicy("host.owned-parent-read.v1", (*file_policy.contracts,
             CapabilityContract("todo_list", "child-plan.v1", _plan_args)))
         super().__init__(parent_session_id=str(runtime.agent().session_id), store=SQLiteControlStore(connect, authorize=self.current,
-                lifecycle_authorize=self.storage_current, wait_for_writer=False),
+                lifecycle_authorize=lambda **kw: self.storage_current(raise_on_contention=True, **kw),
+                wait_for_writer=False),
             grant=OwnerGrant(runtime.revision.profile, registration.plugin_id, True, True),
             consumer_resolver=self.resolving.get, policy=policy,
             revision_provider=lambda: (runtime.revision.instruction_event, runtime.revision.requirements, runtime.revision.evidence))
 
-    def storage_current(self, *, connection=None):
+    def storage_current(self, *, connection=None, raise_on_contention=False):
         # Cleanup outlives config/registration revocation, but never its original
         # database/session generation. This grants no semantic or launch rights.
+        # Only the storage transaction opts into the typed nonwaiting outcome;
+        # ordinary currentness callers keep their fail-closed boolean contract.
         return self.db.control_session_generation(self.parent_session_id,
-            connection=connection) == self.session_generation
+            connection=connection, raise_on_contention=raise_on_contention) == self.session_generation
 
     def current(self, *, deadline=None, connection=None):
         agent = self.runtime.agent()

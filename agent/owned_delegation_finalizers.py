@@ -1,7 +1,7 @@
 """Recover native lifecycle facts without replaying semantic actions or tools.
 
 Caller holds the existing owner lock. Each attempt is one zero-wait canonical
-CAS per ancestor, never a polling loop or a new deadline. Only rolled-back SQLite
+CAS per ancestor, never a polling loop or a new deadline. Only rolled-back storage
 contention is retryable; generation loss, CAS conflicts and I/O ambiguity retain
 unknown durable work. Nothing here reconstructs completions after process loss.
 """
@@ -14,7 +14,7 @@ logger = logging.getLogger(__name__)
 
 def recover_lifecycle(owner, live):
     from agent.owned_delegation import ControlDenied
-    from tools.delegation_control_store import ControlConflict
+    from tools.delegation_control_store import ControlConflict, ControlContention
 
     if live.finalization_failed:
         return False
@@ -37,6 +37,8 @@ def recover_lifecycle(owner, live):
 
         try:
             owner._commit(live, change, finalizer=True)
+        except ControlContention:
+            return False  # rolled back; a later caller rechecks fresh authority
         except (sqlite3.Error, ControlConflict, ControlDenied, OSError) as exc:
             code = getattr(exc, 'sqlite_errorcode', 0) & 0xff
             if isinstance(exc, sqlite3.OperationalError) and code in (sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED):
