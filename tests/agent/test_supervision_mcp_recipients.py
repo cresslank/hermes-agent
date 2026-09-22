@@ -38,7 +38,7 @@ def profile(home):
 
 
 @contextmanager
-def providers(home, monkeypatch, second="absent"):
+def providers(home, monkeypatch, second="absent", *, private=False):
     source = os.environ.get("JEV_SUPERVISOR_SOURCE")
     if not source:
         pytest.skip("explicit isolated Jev source checkout required")
@@ -56,6 +56,9 @@ def providers(home, monkeypatch, second="absent"):
               "egress_policy": {"id": "synthetic-owner", "profile": str(home), "fixture": True,
                                 "fields": dict.fromkeys(fields, "synthetic"), "sources": {}},
               "mcp_sources": [grant]}
+    if private:
+        policy["egress_policy"].update(fixture=False, fields=dict.fromkeys(fields, "private_project"),
+                                      sources=dict.fromkeys(fields, "synthetic-mail-source"))
     other = copy.deepcopy(policy)
     if second in {"absent", "no_egress"}:
         other["mcp_sources"] = []
@@ -70,8 +73,9 @@ def providers(home, monkeypatch, second="absent"):
     (home / "config.yaml").write_text(json.dumps({"supervision": {"enabled": True,
         "plugins": {"jev-supervisor": policy, "other-provider": other}}}))
     manager = PluginManager(scope_key=str(home))
-    config = Config(str(home), enabled=True, policy_id="synthetic-owner", fixture_policy=True,
-                    allowed_classes=frozenset({"synthetic"}))
+    config = Config(str(home), enabled=True, policy_id="synthetic-owner", fixture_policy=not private,
+                    allowed_classes=frozenset({"private_project" if private else "synthetic"}),
+                    source_grants=frozenset({"synthetic-mail-source"}) if private else frozenset())
     agent = Agent()
     agent._session_db = SessionDB(home / "state.db")
     agent._session_db.create_session(agent.session_id, "cli")

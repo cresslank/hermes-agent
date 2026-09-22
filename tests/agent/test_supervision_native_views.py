@@ -203,7 +203,9 @@ def test_plugin_skill_metadata_detail_hint_and_native_scope_reset(native, monkey
         monkeypatch.setattr(skills, '_read_skill_text', local_read)
         reply = await acquire(request)
         assert reply is not None
-        assert {k: v for k, v in reply.items() if k != 'candidates'} == request
+        assert {k: v for k, v in reply.items() if k not in {'candidates', 'dispatch_capability'}} == request
+        assert request['dispatch_admission'] == 'supervision.dispatch-admission.v1'
+        assert isinstance(reply['dispatch_capability'], str)
         assert request['deadline'] == native.runtime.round_deadline
         assert request['deadline_issued_at'] == native.runtime.round_deadline_issued_at
         assert await acquire(request) is None  # acquisition cannot be repeated

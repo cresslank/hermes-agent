@@ -22,6 +22,36 @@ not remote-disclosure grants. Every emitted top-level fact, including
 host `egress_policy`; private classes additionally require source grants. Missing
 or foreign policy never inherits permission from source content or URL shape.
 
+## Revocable send admission
+
+`dispatch_admission=supervision.dispatch-admission.v1` advertises a live, one-use
+`dispatch_capability` in each recipient callback. A detached field policy is not
+a live permission. Immediately before transport I/O the native provider calls
+`admit_dispatch` with exactly `capability`, `revision`, `target_id`, `state`
+(the exact `{facts, completeness}` projection), and `deadline`. Missing, malformed,
+replayed, superseded, expired or revoked authority denies the send; there is no
+fixture-policy bypass for a native-attached provider. The token never goes on the
+remote wire or in a durable receipt. Authority stays in the existing bounded
+opportunity record, bound to its recipient/generation, original revision, local
+data classes, field/source policy, deadline and MCP source/transport identity.
+
+Consumption under the runtime, registration and applicable MCP registry fences
+is the **send-admission linearization point**. Revocation before consumption
+forbids new sends, including already queued callbacks. Revocation after it does
+not recall admitted/in-flight remote work. All fences are released before HTTP,
+awaits or other remote I/O; no retry/replay is implied. Final owner ACK fences
+still apply independently.
+
+The negotiated extension to skill-detail acquisition accepts optional
+`dispatch_admission=supervision.dispatch-admission.v1`, echoes that field and
+returns a new `dispatch_capability` for the native-authorized detail projection.
+It replaces the first capability under the same original deadline and revision.
+Without that opt-in the existing `supervision.skill-details.v1` reply is unchanged.
+
+Owner requests also pin their original revision at observation admission and
+again under the runtime lock before selecting a proposal. A newer ready proposal
+cannot be applied to an older request's candidates.
+
 ## Mapping
 
 Exactly these keys are accepted:
@@ -158,7 +188,11 @@ inference or a sandbox for untrusted Python code.
 The Switchloom plugin projection consumes `search_context` structuredContent,
 requires the server's explicit `candidate_budget` omission before triage,
 preserves every item, citation, error/completeness field and allowed transport
-metadata, and reorders only the typed item list. Full bounded returned item text
+metadata, and reorders only the typed item list. It does not implement additional
+isolation/conflict annotations: metadata-only or identity-order selections are
+vetoed as `owner_postvalidation`, not recorded as consumed. JSON key order or
+reserialization is not an evidence effect. A positive reorder remains eligible.
+Full bounded returned item text
 can establish local qualifier integrity, never whole-document/archive coverage.
 Missing mode, clipped items and unsupported filters abstain. No automatic
 `get_object`, live-mode expansion, provider fetch, server mutation or new visible

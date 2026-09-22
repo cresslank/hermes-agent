@@ -185,7 +185,10 @@ def admit_result(server_name, server, tool, args, typed_result, invoked_session,
         decision = runtime.owner_decision(Action.RANK_CANDIDATES, request, mcp_recipients=recipients)
         if not decision.selected:
             return baseline
-        if set(decision.candidate_ids) != set(ids):
+        # This owner supports source-preserving order, not isolation/conflict
+        # annotations. An identical view cannot consume a metadata-only effect;
+        # JSON framing/key order is not an evidence change.
+        if set(decision.candidate_ids) != set(ids) or tuple(decision.candidate_ids) == ids:
             runtime.acknowledge_owner(target, decision.receipt_id, decision.candidate_ids, None)
             return baseline
         by_id = dict(zip(ids, rows))

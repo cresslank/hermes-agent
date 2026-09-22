@@ -270,6 +270,7 @@ class SupervisionRuntime:
                 "revision": self.revision, "deadline": expiry, "actions": frozenset(actions),
                 "refs": frozenset(evidence_refs), "owner": owner, "candidates": tuple(candidates),
                 "required_ids": tuple(required_ids), "relations": tuple(relations),
+                "data_classes": frozenset((data_class, *required_data_classes)),
                 "mcp_recipients": tuple(mcp_recipients) if owner == "mcp" else (),
             }
             while len(self.opportunities) > 64:
@@ -297,7 +298,10 @@ class SupervisionRuntime:
             snapshot = replace(base, data_policy=policy)
             token = _observer_callback.set(True)
             try:
-                reg.consumer(snapshot.to_mapping())
+                from agent.supervision_dispatch import issue
+                payload = snapshot.to_mapping()
+                payload["dispatch_capability"] = issue(self, reg, snapshot)
+                reg.consumer(payload)
             except Exception:
                 # Third-party observers cannot break execution or leak raw exception/source text.
                 reg.note_failure()
@@ -739,11 +743,14 @@ class SupervisionRuntime:
             owner=request.owner, candidates=ids, required_ids=request.required_ids,
             relations=request.relations, data_class=request.data_policy[0],
             required_data_classes=request.data_policy, required_obligations=request.required_ids,
-            mcp_recipients=mcp_recipients)
+            mcp_recipients=mcp_recipients, expected_revision=request.revision)
         if snapshot is None:
             return baseline
         self._wait_for(request.target_id, deadline, request.revision)
         with self.lock:
+            if request.revision != self.revision:
+                self.closed_targets.add(request.target_id)
+                return baseline
             entry = self._take(request.target_id, {action})
             decision = self._apply_owner_decision(entry, request, action, baseline) if entry else baseline
             self.closed_targets.add(request.target_id)

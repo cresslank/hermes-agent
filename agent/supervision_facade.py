@@ -77,6 +77,7 @@ class SupervisionFacade:
                         "view_actions": {"present_material_once": "present_status",
                                          "retrieve": "clarify_retrieve", "ask_material": "clarify_ask"},
                         "owner_capabilities": self._owner_capabilities() if version == VERSION else [],
+                        "dispatch_admission": "supervision.dispatch-admission.v1",
                         "owner_deadline": True,
                         "exact_expansion": "supervision.exact-expansion.v1",
                         "history_read_fence": "supervision.history-read.v1",
@@ -214,6 +215,11 @@ class SupervisionFacade:
         if self._registration:
             self._registration.close()
 
+    def admit_dispatch(self, request):
+        """Consume a live host-issued capability immediately before one send."""
+        from agent.supervision_dispatch import consume
+        return consume(self, request)
+
     def submit(self, proposal):
         """Return queued/terminal receipt. Mapping input is strictly converted, never authority."""
         reg = self._registration
@@ -264,7 +270,14 @@ class SupervisionFacade:
         from agent.supervision_policy import runtime_for_revision
         runtime = runtime_for_revision(expected)
         binding = getattr(runtime.agent(), '_supervision_view_binding', None) if runtime else None
-        return await binding.acquire_skill_details(request, reg) if binding else None
+        from agent.supervision_dispatch import VERSION as DISPATCH_VERSION, issue_skill_details
+        dispatch = request.get("dispatch_admission") == DISPATCH_VERSION
+        source_request = {k: v for k, v in request.items() if k != "dispatch_admission"} if dispatch else request
+        reply = await binding.acquire_skill_details(source_request, reg) if binding else None
+        if reply is not None and dispatch:
+            capability = issue_skill_details(runtime, reg, source_request, reply)
+            return {**reply, "dispatch_admission": DISPATCH_VERSION, "dispatch_capability": capability}
+        return reply
 
     def _active_runtime(self):
         from agent.subagent_lifecycle import get_active_subagent_parent
