@@ -10,6 +10,9 @@ import json
 import uuid
 from urllib.parse import urlsplit
 from collections.abc import Mapping
+from dataclasses import dataclass, replace
+from typing import Any
+from contextlib import nullcontext
 from agent.supervision_types import Action, Completeness, OwnerRequestV1, freeze, project
 
 
@@ -52,10 +55,94 @@ def _route_matches(server, grant):
             tuple(server._config.get("args", ())) == tuple(grant["args"]))
 
 
+@dataclass(frozen=True)
+class _RecipientBinding:
+    """Host-only authority; never serialized into provider facts or egress policy."""
+    registration: object
+    generation: str
+    grant: Mapping
+    adapter: object
+    scope: str
+    key: str | tuple[str, str]
+    server: Any
+    session: object
+    projection: Mapping
+
+    def current(self, registration, *, transport_locked=False):
+        from tools.mcp_tool_common import _core
+        from tools.mcp_tool_scope import _key_visible_in_scope
+        if (registration is not self.registration or not registration.active or
+                registration.generation != self.generation or registration.scope != self.scope or
+                registration.mcp_adapter is not self.adapter or self.grant not in registration.mcp_sources or
+                not {"observe", "rank_candidates"} <= registration.grants or
+                "project_excerpt" not in registration.data_policy):
+            return False
+        with nullcontext() if transport_locked else _core._lock:
+            return (_core._servers.get(self.key) is self.server and
+                    self.server.session is self.session and
+                    _key_visible_in_scope(self.key, self.scope) and _route_matches(self.server, self.grant))
+
+
+def recipient_authorized(bindings, registration, *, transport_locked=False):
+    return any(binding.current(registration, transport_locked=transport_locked) for binding in bindings)
+
+
+def consumption_fence(opportunity):
+    # Serialize the final receipt with transport replacement as well as the
+    # selected registration's existing revocation fence. No provider I/O here.
+    if opportunity and opportunity.get("mcp_recipients"):
+        from tools.mcp_tool_common import _core
+        return _core._lock
+    return nullcontext()
+
+
+def _project_recipients(scope, key, server_name, server, session, tool, args, raw):
+    from agent.supervision_facade import registrations_for_scope
+    from agent.supervision_owner_protocol import bounded_facts
+    recipients = []
+    projection = None
+    for registration in registrations_for_scope(scope):
+        if (not callable(registration.mcp_adapter) or
+                not {"observe", "rank_candidates"} <= registration.grants or
+                "project_excerpt" not in registration.data_policy):
+            continue
+        for grant in registration.mcp_sources:
+            if (grant["server"] != server_name or grant["tool"] != tool or
+                    not _route_matches(server, grant) or not grant["remote_processing"]):
+                continue
+            binding = _RecipientBinding(registration, registration.generation, grant,
+                registration.mcp_adapter, scope, key, server, session, {})
+            if not binding.current(registration):
+                continue
+            spec = registration.mcp_adapter({"tool": tool, "arguments": dict(args),
+                "result": {"structuredContent": json.loads(raw), "isError": False},
+                "grant": project({k: grant[k] for k in ("accounts", "sources", "modes", "remote_processing", "allow_live_fetch")})})
+            if not isinstance(spec, Mapping) or set(spec) != {"facts", "completeness", "rows_key", "id_key"}:
+                continue
+            facts = bounded_facts(spec["facts"])
+            rows_key, id_key = spec["rows_key"], spec["id_key"]
+            rows = json.loads(raw).get(rows_key)
+            if not isinstance(rows, list) or not 2 <= len(rows) <= 8:
+                continue
+            ids = tuple(row.get(id_key) for row in rows)
+            if (any(type(i) is not str for i in ids) or len(set(ids)) != len(ids) or
+                    tuple(c["id"] for c in facts.get("candidates", [])) != ids):
+                continue
+            admitted = freeze({"facts": facts, "rows_key": rows_key, "id_key": id_key})
+            # A shared opportunity is only meaningful for identical immutable
+            # projections. Each recipient must independently admit it under its
+            # OWN source/account/mode grant; the first parser grants no authority.
+            if projection is not None and admitted != projection:
+                continue
+            projection = admitted
+            recipients.append(replace(binding, projection=admitted))
+            break
+    return tuple(recipients), projection
+
+
 def admit_result(server_name, server, tool, args, typed_result, invoked_session, baseline, operation_deadline):
     from agent.subagent_lifecycle import get_active_subagent_parent
     from agent.supervision_policy import runtime_for_agent
-    from agent.supervision_facade import registrations_for_scope
     from tools.mcp_tool_common import _core, mcp_field
     from tools.mcp_tool_scope import _resolve_server_key, _key_visible_in_scope
     runtime = runtime_for_agent(get_active_subagent_parent())
@@ -79,58 +166,41 @@ def admit_result(server_name, server, tool, args, typed_result, invoked_session,
         if len(raw.encode()) > 262144:
             return baseline
         pinned = json.loads(raw)
-        for registration in registrations_for_scope(scope):
-            if not callable(registration.mcp_adapter) or "rank_candidates" not in registration.grants:
-                continue
-            for grant in registration.mcp_sources:
-                if (grant["server"] != server_name or grant["tool"] != tool or
-                        not _route_matches(server, grant) or not grant["remote_processing"]):
-                    continue
-                session = server.session
-                spec = registration.mcp_adapter({"tool": tool, "arguments": dict(args),
-                    "result": {"structuredContent": json.loads(raw), "isError": False},
-                    "grant": project({k: grant[k] for k in ("accounts", "sources", "modes", "remote_processing", "allow_live_fetch")})})
-                if not isinstance(spec, Mapping) or set(spec) != {"facts", "completeness", "rows_key", "id_key"}:
-                    continue
-                from agent.supervision_owner_protocol import bounded_facts
-                facts = bounded_facts(spec["facts"])
-                candidates = facts.get("candidates", [])
-                rows_key, id_key = spec["rows_key"], spec["id_key"]
-                rows = pinned.get(rows_key)
-                if not isinstance(rows, list) or not 2 <= len(rows) <= 8:
-                    continue
-                ids = tuple(row.get(id_key) for row in rows)
-                if any(type(i) is not str for i in ids) or len(set(ids)) != len(ids) or tuple(c["id"] for c in candidates) != ids:
-                    continue
-                target = "mcp:" + uuid.uuid4().hex
-                facts["target_id"] = target
-                request = OwnerRequestV1("mcp", target, runtime.revision, tuple(candidates),
-                    runtime.shared_deadline(operation_deadline), required_ids=ids, data_policy=("project_excerpt",),
-                    event="retrieval_candidates", requires_ack=True, facts=facts,
-                    completeness=Completeness(complete=False, omitted=True),
-                    evidence_refs=tuple(c["ref"] for c in candidates))
-                decision = runtime.owner_decision(Action.RANK_CANDIDATES, request)
-                if not decision.selected:
-                    return baseline
-                with _core._lock:
-                    current = (_core._servers.get(key) is server and server.session is session and
-                               _key_visible_in_scope(key, scope) and _route_matches(server, grant))
-                if not current or set(decision.candidate_ids) != set(ids):
-                    runtime.acknowledge_owner(target, decision.receipt_id, decision.candidate_ids, None)
-                    return baseline
-                by_id = dict(zip(ids, rows))
-                result = {**pinned, rows_key: [by_id[i] for i in decision.candidate_ids]}
-                # Parse only our native renderer's JSON framing, never its display
-                # prose as evidence. Reuse it to avoid caching media blocks twice.
-                envelope = json.loads(baseline)
-                if not isinstance(envelope, dict) or "error" in envelope:
-                    runtime.acknowledge_owner(target, decision.receipt_id, decision.candidate_ids, None)
-                    return baseline
-                envelope["result" if isinstance(envelope.get("result"), dict) else "structuredContent"] = result
-                rendered = json.dumps(envelope, ensure_ascii=False)
-                digest = hashlib.sha256(rendered.encode()).hexdigest()
-                receipt = runtime.acknowledge_owner(target, decision.receipt_id, decision.candidate_ids, digest)
-                return rendered if receipt and receipt.status == "applied" else baseline
+        recipients, projection = _project_recipients(scope, key, server_name, server,
+            invoked_session, tool, args, raw)
+        if not recipients or projection is None:
+            return baseline
+        facts = project(projection["facts"])
+        candidates = facts["candidates"]
+        rows_key, id_key = projection["rows_key"], projection["id_key"]
+        rows = pinned[rows_key]
+        ids = tuple(row[id_key] for row in rows)
+        target = "mcp:" + uuid.uuid4().hex
+        facts["target_id"] = target
+        request = OwnerRequestV1("mcp", target, runtime.revision, tuple(candidates),
+            runtime.shared_deadline(operation_deadline), required_ids=ids, data_policy=("project_excerpt",),
+            event="retrieval_candidates", requires_ack=True, facts=facts,
+            completeness=Completeness(complete=False, omitted=True),
+            evidence_refs=tuple(c["ref"] for c in candidates))
+        decision = runtime.owner_decision(Action.RANK_CANDIDATES, request, mcp_recipients=recipients)
+        if not decision.selected:
+            return baseline
+        if set(decision.candidate_ids) != set(ids):
+            runtime.acknowledge_owner(target, decision.receipt_id, decision.candidate_ids, None)
+            return baseline
+        by_id = dict(zip(ids, rows))
+        result = {**pinned, rows_key: [by_id[i] for i in decision.candidate_ids]}
+        # Parse only our native renderer's JSON framing, never its display
+        # prose as evidence. Reuse it to avoid caching media blocks twice.
+        envelope = json.loads(baseline)
+        if not isinstance(envelope, dict) or "error" in envelope:
+            runtime.acknowledge_owner(target, decision.receipt_id, decision.candidate_ids, None)
+            return baseline
+        envelope["result" if isinstance(envelope.get("result"), dict) else "structuredContent"] = result
+        rendered = json.dumps(envelope, ensure_ascii=False)
+        digest = hashlib.sha256(rendered.encode()).hexdigest()
+        receipt = runtime.acknowledge_owner(target, decision.receipt_id, decision.candidate_ids, digest)
+        return rendered if receipt and receipt.status == "applied" else baseline
     except (ValueError, TypeError, KeyError, AttributeError, RuntimeError):
         return baseline
     return baseline

@@ -104,6 +104,23 @@ profile-visible connection registry at admission and consumption. Tool/account/
 source/mode and route mismatches abstain. Existing per-field egress policy and
 `project_excerpt` local observation permission are additionally required.
 
+MCP opportunities retain host-only bindings to each admitted recipient's exact
+registration/generation, source grant, adapter, profile-visible server instance
+and invoked session. Each recipient independently projects under its own grant;
+only identical immutable projections share an opportunity. A generic observation
+or field-egress grant cannot borrow another registration's MCP source authority.
+Unauthorized observers receive neither facts nor egress policy. Admission is
+rechecked immediately before observer dispatch, at proposal submission/selection,
+and at final acknowledgment; the latter holds the registration revocation and
+MCP transport registry fences through receipt settlement. Independently authorized
+recipients remain eligible when another recipient unloads. Conflicting projections
+abstain rather than mixing source scopes. A typed request merely claiming the
+`mcp` owner, without the real transport binding, cannot dispatch an opportunity.
+No new budget is allocated per recipient. Selection remains `accepted/owner_selected`
+until the existing owner acknowledgment persists the exact consumed-view digest.
+The registered pure projection adapters remain trusted local parsers, not remote
+inference or a sandbox for untrusted Python code.
+
 The Switchloom plugin projection consumes `search_context` structuredContent,
 requires the server's explicit `candidate_budget` omission before triage,
 preserves every item, citation, error/completeness field and allowed transport

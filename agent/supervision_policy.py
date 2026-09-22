@@ -242,10 +242,14 @@ class SupervisionRuntime:
     def observe(self, event, facts, *, target_id=None, actions=(), evidence_refs=(),
                 deadline=None, completeness=None, origin_kind="owner", data_class="task_text",
                 owner="agent", candidates=(), required_ids=(), relations=(), required_data_classes=(),
-                required_obligations=(), deadline_issued_at=None, recipient=None, expected_revision=None):
+                required_obligations=(), deadline_issued_at=None, recipient=None, expected_revision=None,
+                mcp_recipients=()):
+        from agent.supervision_mcp import recipient_authorized
         regs = [r for r in self._registrations() if (recipient is None or r is recipient)
                 and "observe" in r.grants and data_class in r.data_policy
                 and set(required_data_classes) <= r.data_policy]
+        if owner == "mcp":
+            regs = [r for r in regs if recipient_authorized(mcp_recipients, r)]
         if not regs or (self.closed and owner != "completion_admission") or (deadline is not None and deadline <= self.clock()):
             return None
         with self.lock:
@@ -265,6 +269,7 @@ class SupervisionRuntime:
                 "revision": self.revision, "deadline": expiry, "actions": frozenset(actions),
                 "refs": frozenset(evidence_refs), "owner": owner, "candidates": tuple(candidates),
                 "required_ids": tuple(required_ids), "relations": tuple(relations),
+                "mcp_recipients": tuple(mcp_recipients) if owner == "mcp" else (),
             }
             while len(self.opportunities) > 64:
                 self.opportunities.popitem(last=False)
@@ -275,6 +280,11 @@ class SupervisionRuntime:
                 turn_id=getattr(self.agent(), "_current_turn_id", "") or "",
                 tool_call_id=target_id if event == "action_proposed_with_scope_conflict" else "")
         for reg in regs:
+            # Recheck immediately before disclosing any facts or issuing egress
+            # policy; admission of another recipient is never transferable.
+            if owner == "mcp" and (self.clock() >= expiry or
+                    not recipient_authorized(mcp_recipients, reg)):
+                continue
             # Consumers only schedule their bounded worker. Never call arbitrary provider code
             # under the instruction/control fence, tool authorization lock or database lock.
             policy = reg.egress_policy
@@ -323,6 +333,11 @@ class SupervisionRuntime:
             return "expired", "opportunity_deadline"
         if proposal.owner != opportunity["owner"] or proposal.action not in opportunity["actions"]:
             return "rejected", "owner_action_mismatch"
+        if opportunity["owner"] == "mcp":
+            from agent.supervision_mcp import recipient_authorized
+            if not recipient_authorized(opportunity["mcp_recipients"], registration,
+                                        transport_locked=acknowledging):
+                return "rejected", "revoked"
         if not proposal.evidence_refs or not set(proposal.evidence_refs) <= opportunity["refs"]:
             return "rejected", "unbound_evidence"
         if proposal.target_id in self.action_edges:
@@ -697,7 +712,7 @@ class SupervisionRuntime:
                 return advisory
         return None
 
-    def owner_decision(self, action, request):
+    def owner_decision(self, action, request, *, mcp_recipients=()):
         self._assert_owner(tool_worker=True)
         if not isinstance(request, OwnerRequestV1):
             raise TypeError("owner_request_type")
@@ -716,7 +731,8 @@ class SupervisionRuntime:
             evidence_refs=refs, deadline=deadline, completeness=request.completeness,
             owner=request.owner, candidates=ids, required_ids=request.required_ids,
             relations=request.relations, data_class=request.data_policy[0],
-            required_data_classes=request.data_policy, required_obligations=request.required_ids)
+            required_data_classes=request.data_policy, required_obligations=request.required_ids,
+            mcp_recipients=mcp_recipients)
         if snapshot is None:
             return baseline
         self._wait_for(request.target_id, deadline, request.revision)
@@ -793,7 +809,8 @@ class SupervisionRuntime:
             if tuple(candidate_ids) != ids:
                 return None
             self.owner_selections.pop(receipt_id)
-            with registration.fence:
+            from agent.supervision_mcp import consumption_fence
+            with registration.fence, consumption_fence(self.opportunities.get(target_id)):
                 failure = self._validate(proposal, registration, acknowledging=True)
                 if failure:
                     return self._settle(proposal, *failure)
