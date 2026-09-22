@@ -111,4 +111,3 @@ def test_session_rebind_before_lookup_is_rejected(native,mode):
     assert native.engine.current_session_id=='session-B'
     with bind_subagent_parent(native.agent):
         assert native.recipient.literal_source(version=VERSION,ref=refs[0]) is None
-
