@@ -497,6 +497,10 @@ class OwnedDelegationOwner:
                 self._commit(live, lambda s: s.update(cancel_requested=True, candidate=None))
             return self._receipt(live.snapshot, not live.snapshot['settled'], 'explicit_stop')
 
+    def semantic_authorized(self, handle):
+        """Configured owners recheck live profile and authenticated consumer authority."""
+        return True
+
     def request_semantic_cancel(self, handle, *, expected_revision, evidence: SemanticEvidence,
                                 idempotency_key: str, deadline: float, feature_id='F01', _defer_signal=False):
         with self._lock:
@@ -522,7 +526,7 @@ class OwnedDelegationOwner:
                 return self._receipt(s, False, 'deadline_expired')
             if s['control_revision'] != expected_revision:
                 return self._receipt(s, False, 'stale_control_revision')
-            if (s['cancel_requested'] or s['settled'] or s['obligation'] != 'optional' or
+            if (not self.semantic_authorized(handle) or s['cancel_requested'] or s['settled'] or s['obligation'] != 'optional' or
                     not s['consumer_set_closed'] or not s['consumers'] or s['effect_class'] != 'read_only' or
                     s['handoffs'] or s['cleanup_pending'] or not self._grant.allow_optional_readonly or
                     any(c['obligation'] != 'optional' or c['requires_result'] or c['requires_effects'] or c['requires_cleanup'] for c in s['consumers'])):
@@ -589,8 +593,14 @@ def install_owner(parent, *, store, grant, consumer_resolver, policy, revision_p
 def owner_of(parent):
     owner = getattr(parent, '_owned_delegation_owner', None)
     if not isinstance(owner, OwnedDelegationOwner):
-        return None
+        from agent.owned_delegation_policy import configured_owner
+        owner = configured_owner(parent)
+        if owner is None:
+            return None
     if str(getattr(parent, 'session_id', '')) != owner.parent_session_id and not binding_of(parent):
+        from agent.owned_delegation_policy import ConfiguredDelegationOwner
+        if isinstance(owner, ConfiguredDelegationOwner):
+            return None  # reset preserves legacy launch and the old children's owner
         raise ControlDenied('Parent session generation changed; reinstall the owner')
     return owner
 
@@ -608,7 +618,8 @@ def register_launch(parent, child, request=None, *, goal=""):
         return None
     handle = owner.launch(parent, child, request, goal=goal)
     from agent.supervision_children import attach
-    attach(parent, owner, handle)
+    if handle is not None:
+        attach(parent, owner, handle)
     return handle
 
 

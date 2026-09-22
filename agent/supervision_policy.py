@@ -79,6 +79,8 @@ def runtime_for_agent(agent, *, create=False):
     agent._supervision_runtime = runtime
     from agent.supervision_view_binding import attach_views
     attach_views(runtime)
+    from agent.owned_delegation_policy import configured_owner
+    configured_owner(agent)
     return runtime
 
 
@@ -124,6 +126,7 @@ class SupervisionRuntime:
         self.invalidated_action_edges = {}
         self.invalidated_action_facts = {}
         self.closed_targets = set()
+        self.child_control_waiters = {}
         self.last_final = None
         self.last_final_text = ""
         self.round_deadline = None
@@ -207,6 +210,8 @@ class SupervisionRuntime:
             spans, complete = enumerate_requirements(origin.text, origin.message_id)
             self.requirements = (*self.requirements, *spans)[-32:]
             self.completeness = replace(complete, omitted=complete.omitted or omitted)
+            from agent.owned_delegation_policy import accept_consumer_contracts
+            accept_consumer_contracts(self, origin)
             self.designated_refs.update(refs_in_text(bounded))
             self._remember()
             # Publish durable work before callbacks can enqueue receipt writers.
@@ -804,8 +809,11 @@ class SupervisionRuntime:
         revision under its control lock before returning applied/no_op/stale/rejected.
         No provider I/O, arbitrary commands, waiting or new agent turns belong here.
         """
-        self._assert_owner(tool_worker=True)
         action = Action(action)
+        wait_targets = self.child_control_waiters.get(threading.get_ident(), ())
+        if (_observer_callback.get() or target_id not in wait_targets
+                or action not in {Action.REPRIORITIZE_CHILD, Action.CANCEL_CHILD}):
+            self._assert_owner(tool_worker=True)
         with self.lock:
             entry = self._take(target_id, {action})
             if entry is None:

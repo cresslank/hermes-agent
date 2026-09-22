@@ -116,7 +116,7 @@ class ChildRelevanceOwner:
                     s = self._snapshot(owned, scope, registration.generation)
                 except (ValueError, OSError, sqlite3.Error):
                     continue
-                if s["settled"] or s["cancel_requested"]:
+                if not self.owner.semantic_authorized(owned) or s["settled"] or s["cancel_requested"]:
                     continue
                 consumers = s["consumers"]
                 if not 0 < len(consumers) <= 8 or any(not c.get("requirement_ids") for c in consumers):
@@ -205,7 +205,7 @@ class ChildRelevanceOwner:
                 s = live.snapshot
                 if s["control_revision"] != expected or _scope(runtime.revision) != scope or _guard(s) != guard:
                     return "stale"
-                if s["cancel_requested"] or s["settled"] or s["inflight"]:
+                if not owner.semantic_authorized(handle) or s["cancel_requested"] or s["settled"] or s["inflight"]:
                     return "no_op"
                 # A priority proposal without this independently validated observation
                 # can never prime cancellation. Nor can a claimed prior receipt.
@@ -244,6 +244,8 @@ class ChildRelevanceOwner:
                         owner._commit(live, lambda n: n.update(semantic_observation=record), deadline=proposal.expires_at_monotonic)
                     elif not receipt.accepted:
                         return "no_op"
+                if not cancel and not getattr(owner, "priority_effects_supported", True):
+                    return "no_op"  # observation persisted; no scheduler consumed a priority effect
                 if not cancel and expected_priority != "unchanged":
                     # Required and unknown workers retain ordinary scheduling regardless
                     # of semantic priority advice. Only optional attested work may yield.
@@ -290,9 +292,11 @@ def committed_child_plan(store):
     items = store.read()
     if not 0 < len(items) <= 4:
         return
-    milestone = json.dumps(items, sort_keys=True, ensure_ascii=False)
-    if len(milestone) > 1000:
+    if len(json.dumps(items, sort_keys=True, ensure_ascii=False)) > 1000:
         return  # do not truncate a plan qualifier or an obligation
+    # Row IDs and reordering are bookkeeping, not a changed declared deliverable.
+    # Preserve the full content/status multiset; no semantic thresholds change.
+    milestone = json.dumps(sorted((item["content"], item["status"]) for item in items), ensure_ascii=False)
     try:
         binding[0].record_progress(binding[1], milestone)
     except (ValueError, OSError, sqlite3.Error):
@@ -310,7 +314,8 @@ def scheduling_priority(child):
     state = binding[0].status(binding[1])
     bridge = getattr(binding[0], '_relevance_bridge', None)
     from hermes_constants import hermes_home_key
-    if (bridge is None or bridge.runtime.closed or state['obligation'] != 'optional'
+    if (bridge is None or not binding[0].semantic_authorized(binding[1])
+            or bridge.runtime.closed or state['obligation'] != 'optional'
             or hermes_home_key() != bridge.runtime.revision.profile
             or state.get('priority_revision') != project(bridge.runtime.revision)
             or state.get('priority_scope') != list(_scope(bridge.runtime.revision))
