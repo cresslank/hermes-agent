@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from contextlib import contextmanager
+from functools import wraps
+from inspect import signature
 import logging
 import json
 import threading
@@ -18,6 +21,46 @@ _active_subagents_lock = threading.Lock()
 # subagent_id -> mutable record tracking the live child agent.  Stays only
 # for the lifetime of the run; _run_single_child is the owner.
 _active_subagents: Dict[str, Dict[str, Any]] = {}
+# Native admission reservations cover construction/publication gaps, not a worker
+# graph or a grant. The epoch also detects a completed/failed launch (ABA) while
+# an optional planning decision was in flight. Never reset or reuse it.
+_admission_epoch = 0
+_pending_admissions = {}
+
+
+@contextmanager
+def native_admission(parent, *, session_id=None):
+    global _admission_epoch
+    token = object()
+    with _active_subagents_lock:
+        _admission_epoch += 1
+        _pending_admissions[token] = (parent, str(session_id or getattr(parent, "session_id", "") or ""))
+    try:
+        yield
+    finally:
+        with _active_subagents_lock:
+            _pending_admissions.pop(token, None)
+            _admission_epoch += 1
+
+
+def track_native_admission(function):
+    """Cover all native entry points, including direct/lifecycle construction.
+
+    Only reservation insertion/removal holds the registry lock. Credential,
+    constructor, provider and tool I/O run outside it, unchanged.
+    """
+    binding = signature(function)
+    @wraps(function)
+    def admitted(*args, **kwargs):
+        values = binding.bind(*args, **kwargs).arguments
+        parent = values.get("parent_agent")
+        action = values.get("action") or ""
+        if parent is None or (isinstance(action, str) and action.strip().lower() not in ("", "spawn")):
+            return function(*args, **kwargs)
+        with native_admission(parent):
+            return function(*args, **kwargs)
+    return admitted
+
 # subagent_id -> {goal, delegation_id, owner_agent_session_id} retained AFTER the child finishes (bounded FIFO).
 # Child-started background processes routinely outlive the child (its npm ci with notify_on_complete=true finishes
 # after the summary was delivered); their completion notifications reach the parent via the shared completion_queue

@@ -676,7 +676,9 @@ def _dispatch(**kwargs) -> Dict[str, Any]:
     with retirement.work() as admitted:
         if not admitted:
             return {"status": "rejected", "error": "backend is retiring; reconnect to continue"}
-        return _dispatch_admitted(**kwargs)
+        from tools.delegate_tool_registry import native_admission
+        with native_admission(None, session_id=kwargs.get("parent_session_id")):
+            return _dispatch_admitted(**kwargs)
 
 
 def _dispatch_admitted(
@@ -745,6 +747,13 @@ def _dispatch_admitted(
     executor = _get_executor(max(max_async_children, live_units))
 
     def _worker() -> None:
+        # A stale delivery can settle before the real runner exits. Keep native
+        # census admission until actual execution/finalization leaves this frame.
+        from tools.delegate_tool_registry import native_admission
+        with native_admission(None, session_id=parent_session_id):
+            _run_worker()
+
+    def _run_worker() -> None:
         result: Dict[str, Any] = {}
         status = "error"
         with _records_lock:

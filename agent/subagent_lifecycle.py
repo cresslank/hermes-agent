@@ -247,6 +247,11 @@ class SubagentLifecycleService:
         parent = self._parent_agent_resolver()
         if parent is None:
             raise SubagentLifecycleError("No active Hermes parent session is available.")
+        from tools.delegate_tool_registry import native_admission
+        with native_admission(parent):
+            return self._launch(request, parent)
+
+    def _launch(self, request, parent):
         self._validate_request(request, parent)
         parent_session_id = _session_id_of(parent)
         if request.parent_session_id and request.parent_session_id != parent_session_id:

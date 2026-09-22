@@ -196,8 +196,28 @@ API, but that extension is not evidence of configured-native coverage.
 Advice changes only `proposed -> advised`; the parent still decides. A later exact
 ordinary `withdraw_expansion` commit records `withdrawn_by_parent`. Neither advice
 nor a low-yield answer marks work skipped/cancelled/completed or closes an F20
-requirement. A later actually dispatched expansion is recorded as issued, not
-prevented work. No performance savings are inferred from the advisory receipt.
+requirement. A later actually dispatched expansion is recorded as `issued`, even
+after withdrawal, retaining the exact withdrawal source receipt alongside the
+current dispatch call ID. Dispatches with a different operation or stale work/
+instruction identity do not rebind that record. No read is suppressed and no
+performance savings are inferred. A busy/unavailable canonical writer cannot
+certify issuance; it never causes a tool replay to repair a receipt.
+
+Native completeness includes pending construction/publication reservations,
+attached children, live subagents and retained async/public lifecycle records.
+A native admission epoch invalidates an in-flight observation even when the
+launch has already failed or finished. Final consumption acquires the native
+inventory locks without waiting and holds them only through the local receipt
+and request-advisory transition. Construction, credentials, tool/model execution
+and semantic waits run outside those locks. Timed-out workers retain their
+native reservation until deferred cleanup finishes. Unknown, oversized or busy
+inventories abstain; retained results are not inferred delivered. The epoch is
+process-wide, so an unrelated concurrent launch can conservatively veto advice.
+
+Both F05 and F08 planning use only nonblocking fresh-cache configuration reads,
+including commit-time snapshots and final instruction-fenced validation. Cold,
+changed, parse-failed or contended caches abstain; ordinary configuration loading
+outside the optional fences owns refresh. No optional path renews the deadline.
 
 ## Canonical owner-record API and bounds
 

@@ -44,7 +44,7 @@ from tools.delegate_tool_registry import (  # noqa: F401
     _CONTROL_ACTIONS, _active_subagents, _active_subagents_lock, _capture_gateway_steer_authority,
     _handle_control_action, _is_descendant_of, _owns_subagent_record, _register_subagent, _unregister_subagent,
     get_subagent_attribution, interrupt_subagent, is_spawn_paused, list_active_subagents, set_spawn_paused,
-    steer_subagent,
+    steer_subagent, track_native_admission,
 )
 from tools.delegate_tool_tasks import (  # noqa: F401
     _MAX_TASK_IMAGES, _coerce_task_images, _coerce_task_schemas, _normalize_task_images, _normalize_task_list,
@@ -153,6 +153,7 @@ def _apply_child_compression_cap(child, delegation_cfg: dict) -> None:
         cc._apply_threshold_tokens_cap()
 
 
+@track_native_admission
 def _build_child_agent(
     task_index: int,
     goal: str,
@@ -361,6 +362,7 @@ def _run_single_child(
         run.cleanup(heartbeat=heartbeat, child_pool=child_pool, leased_cred_id=leased_cred_id, close_deferred=_child_close_deferred)
 
 
+@track_native_admission
 def _build_children(
     task_list: List[Dict[str, Any]], task_schemas: List[Optional[Dict[str, Any]]], creds: Dict[str, Any], *,
     top_role: str, max_iterations: int, parent_agent, routing_cfg: Dict[str, Any],
@@ -435,12 +437,12 @@ def _build_children(
     return children, None
 
 
-def _oneshot_spawn_preflight(parent_agent: Any, requested: int) -> Optional[str]:
+def _oneshot_spawn_preflight(parent_agent: Any, requested: int, *, config=None) -> Optional[str]:
     """Read-only budget validation shared with actual charging; no reservation."""
     from agent.oneshot_footprint import is_single_query_session
     if not is_single_query_session():
         return None
-    cap = _get_oneshot_max_children()
+    cap = _get_oneshot_max_children() if config is None else _get_oneshot_max_children(config=config)
     if cap <= 0:
         return None
     spent = getattr(parent_agent, "_oneshot_children_spawned", 0)
@@ -463,6 +465,7 @@ def _oneshot_spawn_budget(parent_agent: Any, requested: int) -> Optional[str]:
     return None
 
 
+@track_native_admission
 def delegate_task(
     goal: Optional[str] = None, context: Optional[str] = None, tasks: Optional[List[Dict[str, Any]]] = None,
     max_iterations: Optional[int] = None, role: Optional[str] = None, background: Optional[bool] = None,

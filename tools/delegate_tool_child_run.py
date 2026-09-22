@@ -432,7 +432,19 @@ def _defer_close_after_timeout(child: Any, child_future: Any) -> None:
     sweep + one delayed re-sweep for a connection opened in between; a worker that still won't settle keeps its
     resources until process exit.
     """
-    child_future.add_done_callback(lambda _done: _close_child(child, "Failed to close timed-out child after worker exit"))
+    # Normal timeout cleanup detaches/unregisters before the actual worker has
+    # exited. Retain native admission until that worker's deferred close finishes;
+    # an empty live list must not certify absence in this interval.
+    from tools.delegate_tool_registry import native_admission
+    parent_ref = getattr(child, "_delegate_parent_ref", None)
+    pending = native_admission(parent_ref() if callable(parent_ref) else None)
+    pending.__enter__()
+    def close_done(_done):
+        try:
+            _close_child(child, "Failed to close timed-out child after worker exit")
+        finally:
+            pending.__exit__(None, None, None)
+    child_future.add_done_callback(close_done)
     # Bounded drain (#94248 native half): the deferred close above only fires once the abandoned worker
     # unwinds, but that worker is typically parked inside an in-flight OpenSSL read (Codex / httpx). Never
     # hard-close that transport from this thread — releasing FDs under a live SSL read is the #29507/#70773

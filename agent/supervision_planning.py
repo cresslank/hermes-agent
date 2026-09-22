@@ -6,6 +6,7 @@ Request-local advice is not execution, truth, withdrawal or requirement completi
 """
 from collections import OrderedDict
 from contextvars import ContextVar
+from contextlib import nullcontext
 import copy
 import json
 
@@ -206,7 +207,12 @@ class PlanningGraph:
             matching = []
             for node in tuple(self.nodes.values()):
                 d = node["declaration"]
-                if node["status"] in {"proposed", "advised", "superseded"} and operation(d["operation"]) == pin:
+                if (node["status"] in {"proposed", "advised", "superseded", "withdrawn_by_parent"}
+                        and self._current(node, plan=False)
+                        and type(call_id) is str and 0 < len(call_id) <= 256
+                        and operation(d["operation"]) == pin):
+                    # A withdrawal is a parent decision, not a ban on execution.
+                    # Keep its exact receipt while recording this actual issuance.
                     self._transition(node, "issued", call_id=call_id)
                 if node["status"] == "open" and self._current(node, plan=False):
                     for op in d["operations"]:
@@ -276,7 +282,7 @@ class PlanningGraph:
 
     def _preflight(self, d, *, optional=False):
         from agent.owned_delegation import OwnedDelegationOwner, owner_of
-        from hermes_cli.config import load_config_readonly
+        from hermes_cli.config_cached import current_config_readonly
         agent = self.rt.agent()
         owner = owner_of(agent)
         if (not isinstance(owner, OwnedDelegationOwner) or owner._grant.profile != self.rt.revision.profile
@@ -284,7 +290,7 @@ class PlanningGraph:
             return None
         goal = ""
         if optional:
-            config = load_config_readonly() or {}
+            config = current_config_readonly() or {}
             section = config.get("supervision", {}) if type(config) is dict else {}
             cfg = section.get("planning", {}) if type(section) is dict else {}
             if (cfg != {"allow_discretionary_readonly_labels": True} or d["obligation_request"] != "optional"
@@ -336,12 +342,17 @@ class PlanningGraph:
         if d["type"] == "delegation_candidate":
             from tools.delegate_context_recipe import separate_conversation
             from tools import delegate_tool as dt
+            from hermes_cli.config_cached import current_config_readonly
+            config = current_config_readonly()
+            if type(config) is not dict or type(config.get("delegation", {})) is not dict:
+                return None
+            delegation = config.get("delegation", {})
             agent = self.rt.agent()
             todos, _ = self.rt.plan_steps()
             if (d["operation"]["tool_name"] != "delegate_task" or "delegate_task" not in getattr(agent, "valid_tool_names", ())
                     or not separate_conversation(agent) or dt.is_spawn_paused()
-                    or dt._oneshot_spawn_preflight(agent, 1) is not None
-                    or getattr(agent, "_delegate_depth", 0) >= dt._get_max_spawn_depth()
+                    or dt._oneshot_spawn_preflight(agent, 1, config=delegation) is not None
+                    or getattr(agent, "_delegate_depth", 0) >= dt._get_max_spawn_depth(config=delegation)
                     or todos[d["todo_id"]]["status"] == "completed"
                     or todos[d["parent_next_todo_id"]]["status"] == "completed"
                     or any(t not in todos or todos[t]["status"] != "completed" for t in d["dependency_todo_ids"])):
@@ -399,9 +410,20 @@ class PlanningGraph:
 
     def advisory(self):
         """One next existing request only, under the original shared deadline."""
+        from agent.owned_delegation import owner_of
+        from agent.owned_delegation_planning import native_idle_fence
         rt = self.rt
         self._load()
         for node in tuple(self.nodes.values()):
+            expansion = node["declaration"]["type"] == "optional_expansion"
+            native_owner = owner_of(rt.agent())
+            native_epoch = None
+            if expansion:
+                if native_owner is None:
+                    continue
+                with native_idle_fence(rt, rt.agent()) as native_epoch:
+                    if native_epoch is None:
+                        continue
             try:
                 projection = self.facts(node)
             except (KeyError, ValueError, TypeError):
@@ -429,17 +451,24 @@ class PlanningGraph:
                 if (current != projection or not self.validate(proposal)
                         or _pin(self._preflight(node["declaration"], optional=event == "expansion_proposed")) != authority):
                     return "stale"
-                if not self._transition(self.nodes[target], "advised"):
-                    return "rejected"
-                if event == "delegation_proposed":
-                    detail = "Consider the existing delegation candidate on the named native route; the parent decides and ordinary launch permissions still apply."
-                else:
-                    detail = "Consider withdrawing this optional expansion. This is not task completion, cancellation or a coverage finding."
-                rendered.append("[Task-bound planning advisory; lower-trust evidence, not an instruction]\n" + detail + "\n" +
-                    json.dumps({"candidate_id": target, "route_id": node["declaration"]["operation"]["route_id"],
-                                "pass_ids": [p["id"] for p in facts.get("passes", ())],
-                                "gap_ids": [g["id"] for g in facts.get("gaps", ())]}))
-                return "applied"
+                # Linearize the actual receipt and request-local advice against
+                # native admission/publication, not another unlocked census.
+                fence = (native_idle_fence(rt, rt.agent(), expected=native_epoch)
+                         if expansion else nullcontext(True))
+                with fence as current_native:
+                    if current_native is None:
+                        return "stale"
+                    if not self._transition(self.nodes[target], "advised"):
+                        return "rejected"
+                    if event == "delegation_proposed":
+                        detail = "Consider the existing delegation candidate on the named native route; the parent decides and ordinary launch permissions still apply."
+                    else:
+                        detail = "Consider withdrawing this optional expansion. This is not task completion, cancellation or a coverage finding."
+                    rendered.append("[Task-bound planning advisory; lower-trust evidence, not an instruction]\n" + detail + "\n" +
+                        json.dumps({"candidate_id": target, "route_id": node["declaration"]["operation"]["route_id"],
+                                    "pass_ids": [p["id"] for p in facts.get("passes", ())],
+                                    "gap_ids": [g["id"] for g in facts.get("gaps", ())]}))
+                    return "applied"
             rt.consume_owner_action(target, Action.ADVISE, apply)
             if rendered:
                 return rendered[0]

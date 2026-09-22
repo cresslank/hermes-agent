@@ -4,6 +4,7 @@ v1 launch declarations deliberately do not establish corroboration absence or a
 whole-work census. The additional v2 ingress contract does, for bounded NEW
 parent-only work only. Neither a work-map nor model tool arguments can issue it.
 """
+from contextlib import contextmanager, ExitStack
 from dataclasses import dataclass, replace
 import json
 import re
@@ -104,36 +105,57 @@ def launch_resolution(owner, parent, request, goal):
                     "parent:" + owner.parent_session_id: replace(consumer, ref="parent:" + owner.parent_session_id)}
 
 
-def _no_native_workers(owner, parent):
-    """Veto unaccounted legacy/async consumers using native registries, not labels.
+@contextmanager
+def native_idle_fence(runtime, parent, *, expected=None):
+    """Atomic, zero-wait native census, held only through bounded consumption.
 
-    Nonblocking reads avoid adding a lock-order dependency to scheduler/steering
-    code. Unavailable/oversized inventories are unknown, never an empty census.
-    Async completed rows are retained too: delivery/cleanup is not inferred here.
+    An admission epoch prevents ABA during semantic work. All native inventory
+    locks remain held through the final local receipt/advisory transition, never
+    through inference, construction, credentials, tool I/O or a wait. Unknown,
+    contended and oversized inventories are not complete. Retained async/public
+    lifecycle results still veto: delivery/cleanup is not inferred from status.
     """
-    from tools import async_delegation, delegate_tool_registry
-    lock = getattr(parent, "_active_children_lock", None)
-    if lock is None or not lock.acquire(blocking=False):
-        return False
-    try:
-        if getattr(parent, "_active_children", None) != []:
-            return False
-    finally:
-        lock.release()
-    session_ids = {str(parent.session_id), owner.runtime.revision.lineage}
-    for lock, rows, owner_field in (
-        (delegate_tool_registry._active_subagents_lock, delegate_tool_registry._active_subagents, "owner_agent_session_id"),
-        (async_delegation._records_lock, async_delegation._records, "parent_session_id"),
-    ):
-        if not lock.acquire(blocking=False):
-            return False
-        try:
+    from tools import async_delegation, delegate_tool_registry as registry
+    from agent.subagent_lifecycle import _REGISTRY
+    locks = (registry._active_subagents_lock, getattr(parent, "_active_children_lock", None),
+             async_delegation._records_lock, _REGISTRY.lock)
+    with ExitStack() as stack:
+        for lock in locks:
+            if lock is None or not lock.acquire(blocking=False):
+                yield None
+                return
+            stack.callback(lock.release)
+        epoch = registry._admission_epoch
+        if ((expected is not None and expected != epoch)
+                or getattr(parent, "_active_children", None) != []):
+            yield None
+            return
+        session_ids = {str(parent.session_id), runtime.revision.lineage}
+        pending = registry._pending_admissions
+        if len(pending) > 1024 or any(not sid or sid in session_ids or p is parent
+                or registry._is_descendant_of(p, parent) for p, sid in pending.values()):
+            yield None
+            return
+        for rows, owner_field in (
+            (registry._active_subagents, "owner_agent_session_id"),
+            (async_delegation._records, "parent_session_id"),
+        ):
             if len(rows) > 1024 or any(not r.get(owner_field) or str(r[owner_field]) in session_ids
-                    or delegate_tool_registry._is_descendant_of(r.get("agent"), parent) for r in rows.values()):
-                return False
-        finally:
-            lock.release()
-    return True
+                    or registry._is_descendant_of(r.get("agent"), parent) for r in rows.values()):
+                yield None
+                return
+        if (len(_REGISTRY.records) > 1024 or len(_REGISTRY.correlations) > 1024
+                or any(not r.handle.parent_session_id or r.handle.parent_session_id in session_ids
+                       or registry._is_descendant_of(r.agent, parent) for r in _REGISTRY.records.values())
+                or any(not key[0] or key[0] in session_ids for key in _REGISTRY.correlations)):
+            yield None
+            return
+        yield epoch
+
+
+def _no_native_workers(owner, parent):
+    with native_idle_fence(owner.runtime, parent) as epoch:
+        return epoch is not None
 
 
 def planning_preflight(owner, parent, request, *, goal="", operation=None, require_inventory=False):
