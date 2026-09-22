@@ -355,6 +355,8 @@ async def web_extract_tool(urls: List[Any], format: str = None, char_limit: Opti
     pointing at the stored full text; inline base64 images become ``[IMAGE: alt]``. URLs carrying secrets are
     refused before any fetch; private-network URLs are blocked per entry. Returns JSON ``{"results": [...]}``.
     """
+    from contextlib import ExitStack
+
     normalized_urls, normalized_indices, invalid_urls, blocked = _validate_extract_urls(urls)
     if blocked is not None:
         return blocked
@@ -364,6 +366,8 @@ async def web_extract_tool(urls: List[Any], format: str = None, char_limit: Opti
         "truncation_metrics": [], "processing_applied": [],
     }
 
+    presentation_stack = ExitStack()
+    finalize_presentation = None
     try:
         logger.info("Extracting content from %d URL(s)", len(normalized_urls))
         # SSRF protection — filter private/internal URLs before any backend.
@@ -384,6 +388,11 @@ async def web_extract_tool(urls: List[Any], format: str = None, char_limit: Opti
             provider, error_json = _resolve_extract_provider(backend)
             if error_json is not None:
                 return error_json
+            # Optional provider protocol: transport stays in its worker, while
+            # final presentation/consumption runs on this authenticated owner.
+            presentation = getattr(provider, "extract_presentation", None)
+            if callable(presentation):
+                finalize_presentation = presentation_stack.enter_context(presentation())
             results = await _extract_safe_urls(provider, safe_urls, format)
         # Reconstruct input order across invalid, blocked, and provider entries (providers preserve
         # the order of the safe URL list they receive).
@@ -406,9 +415,11 @@ async def web_extract_tool(urls: List[Any], format: str = None, char_limit: Opti
         debug_call_data["final_response_size"] = len(cleaned_result)
         debug_call_data["processing_applied"].append("base64_image_conversion")
         _finish_debug("web_extract_tool", debug_call_data)
-        return cleaned_result
+        return finalize_presentation(cleaned_result) if finalize_presentation is not None else cleaned_result
     except Exception as e:
         return _finish_debug("web_extract_tool", debug_call_data, f"Error extracting content: {str(e)}")
+    finally:
+        presentation_stack.close()
 
 
 def _provider_is_ready(provider) -> bool:
