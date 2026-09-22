@@ -79,6 +79,9 @@ def native(tmp_path, monkeypatch):
     bridge = NativeHostBridge(facade, cfg, None, transport=Transport(cfg, FixtureCredential(str(home)), http_transport=httpx.MockTransport(respond)))
     assert bridge.start()
     agent = Agent()
+    from hermes_state import SessionDB
+    db = agent._session_db = SessionDB(home / "state.db")
+    db.create_session(agent.session_id, "cli")
 
     def drain():
         with bridge._lock:
@@ -92,6 +95,7 @@ def native(tmp_path, monkeypatch):
     if rt:
         rt.revoke()
     bridge.close()
+    db.close()
     assert not bridge._thread.is_alive()
 
 
@@ -302,7 +306,8 @@ def test_actual_conversation_uses_one_targeted_continuation_without_interim_cand
             base_url='https://example.invalid/v1', provider='openai-compat', model='test/model',
             max_iterations=8, quiet_mode=True, skip_context_files=True, skip_memory=True)
     agent._cached_system_prompt = 'Stable synthetic prompt.'
-    agent._session_db = None
+    from tests.agent.test_tool_call_incremental_persistence import _attach_real_session_db
+    conversation_db = _attach_real_session_db(agent, native.home / "conversation.db", agent.session_id)
     agent.save_trajectories = False
     agent.compression_enabled = False
     agent._cleanup_task_resources = lambda *a, **k: None
@@ -367,6 +372,7 @@ def test_actual_conversation_uses_one_targeted_continuation_without_interim_cand
         if rt:
             rt.revoke()
         agent.close()
+        conversation_db.close()
 
 
 def test_stale_owner_source_rejects_inflight_relation(native, tmp_path):

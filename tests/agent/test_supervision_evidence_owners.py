@@ -349,8 +349,8 @@ def test_f15_real_bridge_exact_expansion_codec(vertical):
 
 
 @pytest.mark.parametrize("mode", ["positive", "visible", "unknown_visibility", "no_grant", "wrong_fit", "foreign", "supersession_unknown"])
-def test_f15_ordinary_request_and_grep_recovery(vertical, mode, monkeypatch):
-    from tests.agent.test_tool_call_incremental_persistence import _make_agent
+def test_f15_ordinary_request_and_grep_recovery(vertical, mode, monkeypatch, request):
+    from tests.agent.test_tool_call_incremental_persistence import _make_agent, _attach_real_session_db
     from tests.agent.test_supervision_views import assemble
     from agent.turn_context import _reset_per_turn_agent_state
     from hermes_lcm.tools import lcm_grep
@@ -363,6 +363,9 @@ def test_f15_ordinary_request_and_grep_recovery(vertical, mode, monkeypatch):
     monkeypatch.setattr(history_tools, "lcm_expand", read_exact)
     v = vertical
     agent = _make_agent()
+    db = _attach_real_session_db(agent, Path(v.engine._config.database_path).parent / "recovery-state.db", "recovery-session")
+    request.addfinalizer(db.close)
+    request.addfinalizer(agent.close)
     _reset_per_turn_agent_state(agent)
     runtime = runtime_for_agent(agent, create=True)
     text = "Archive policy: use the local archive, not remote search."

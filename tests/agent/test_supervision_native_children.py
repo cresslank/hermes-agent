@@ -100,7 +100,7 @@ def native(tmp_path, monkeypatch, request):
         consumers['research'] = Consumer('research', 'optional')
     db = SessionDB(home / 'state.db')
     db.create_session(agent.session_id, 'cli')
-    db.close()
+    agent._session_db = db
     store = SQLiteControlStore(lambda: sqlite3.connect(home / 'state.db'))
     file_policy = scoped_file_policy((str(home),))
     def valid_plan(args):
@@ -197,6 +197,7 @@ def native(tmp_path, monkeypatch, request):
         t.join(5)
         assert not t.is_alive()
     runtime.revoke()
+    db.close()
     bridge.close()
     assert not bridge._thread.is_alive()
 
