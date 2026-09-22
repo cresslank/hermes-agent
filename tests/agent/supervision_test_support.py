@@ -56,9 +56,13 @@ def rig(tmp_path, monkeypatch):
     events = []
     registration = facade.register(consumer=events.append, requested_grants=["observe", *(a.value for a in Action)])
     agent = Agent()
+    from hermes_state import SessionDB
+    db = agent._session_db = SessionDB(home / "state.db")
+    agent._session_db.create_session(agent.session_id, "cli")
     yield SimpleNamespace(agent=agent, facade=facade, events=events, registration=registration,
                           home=home, manager=manager, config=config)
     facade.unregister()
+    db.close()
 
 
 def proposal(rig, event, *, action="advise", template: str | None = "review_action", incident="incident", refs=None, **overrides):

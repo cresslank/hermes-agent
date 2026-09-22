@@ -46,6 +46,13 @@ def row(event):
         return store.get_admission(conn, event['supervision_delivery_id'])
 
 
+def child_receipt(text, launch_id='job', index=0):
+    source.record_unit_child(launch_id, {'task_index': index, 'status': 'completed', 'summary': text})
+    with source._transaction() as conn:
+        return conn.execute("SELECT object_id FROM delegation_result_objects WHERE launch_id=? AND source_id=? AND subtype='child'",
+                            (launch_id, f'child:{index}')).fetchone()[0]
+
+
 def consume(db, event, text='owned result'):
     return admission.consume_metadata(db, 'target', text, admission.delivery_metadata(event))
 
@@ -247,7 +254,7 @@ def test_both_ledger_caps_and_age_preserve_unresolved_exact_bytes(owner, monkeyp
 
 def test_early_finding_and_final_have_independent_receipts(owner):
     event = launch()
-    early = source.commit_finding('job', finding_id='child:1:rev1', source_receipt='receipt:1', payload=b'early exact source')
+    early = source.commit_finding('job', finding_id='child:1:rev1', source_receipt=child_receipt('early exact source'), payload=b'early exact source')
     source.record_unit_child('job', {'task_index':1,'summary':'completed child'})
     assert admission.accept_event(early)
     consume(owner, early, 'early exact source')

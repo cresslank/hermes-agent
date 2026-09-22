@@ -88,6 +88,7 @@ class SupervisionRuntime:
     """
     def __init__(self, agent, profile, lineage, *, clock=time.monotonic):
         self.agent = weakref.ref(agent)
+        self.session_id = getattr(agent, "session_id", "")
         self.clock = clock
         self.lock = threading.RLock()
         self.ready = threading.Condition(self.lock)
@@ -137,6 +138,7 @@ class SupervisionRuntime:
         with self.lock:
             self._abandon_owner_selections()
             self.history_visibility = None
+            self.session_id = getattr(self.agent(), "session_id", "")
             self.revision = replace(self.revision, run_generation=self.revision.run_generation + 1)
             self.round_deadline = None
             self.round_deadline_issued_at = None
@@ -147,6 +149,8 @@ class SupervisionRuntime:
             self.closed = False
         from agent.supervision_view_binding import reset_views
         reset_views(self, preserve_defaults=True)
+        from agent.supervision_receipts import record_work
+        record_work(self)
 
     def shared_deadline(self, owner_deadline=None):
         with self.lock:
@@ -199,6 +203,8 @@ class SupervisionRuntime:
         children = getattr(self, 'children', None)
         if children is not None:
             children.changed('task_revision')
+        from agent.supervision_receipts import record_work
+        record_work(self)
         self.observe("authenticated_instruction_admitted", {"requirements": project(spans), "source_message_id": origin.message_id,
                      "text": bounded, "continuation": origin.continuation},
                      completeness=self.completeness, origin_kind=origin.kind, data_class="task_text",
@@ -216,7 +222,7 @@ class SupervisionRuntime:
         regs = [r for r in self._registrations() if (recipient is None or r is recipient)
                 and "observe" in r.grants and data_class in r.data_policy
                 and set(required_data_classes) <= r.data_policy]
-        if not regs or self.closed or (deadline is not None and deadline <= self.clock()):
+        if not regs or (self.closed and owner != "completion_admission") or (deadline is not None and deadline <= self.clock()):
             return None
         with self.lock:
             self.sequence += 1
@@ -263,16 +269,20 @@ class SupervisionRuntime:
         return base
 
     def _settle(self, proposal, status, reason):
+        from agent.supervision_receipts import record
         receipt = SettlementV1(proposal.proposal_id, status, reason, self.sequence, uuid.uuid4().hex)
+        if not record(self, proposal, receipt) and status in {"accepted", "selected", "applied"}:
+            receipt = replace(receipt, status="unknown" if status == "applied" else "rejected",
+                              reason="storage_unavailable")
         self.receipts[proposal.proposal_id] = receipt
         while len(self.receipts) > 256:
             self.receipts.popitem(last=False)
         return receipt
 
     def _validate(self, proposal, registration, *, acknowledging=False):
-        if self.closed or not registration.active or proposal.plugin_generation != registration.generation:
+        if (self.closed and proposal.owner != "completion_admission") or not registration.active or proposal.plugin_generation != registration.generation:
             return "rejected", "revoked"
-        if proposal.expected != self.revision:
+        if proposal.expected != self.revision or getattr(self.agent(), "session_id", "") != self.session_id:
             return "stale", "revision_changed"
         if self.clock() >= proposal.expires_at_monotonic:
             return "expired", "deadline"
@@ -311,6 +321,11 @@ class SupervisionRuntime:
             raise TypeError("proposal_type")
         with self.ready:
             previous = self.receipts.get(proposal.proposal_id)
+            if previous is None:
+                from agent.supervision_receipts import lookup
+                persisted = lookup(self, proposal.proposal_id)
+                if persisted:
+                    previous = SettlementV1(proposal.proposal_id, *persisted)
             if previous is not None:
                 return previous
             failure = self._validate(proposal, registration)
@@ -318,8 +333,10 @@ class SupervisionRuntime:
                 return self._settle(proposal, *failure)
             if len(self.pending) >= 32:
                 return self._settle(proposal, "rejected", "queue_full")
-            self.pending.append((proposal, registration))
             receipt = self._settle(proposal, "accepted", "queued")
+            if receipt.status != "accepted":
+                return receipt
+            self.pending.append((proposal, registration))
             self.ready.notify_all()
         from agent.supervision_view_binding import proposal_queued
         proposal_queued(self, proposal.target_id)
@@ -335,7 +352,9 @@ class SupervisionRuntime:
             if failure:
                 self._settle(proposal, *failure)
             elif chosen is None and proposal.target_id == target_id and proposal.action in actions:
-                chosen = (proposal, registration)
+                receipt = self._settle(proposal, "selected", "owner_selection")
+                if receipt.status == "selected":
+                    chosen = (proposal, registration)
             else:
                 pending.append((proposal, registration))
         self.pending = pending
@@ -344,7 +363,8 @@ class SupervisionRuntime:
     def _wait_for(self, target_id, deadline, revision):
         # One propagated absolute budget; no retry, sleep loop or renewed child allowance.
         with self.ready:
-            self.ready.wait_for(lambda: self.revision != revision or self.closed or
+            self.ready.wait_for(lambda: self.revision != revision or
+                (self.closed and self.opportunities.get(target_id, {}).get("owner") != "completion_admission") or
                 any(p.target_id == target_id for p, _ in self.pending),
                 timeout=max(0, deadline - self.clock()))
 
@@ -373,6 +393,8 @@ class SupervisionRuntime:
         self._assert_owner()
         with self.lock:
             out = []
+            from agent.supervision_delivery import drain_findings
+            drain_findings(self)
             if not allow_advisory:
                 self._take("", set())  # only settle invalidated/expired proposals
                 return ()
@@ -489,6 +511,8 @@ class SupervisionRuntime:
                         findings.append(finding)
             while len(self.evidence) > 64:
                 self.evidence.popitem(last=False)
+        from agent.supervision_delivery import record_tool_findings
+        record_tool_findings(self, messages)
         if artifacts or findings:
             self.observe("tool_batch_committed", {"artifacts": artifacts, "findings": findings,
                          "batch_size": len(batch), "requirements": project(self.requirements)},
@@ -650,6 +674,9 @@ class SupervisionRuntime:
             if action == Action.EVALUATE_RELATION and proposal.relation not in request.relations:
                 self._settle(proposal, "rejected", "missing_relation")
                 return baseline
+            receipt = self._settle(proposal, "selected", "owner_selection")
+            if receipt.status != "selected":
+                return baseline
             ids = proposal.candidate_ids or baseline.candidate_ids
             if action == Action.RANK_CANDIDATES:
                 ids = (*ids, *(i for i in baseline.candidate_ids if i not in ids))
@@ -658,11 +685,12 @@ class SupervisionRuntime:
                     self._settle(proposal, "rejected", "owner_ack_capacity")
                     return baseline
                 receipt = self._settle(proposal, "accepted", "owner_selected")
+                if receipt.status != "accepted":
+                    return baseline
                 self.owner_selections[receipt.receipt_id] = (proposal, registration, tuple(ids))
                 return OwnerDecisionV1(ids, proposal.relation, False, receipt.receipt_id,
                                        proposal.metadata, selected=True)
             self.incidents.add(proposal.incident_id)
-            receipt = self._settle(proposal, "applied", "owner_selection")
             return OwnerDecisionV1(ids, proposal.relation, True, receipt.receipt_id, proposal.metadata)
 
     def _abandon_owner_selections(self):
@@ -730,6 +758,8 @@ class SupervisionRuntime:
             self._abandon_owner_selections()
             self.history_visibility = None
             self.ready.notify_all()
+        from agent.supervision_receipts import record_work
+        record_work(self)
 
     def revoke(self):
         optional_reads = getattr(self, "optional_reads", None)

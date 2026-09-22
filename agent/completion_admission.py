@@ -9,8 +9,9 @@ from __future__ import annotations
 
 import json
 import os
+import sqlite3
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from agent import supervision_store as store
 
@@ -31,6 +32,9 @@ class CompletionDecision:
     retainable: bool = False
     view_window: tuple[int, int] | None = None
     deadline: float | None = None
+    selection: tuple | None = None
+    comparison: tuple[int, str] | None = None
+    declined: bool = False
 
     def __post_init__(self):
         import math
@@ -66,14 +70,14 @@ def prepare_event(event, claim, target_session_id):
     from tools.async_delegation import _DB_LOCK, _transaction
     decision = CompletionDecision()
     prior = None
-    if _policy is not None:
-        with _DB_LOCK, _transaction() as conn:
-            prior = conn.execute('SELECT 1 FROM supervision_admissions WHERE launch_id=? AND source_id=? '
-                                 'AND (target_session_id=? OR lineage=?)',
-                                 (event['delegation_id'], event.get('finding_id') or 'final', target_session_id, target_session_id)).fetchone()
-    if _policy is not None and prior is None:
+    with _DB_LOCK, _transaction() as conn:
+        prior = conn.execute('SELECT 1 FROM supervision_admissions WHERE launch_id=? AND source_id=? '
+                             'AND (target_session_id=? OR lineage=?)',
+                             (event['delegation_id'], event.get('finding_id') or 'final', target_session_id, target_session_id)).fetchone()
+    if prior is None:
         try:
-            value = _policy(event, target_session_id)
+            from agent.supervision_delivery import final_decision
+            value = (_policy or final_decision)(event, target_session_id)
             decision = value if isinstance(value, CompletionDecision) else CompletionDecision(*value)
         except Exception:
             pass  # absent/invalid judgment preserves normal delivery
@@ -81,20 +85,64 @@ def prepare_event(event, claim, target_session_id):
         import time
         if decision.deadline <= time.monotonic():
             decision = CompletionDecision()
-    with _DB_LOCK, _transaction() as conn:
-        if not conn.execute('SELECT 1 FROM async_delegations WHERE delegation_id=?', (event.get('delegation_id'),)).fetchone():
-            if conn.execute('SELECT 1 FROM supervision_generations WHERE session_id=? AND revoked=1', (target_session_id,)).fetchone():
-                raise store.AdmissionError('deleted target')
-            return PreparedDelivery(None, 'received')
-        # Old launches with no canonical session binding retain legacy behavior;
-        # they cannot participate in optional semantic retention.
-        if not target_session_id or not conn.execute('SELECT 1 FROM sessions WHERE id=?', (target_session_id,)).fetchone():
-            if target_session_id and conn.execute('SELECT 1 FROM supervision_generations WHERE session_id=? AND revoked=1', (target_session_id,)).fetchone():
-                raise store.AdmissionError('deleted target')
-            return PreparedDelivery(None, 'received')
-        row = store.persist_admission(conn, event=event, claim=claim, target_session_id=target_session_id,
-                                      disposition=decision.disposition, retainable=decision.retainable is True,
-                                      view_window=decision.view_window, defer_until=decision.deadline)
+    from contextlib import ExitStack
+    from agent.supervision_delivery import persist_selection
+    with ExitStack() as fences:
+        selection = decision.selection
+        if selection:
+            runtime, proposal, registration = selection
+            fences.enter_context(runtime.lock)
+            fences.enter_context(registration.fence)
+            failure = runtime._validate(proposal, registration)
+            if failure or proposal.expires_at_monotonic != decision.deadline:
+                runtime._settle(proposal, *(failure or ('expired', 'deadline')))
+                decision = CompletionDecision()
+        with _DB_LOCK, _transaction() as conn:
+            if not conn.execute('SELECT 1 FROM async_delegations WHERE delegation_id=?', (event.get('delegation_id'),)).fetchone():
+                if conn.execute('SELECT 1 FROM supervision_generations WHERE session_id=? AND revoked=1', (target_session_id,)).fetchone():
+                    raise store.AdmissionError('deleted target')
+                return PreparedDelivery(None, 'received')
+            # Old launches with no canonical session binding retain legacy behavior;
+            # they cannot participate in optional semantic retention.
+            if not target_session_id or not conn.execute('SELECT 1 FROM sessions WHERE id=?', (target_session_id,)).fetchone():
+                if target_session_id and conn.execute('SELECT 1 FROM supervision_generations WHERE session_id=? AND revoked=1', (target_session_id,)).fetchone():
+                    raise store.AdmissionError('deleted target')
+                return PreparedDelivery(None, 'received')
+            # Lock/storage acquisition may consume the remaining owner budget.
+            # Recheck after the final blocking boundary, before any optional write.
+            if decision.selection:
+                runtime, proposal, registration = decision.selection
+                if runtime._validate(proposal, registration):
+                    decision = replace(decision, disposition='deliver_unchanged', retainable=False,
+                                       view_window=None, declined=True)
+            if decision.comparison is not None:
+                latest = conn.execute("SELECT id,content FROM messages WHERE session_id=? AND role='assistant' "
+                                      "AND tool_calls IS NULL AND content IS NOT NULL ORDER BY id DESC LIMIT 1",
+                                      (target_session_id,)).fetchone()
+                if not latest or (latest[0], store.digest(latest[1])) != decision.comparison:
+                    decision = replace(decision, disposition='deliver_unchanged', retainable=False,
+                                       view_window=None, declined=True)
+            conn.execute('SAVEPOINT optional_delivery')
+            row = store.persist_admission(conn, event=event, claim=claim, target_session_id=target_session_id,
+                                          disposition=decision.disposition, retainable=decision.retainable is True,
+                                          view_window=decision.view_window, defer_until=decision.deadline)
+            try:
+                persist_selection(conn, decision, row)
+            except sqlite3.Error:
+                # Receipt failure must undo an optional park/view, not the required
+                # final. No new judgment or deadline is allocated on this fallback.
+                conn.execute('ROLLBACK TO optional_delivery')
+                row = store.persist_admission(conn, event=event, claim=claim,
+                    target_session_id=target_session_id, disposition='deliver_unchanged',
+                    retainable=False, view_window=None, defer_until=decision.deadline)
+                decision = replace(decision, declined=True)
+            finally:
+                conn.execute('RELEASE optional_delivery')
+        if selection:
+            runtime, proposal, _registration = selection
+            runtime.closed_targets.add(proposal.target_id)
+            if decision.declined:
+                runtime._settle(proposal, 'no_op', 'admission_invalid')
     event['supervision_delivery_id'] = row['delivery_id']
     event['source_object_id'] = row['object_id']
     event['_supervision_claim'] = claim
@@ -107,7 +155,7 @@ def presentation_text(event, original):
     view = event.get('_supervision_view_text')
     if view is None:
         return original
-    return ('[Exact bounded background result; status: ' + str(event.get('status') or 'unknown')
+    return ('[Exact bounded background result; claims provisional, revalidation required; status: ' + str(event.get('status') or 'unknown')
             + '; full immutable source: ' + str(event.get('source_object_id') or '') + ']\n' + view)
 
 

@@ -1566,6 +1566,8 @@ class SessionSessionsMixin:
                 DELETE FROM sessions
                 WHERE id = ?
                   AND title IS NULL
+                  AND NOT EXISTS (SELECT 1 FROM supervision_receipts r WHERE r.session_id=sessions.id
+                      AND r.status IN ('accepted','selected','unknown'))
                   AND NOT EXISTS (SELECT 1 FROM delegation_controls c WHERE c.parent_session_id=sessions.id
                       AND ({UNSETTLED_CONTROL_SQL}))
                   AND NOT EXISTS (SELECT 1 FROM delegation_result_objects o WHERE o.session_id=sessions.id

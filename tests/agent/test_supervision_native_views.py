@@ -126,6 +126,9 @@ def native(tmp_path, monkeypatch, request):
     bridge = NativeHostBridge(facade, cfg, None, transport=transport)
     assert bridge.start()
     agent = _make_agent()
+    from hermes_state import SessionDB
+    agent._session_db = SessionDB(home / 'state.db')
+    agent._session_db.create_session(agent.session_id, 'cli')
     agent._execution_thread_id = threading.get_ident()
     agent._interrupt_requested = False
     agent._flush_messages_to_session_db = MagicMock(return_value=True)
@@ -145,6 +148,7 @@ def native(tmp_path, monkeypatch, request):
                           home=home, mode=mode, facade=facade, drain=drain)
     runtime.revoke()
     bridge.close()
+    agent._session_db.close()
     assert not bridge._thread.is_alive()
     probe = getattr(sys.modules.get('tools.env_probe'), '_PROBE_THREAD', None)
     if probe is not None and probe is not probe_before:

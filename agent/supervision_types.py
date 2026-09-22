@@ -250,6 +250,8 @@ class Action(str, Enum):
     REPRIORITIZE_CHILD = "reprioritize_child"
     RETAIN_RESULT = "retain_result"
     DELIVER_FINDING = "deliver_finding"
+    FINAL_BOUNDED_VIEW = "final_bounded_view"
+    DELIVER_FINAL = "deliver_final"
     SUPPRESS_STATUS = "suppress_status"
     PRESENT_STATUS = "present_status"
     CLARIFY_DEFAULT = "clarify_default"

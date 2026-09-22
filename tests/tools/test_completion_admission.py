@@ -10,7 +10,7 @@ from agent import completion_admission as admission
 from agent import supervision_store as store
 from tools import async_delegation as source
 from tests.agent.test_supervision_store import owner as owner
-from tests.agent.test_supervision_store import launch, ready, optional, consume, row, control_snapshot, write_control
+from tests.agent.test_supervision_store import launch, ready, optional, consume, row, control_snapshot, write_control, child_receipt
 
 
 def test_fixed_object_and_profile_budgets_never_evict_pins(owner):
@@ -52,7 +52,7 @@ def test_effect_receipts_protect_after_consumption_until_owner_settlement(owner)
 def test_committed_finding_is_not_rendered_as_failure_or_final(owner):
     from tools.process_registry_notifications import format_process_notification, async_delegation_display_text
     launch()
-    event=source.commit_finding('job',finding_id='early:1',source_receipt='committed:1',payload=b'exact finding')
+    event=source.commit_finding('job',finding_id='early:1',source_receipt=child_receipt('exact finding'),payload=b'exact finding')
     text=format_process_notification(event)
     assert 'ASYNC DELEGATION FINDING' in text
     assert 'final batch remains outstanding' in text
@@ -76,7 +76,7 @@ def test_source_immutable_update_and_final_replay(owner):
 
 def test_finding_identity_cannot_change_and_never_settles_final(owner):
     launch()
-    finding = source.commit_finding('job',finding_id='one',source_receipt='receipt:1',payload=b'fact')
+    finding = source.commit_finding('job',finding_id='one',source_receipt=child_receipt('fact'),payload=b'fact')
     assert admission.accept_event(finding)
     consume(owner,finding)
     with pytest.raises(store.AdmissionError):

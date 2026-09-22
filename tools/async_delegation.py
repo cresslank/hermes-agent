@@ -143,6 +143,11 @@ def _persist_dispatch(record: Dict[str, Any]) -> None:
         key: record.get(key)
         for key in ("goal", "goals", "context", "toolsets", "role", "model", "is_batch", "task_indexes", "task_transcripts", *_ROUTING_KEYS)
         if key in record}
+    from agent.supervision_delivery import runtime_for_session
+    from agent.supervision_types import project
+    runtime = runtime_for_session(record.get("parent_session_id"))
+    if runtime is not None:
+        task_payload["supervision_revision"] = project(runtime.revision)
     try:  # where the children's terminals started; lets recovery add a git-state hint
         task_payload["owner_cwd"] = os.getcwd()
     except OSError:
@@ -228,14 +233,14 @@ def get_launch_control(delegation_id: str) -> Dict[str, Any]:
 
 
 def commit_finding(delegation_id: str, *, finding_id: str, source_receipt: str,
-                   payload: bytes, verified: bool = False) -> Dict[str, Any]:
+                   payload: bytes, verified: bool = False, _selection=None) -> Dict[str, Any]:
     """Commit an exact owner finding independently of the eventual final batch.
 
     Only explicit committed owner facts call this API. ``verified`` is receipt
     validation by that owner, never inferred from child/model wording.
     """
-    from agent.supervision_store import put_result_object, persist_admission, AdmissionError
-    if not finding_id or not source_receipt or not payload or len(payload) > 4 * 1024 * 1024:
+    from agent.supervision_store import put_result_object, get_result_object, protect_optional, persist_admission, AdmissionError
+    if not finding_id or finding_id == "final" or not source_receipt or not payload or len(payload) > 4 * 1024 * 1024:
         raise ValueError("finding requires bounded exact source and receipt")
     text = payload.decode("utf-8")
     with _DB_LOCK, _transaction() as conn:
@@ -243,6 +248,15 @@ def commit_finding(delegation_id: str, *, finding_id: str, source_receipt: str,
         if row is None:
             raise AdmissionError("finding launch missing")
         parent, key, ui, task_json = row
+        # A caller-supplied string (or verified=True) is not source authority.
+        source = conn.execute("SELECT subtype,launch_id FROM delegation_result_objects WHERE object_id=?", (source_receipt,)).fetchone()
+        if not source or source[0] not in {"child", "tool"} or source[1] != delegation_id or verified is not False:
+            raise AdmissionError("finding receipt is not a committed child source")
+        exact = json.loads(get_result_object(conn, source_receipt))
+        if exact.get("summary") != text or exact.get("status") not in {"success", "completed"} or exact.get("error"):
+            raise AdmissionError("finding does not match committed source")
+        if _selection and conn.execute("SELECT state FROM async_delegations WHERE delegation_id=?", (delegation_id,)).fetchone()[0] != "running":
+            raise AdmissionError("finding job already finished")
         previous = conn.execute("SELECT payload FROM delegation_result_objects WHERE launch_id=? AND source_id=? AND subtype='finding'", (delegation_id,finding_id)).fetchone()
         if previous and bytes(previous[0]) != payload:
             raise AdmissionError("finding identity already committed with different bytes")
@@ -253,9 +267,22 @@ def commit_finding(delegation_id: str, *, finding_id: str, source_receipt: str,
                  "source_receipt": source_receipt, "source_object_id": object_id, "verified": verified is True,
                  "parent_session_id": parent, "session_key": key, "origin_ui_session_id": ui,
                  "summary": text, "status": "finding", **{k: task[k] for k in _ROUTING_KEYS if k in task}}
+        # Early delivery is optional; never evict uncertain sources to fit it.
+        protect_optional(conn, object_id)
         # A persisted receipt makes a crash before the queue hint recoverable.
         receipt = persist_admission(conn, event=event, claim="", target_session_id=parent or key)
         event["supervision_delivery_id"] = receipt["delivery_id"]
+        if _selection:
+            from agent.supervision_receipts import persist
+            from agent.supervision_types import SettlementV1
+            runtime, proposal, registration = _selection
+            if runtime._validate(proposal, registration):
+                raise AdmissionError("finding owner changed before commit")
+            if proposal.metadata.get("delivery_id") != receipt["delivery_id"]:
+                raise AdmissionError("finding delivery identity mismatch")
+            persist(conn, runtime, parent or key, proposal,
+                SettlementV1(proposal.proposal_id, "selected", "admission_persisted", runtime.sequence, proposal.proposal_id),
+                delivery_id=receipt["delivery_id"])
     from tools.process_registry import process_registry
     if receipt["state"] == "persisted":
         process_registry.completion_queue.put(event)
@@ -275,13 +302,15 @@ def record_unit_child(delegation_id: str, entry: Dict[str, Any]) -> None:
                 return
             from agent.supervision_store import put_result_object
             owner = conn.execute("SELECT parent_session_id,origin_session FROM async_delegations WHERE delegation_id=?", (delegation_id,)).fetchone()
-            put_result_object(conn, launch_id=delegation_id, source_id=f"child:{entry.get('task_index')}",
+            object_id = put_result_object(conn, launch_id=delegation_id, source_id=f"child:{entry.get('task_index')}",
                 subtype="child", payload=json.dumps(entry).encode("utf-8"), session_id=owner[0] or owner[1])
             partial = json.loads(row[0] or "{}") or {}
             results = [r for r in partial.get("results") or [] if r.get("task_index") != entry.get("task_index")]
             results.append(entry)
             conn.execute("UPDATE async_delegations SET result_json=?, updated_at=? WHERE delegation_id=? AND state='running'",
                          (json.dumps({"results": results, "partial": True}), time.time(), delegation_id))
+        from agent.supervision_delivery import offer_child_finding
+        offer_child_finding(delegation_id, object_id)
     except Exception:  # noqa: BLE001 — recovery bookkeeping must never fail a live child
         logger.warning("Async delegation %s: could not record finished child %s", delegation_id, entry.get("task_index"), exc_info=True)
 

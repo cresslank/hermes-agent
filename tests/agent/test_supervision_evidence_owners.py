@@ -104,6 +104,9 @@ def vertical(tmp_path, monkeypatch):
     bridge = NativeHostBridge(native, config, None, transport=transport)
     assert bridge.start()
     agent = Agent()
+    from hermes_state import SessionDB
+    agent._session_db = SessionDB(home / "state.db")
+    agent._session_db.create_session(agent.session_id, "cli")
     runtime = runtime_for_agent(agent, create=True)
     store = MessageStore(str(tmp_path / "owner.db"))
     dag = SummaryDAG(str(tmp_path / "owner.db"))
@@ -117,6 +120,7 @@ def vertical(tmp_path, monkeypatch):
             yield value
     finally:
         bridge.close()
+        agent._session_db.close()
         dag.close()
         store.close()
 
@@ -149,7 +153,9 @@ def test_f14_real_lcm_recall_uses_native_proposal_and_preserves_sources(vertical
     assert {h["role"] for h in actual["hits"]} == {"user"}
     assert actual.get("coverage") == baseline.get("coverage")
     assert actual.get("computation") == baseline.get("computation")
-    assert any(r.status == "applied" for r in v.runtime.receipts.values())
+    # The integrated adapter acknowledges its consumed owner view.
+    assert any(r.status == "applied" and r.reason.startswith("owner_consumed:")
+               for r in v.runtime.receipts.values())
     assert not v.agent._pending_steer
 
 
@@ -218,7 +224,8 @@ def test_f16_real_muxyard_extract_consumes_exact_windows(vertical, async_path):
     assert "WARNING" in item["content"] and "cleanup not run" in item["content"]
     assert item["metadata"]["full_output_ref"] == "#/raw_content"
     assert item["metadata"]["selected_spans"]
-    assert any(r.status == "applied" for r in v.runtime.receipts.values())
+    assert any(r.status == "applied" and r.reason.startswith("owner_consumed:")
+               for r in v.runtime.receipts.values())
 
 
 def test_f16_unknown_truncation_keeps_original_baseline(vertical):

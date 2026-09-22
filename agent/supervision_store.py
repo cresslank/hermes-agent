@@ -198,8 +198,8 @@ def persist_admission(conn, *, event, claim, target_session_id, disposition='del
         raise AdmissionError('source claim changed')
     object_id = event.get('source_object_id')
     if object_id:
-        obj = conn.execute('SELECT launch_id,source_id FROM delegation_result_objects WHERE object_id=?', (object_id,)).fetchone()
-        if not obj or tuple(obj) != (launch, source):
+        obj = conn.execute('SELECT launch_id,source_id,subtype FROM delegation_result_objects WHERE object_id=?', (object_id,)).fetchone()
+        if not obj or tuple(obj) != (launch, source, subtype):
             raise AdmissionError('source identity mismatch')
         get_result_object(conn, object_id)
     elif subtype == 'final':
@@ -309,6 +309,8 @@ def validate_consumption(conn, delivery_id, session_id, destination_lease):
 
 def consume(conn, row, message_row_id):
     now = time.time()
+    conn.execute("UPDATE supervision_receipts SET status='consumed',reason='admission_consumed',updated_at=? "
+                 "WHERE delivery_id=? AND status='selected'", (now, row['delivery_id']))
     conn.execute("UPDATE supervision_admissions SET state='consumed',message_row_id=?,updated_at=? WHERE delivery_id=?",
                  (message_row_id,now,row['delivery_id']))
     if row['subtype'] == 'final':
@@ -323,6 +325,8 @@ def consume(conn, row, message_row_id):
 
 
 def prune_objects(conn, now=None):
+    from agent.supervision_receipts import prune
+    prune(conn, now)
     cutoff = (time.time() if now is None else now) - RETENTION_SECONDS
     conn.execute(f"""DELETE FROM supervision_admissions WHERE state='consumed' AND updated_at<?
         AND NOT EXISTS (SELECT 1 FROM delegation_controls c
@@ -330,6 +334,8 @@ def prune_objects(conn, now=None):
             AND (({UNSETTLED_CONTROL_SQL}) OR c.updated_at>=?))""", (cutoff, cutoff))
     conn.execute(f"""DELETE FROM delegation_result_objects WHERE settled_at<? AND effect_pending=0
         AND object_id NOT IN (SELECT object_id FROM supervision_admissions)
+        AND NOT EXISTS (SELECT 1 FROM supervision_admissions a
+            WHERE json_extract(a.event_json, '$.source_receipt')=delegation_result_objects.object_id)
         AND NOT EXISTS (SELECT 1 FROM delegation_controls c
             WHERE c.parent_session_id=delegation_result_objects.session_id
             AND (({UNSETTLED_CONTROL_SQL}) OR c.updated_at>=?))""", (cutoff, cutoff))

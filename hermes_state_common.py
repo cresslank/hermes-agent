@@ -570,6 +570,37 @@ CREATE TABLE IF NOT EXISTS delegation_controls (
 );
 CREATE INDEX IF NOT EXISTS idx_delegation_controls_parent ON delegation_controls(parent_session_id);
 
+-- Compact host-owned work and effect receipts. No semantic payloads or probabilities.
+CREATE TABLE IF NOT EXISTS supervision_work (
+    profile TEXT NOT NULL, lineage TEXT NOT NULL, work_id TEXT NOT NULL,
+    session_id TEXT NOT NULL, revision_json TEXT NOT NULL, closed INTEGER NOT NULL,
+    created_at REAL NOT NULL, updated_at REAL NOT NULL,
+    PRIMARY KEY(profile,lineage,work_id)
+);
+CREATE TABLE IF NOT EXISTS supervision_receipts (
+    profile TEXT NOT NULL, proposal_id TEXT NOT NULL, lineage TEXT NOT NULL,
+    work_id TEXT NOT NULL, session_id TEXT NOT NULL, incident_id TEXT NOT NULL,
+    plugin_generation TEXT NOT NULL, owner TEXT NOT NULL, target_id TEXT NOT NULL,
+    action TEXT NOT NULL, revision_json TEXT NOT NULL, evidence_json TEXT NOT NULL,
+    deadline REAL NOT NULL, status TEXT NOT NULL CHECK(status IN
+        ('accepted','selected','applied','consumed','no_op','rejected','stale','expired','unknown')),
+    reason TEXT NOT NULL, watermark INTEGER NOT NULL, receipt_id TEXT NOT NULL,
+    delivery_id TEXT, created_at REAL NOT NULL, updated_at REAL NOT NULL,
+    PRIMARY KEY(profile,proposal_id)
+);
+CREATE INDEX IF NOT EXISTS idx_supervision_receipts_delivery ON supervision_receipts(delivery_id);
+CREATE TRIGGER IF NOT EXISTS supervision_work_delete BEFORE DELETE ON sessions BEGIN
+    DELETE FROM supervision_receipts WHERE session_id=OLD.id OR lineage=OLD.id;
+    DELETE FROM supervision_work WHERE session_id=OLD.id OR lineage=OLD.id;
+END;
+CREATE TRIGGER IF NOT EXISTS supervision_work_reset AFTER UPDATE OF end_reason ON sessions
+WHEN NEW.end_reason IN ('session_reset','session_switch','idle','daily','suspended','resume_pending_expired','new_session','user_exit','closed')
+ AND (OLD.end_reason IS NULL OR OLD.end_reason != NEW.end_reason) BEGIN
+    UPDATE supervision_work SET closed=1 WHERE session_id=OLD.id;
+    UPDATE supervision_receipts SET status='stale',reason='generation_changed'
+        WHERE session_id=OLD.id AND status='accepted';
+END;
+
 -- Source bytes and destination receipts share the canonical state owner. No plugin DB.
 CREATE TABLE IF NOT EXISTS supervision_generations (
     session_id TEXT PRIMARY KEY, generation INTEGER NOT NULL DEFAULT 1,

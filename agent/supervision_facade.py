@@ -86,6 +86,9 @@ class SupervisionFacade:
             from agent.supervision_children import VERSION as CHILD_RELEVANCE_VERSION
             capabilities['child_relevance'] = CHILD_RELEVANCE_VERSION
             capabilities["optional_read"] = "supervision.optional-read.v1"
+            from agent.supervision_delivery import FINAL_ACTIONS_VERSION, FINAL_ACTIONS
+            capabilities["final_actions_version"] = FINAL_ACTIONS_VERSION
+            capabilities["final_actions"] = dict(FINAL_ACTIONS)
         return capabilities
 
     def _owner_capabilities(self):

@@ -77,6 +77,8 @@ def test_actual_conversation_corrects_once_without_publishing_incomplete_candida
     from unittest.mock import MagicMock
     from agent.supervision_context import accepted_input_origin, accepted_origin_scope
     monkeypatch.setenv("HERMES_HOME", str(rig.home))
+    real_agent._session_db = rig.agent._session_db
+    real_agent._session_db.create_session(real_agent.session_id, "cli")
     real_agent.max_iterations = 3
     real_agent.iteration_budget.max_total = 3
     answers = iter(["incomplete confidential draft", "First and second are addressed."])
