@@ -14,7 +14,7 @@ import uuid
 import weakref
 from typing import Any
 
-from agent.supervision_catalog import Catalog, SkillCandidate, authorized_tool_schemas, fingerprint, tool_id
+from agent.supervision_catalog import Catalog, SkillCandidate, SkillHint, authorized_tool_schemas, fingerprint, tool_id
 from agent.supervision_types import Action, Completeness, project
 from agent.supervision_views import AuthorizedDefault, SupervisionViews
 
@@ -97,6 +97,9 @@ class NativeViewsBinding:
         self.pending = {}
         self.details = {}
         self.detail_requests = {}
+        self.skill_hints = {}
+        self.skill_removals = {}
+        self.skill_plan_origin = None
         self.lock = threading.RLock()
         self.closed = False
         self.generation = 0
@@ -123,6 +126,10 @@ class NativeViewsBinding:
             pending, self.pending = self.pending, {}
             details, self.detail_requests = self.detail_requests, {}
             self.details.clear()
+            self.skill_hints.clear()
+            self.skill_removals.clear()
+            if self.skill_plan_origin and self.skill_plan_origin[0] != self._skill_task_scope():
+                self.skill_plan_origin = None
             self.catalog_seen = None
             self.views.reset(scope_key(self.runtime))
             self.views.defaults.update({q: replace(d, scope=self.views.scope) for q, d in defaults.items()})
@@ -156,7 +163,7 @@ class NativeViewsBinding:
         return (ref, text) if text and len(text) <= 1200 else None
 
     def _request(self, event, facts, *, action, refs, candidates=(), required=(), relations=(),
-                 revision=None, deadline=None, asynchronous=False, validate=None):
+                 revision=None, deadline=None, asynchronous=False, validate=None, skill_removal=None, recipient=None):
         runtime = self.runtime
         if self.closed or runtime.closed or not refs:
             return None
@@ -182,6 +189,8 @@ class NativeViewsBinding:
                 with self.lock:
                     self.pending.pop(target, None)
             future.add_done_callback(forget)
+        if skill_removal is not None:
+            self.skill_removals[target] = skill_removal
         if event == 'catalog_ambiguity':
             with self.lock:
                 self.details[target] = {'facts': facts, 'expected': expected, 'deadline': deadline,
@@ -190,11 +199,12 @@ class NativeViewsBinding:
             evidence_refs=tuple(refs), deadline=deadline, owner='native_views',
             candidates=tuple(candidates), required_ids=tuple(required), relations=tuple(relations),
             completeness=Completeness('enumerated_items', True), data_class='task_text',
-            required_obligations=tuple(required))
+            required_obligations=tuple(required), recipient=recipient)
         if snapshot is None:
             with self.lock:
                 self.pending.pop(target, None)
                 self.details.pop(target, None)
+                self.skill_removals.pop(target, None)
             return None
         if asynchronous:
             return future
@@ -221,6 +231,7 @@ class NativeViewsBinding:
         finally:
             with self.lock:
                 self.details.pop(target, None)
+                self.skill_removals.pop(target, None)
                 job = self.detail_requests.pop(target, None)
             if job is not None and not job[2].done():
                 job[2].set_result(None)
@@ -312,6 +323,7 @@ class NativeViewsBinding:
                     not registration.active or runtime.clock() >= context['deadline']):
                 return None
             context['served_ids'] = tuple(selected)
+            context['served_content'] = {row['id']: row['content'] for row in details}
             context['served_registration'] = registration
         return {**request, 'candidates': details}
 
@@ -328,7 +340,8 @@ class NativeViewsBinding:
             proposal, registration = entry
             with registration.fence:
                 failure = runtime._validate(proposal, registration)
-                if not failure and proposal.feature_id == 'F12':
+                if (not failure and proposal.feature_id == 'F12' and
+                        proposal.metadata.get('feature_action') == 'rank_skill_ids'):
                     context = self.details.get(target, {})
                     served = context.get('served_ids', ())
                     if (proposal.metadata.get('phase') != 'ready' or not served or
@@ -338,6 +351,8 @@ class NativeViewsBinding:
                 answer = None if failure else validate(proposal)
                 if not failure and runtime.clock() >= deadline:
                     failure, answer = ('expired', 'view_deadline'), None
+                if not failure and answer is not None and proposal.feature_id == 'F12':
+                    answer = self._apply_skill_proposal(proposal, registration, revision, answer, generation)
                 if answer is None:
                     runtime._settle(proposal, *(failure or ('rejected', 'view_contract')))
                 else:
@@ -346,6 +361,131 @@ class NativeViewsBinding:
                     answer = {'revision': revision, **answer}
                 runtime.closed_targets.add(target)
                 return answer
+
+    def _apply_skill_proposal(self, proposal, registration, revision, answer, generation):
+        """Called under the runtime + registration fences, before an applied receipt."""
+        with self.lock:
+            if self.closed or self.generation != generation:
+                return None
+            skills = self.views.skills
+            if revision != skills.revision or self.views.scope != scope_key(self.runtime):
+                return None
+            if proposal.metadata.get('feature_action') == 'rank_skill_ids':
+                task = self._task()
+                if not task or proposal.evidence_refs != (task[0],):
+                    return None
+                ids = tuple(answer['selected_ids'])
+                if not skills.rank(ids, revision=revision, plugin_id=registration.plugin_id, ambiguous=True):
+                    return None
+                hint = SkillHint('hint:' + uuid.uuid4().hex, registration.plugin_id, registration.generation,
+                    self.views.scope, revision, ids[0], skills.hints[registration.plugin_id],
+                    content=self.details[proposal.target_id]['served_content'][ids[0]],
+                    mandatory=any(c.required and c.id == ids[0] for c in skills.candidates))
+                # Bind the whole enumerated native phase, not a guessed skill/step link.
+                # Unknown/empty/oversized plans still permit a hint, never its removal.
+                plan = self._skill_plan()
+                if self.skill_plan_origin != (self._skill_task_scope(), plan):
+                    plan = None
+                skills.owned_hints[hint.plugin_id] = hint
+                self.skill_hints[registration.plugin_id] = (hint, task, plan, registration)
+                return answer
+            removal = self.skill_removals.get(proposal.target_id)
+            if removal is None:
+                return None
+            entry, finished = removal
+            hint, task, initial, owner = entry
+            if (registration is not owner or registration.generation != hint.registration
+                    or self.skill_hints.get(hint.plugin_id) is not entry
+                    or self._task() != task or self._skill_plan() != finished
+                    or not self._phase_finished(initial, finished)
+                    or proposal.feature_id != 'F12' or proposal.action != Action.SELECT_SKILLS
+                    or proposal.candidate_ids or proposal.evidence_refs != (task[0],)
+                    or project(proposal.metadata) != {'feature_action': 'remove_own_hint', 'hint_id': hint.id}):
+                return None
+            if not skills.remove_own_hint(registration.plugin_id, hint=hint, registration=registration.generation):
+                return None
+            self.skill_hints.pop(hint.plugin_id)
+            return answer
+
+    def _skill_task_scope(self):
+        r = self.runtime.revision
+        return (r.profile, r.lineage, r.work_id, r.run_generation, r.instruction_event, r.requirements)
+
+    def _skill_plan(self):
+        from tools.todo_tool import TodoStore
+        store = getattr(self.runtime.agent(), '_todo_store', None)
+        if not isinstance(store, TodoStore):
+            return None
+        plan = store.snapshot()
+        if not plan['todos'] or len(plan['todos']) > 8 or len(json.dumps(plan)) > 1200:
+            return None
+        return plan
+
+    @staticmethod
+    def _phase_finished(initial, finished):
+        if not initial or not finished or finished['revision'] <= initial['revision']:
+            return False
+        before, after = initial['todos'], finished['todos']
+        # Deletion, cancellation, rewriting or adding a step is not completion.
+        return (any(t['status'] in ('pending', 'in_progress') for t in before)
+                and all(t['status'] in ('pending', 'in_progress', 'completed') for t in before)
+                and all(t['status'] == 'completed' for t in after)
+                and [{k: v for k, v in t.items() if k != 'status'} for t in before]
+                    == [{k: v for k, v in t.items() if k != 'status'} for t in after])
+
+    def skill_phase_committed(self, messages):
+        """A committed todo phase transition, not an every-turn semantic patrol.
+
+        Only a ready optional suggestion bound to an enumerated native plan is
+        eligible. Completion describes that plan, never global task completion.
+        No loaded bodies, requirements, safety instructions or history are owned
+        by this hint; their preservation does not depend on the semantic answer.
+        """
+        from agent.turn_iteration_prep import _previous_tool_round
+        if self.closed:
+            return
+        expected = self.runtime.revision
+        batch = _previous_tool_round(messages)
+        finished = self._skill_plan()
+        if not finished or any(t.get('result') is None for t in batch):
+            return
+        committed = False
+        for call in batch:
+            if call.get('name') != 'todo_list':
+                continue
+            try:
+                result = json.loads(call['result'])
+                args = json.loads(call['arguments']) if isinstance(call['arguments'], str) else call['arguments']
+            except (TypeError, ValueError):
+                continue
+            if (isinstance(args, dict) and args.get('todos') is not None and isinstance(result, dict)
+                    and all(result.get(k) == v for k, v in finished.items())):
+                committed = True
+        if not committed:
+            return
+        with self.runtime.lock:
+            if self.closed or self.runtime.revision != expected:
+                return
+            self.skill_plan_origin = (self._skill_task_scope(), finished)
+        if not self.skill_hints or self.views.scope != scope_key(self.runtime):
+            return
+        for entry in tuple(self.skill_hints.values()):
+            hint, task, initial, registration = entry
+            if (not registration.active or not {'observe', 'select_skills'} <= registration.grants
+                    or self._task() != task or not self.views.skills.owns_hint(hint)
+                    or not self._phase_finished(initial, finished)):
+                continue
+            facts = dict(task_ref=task[0], task=task[1], stage='unload',
+                rule_scope='Existing focused-skill rules remain mandatory; remove only the optional suggestion.',
+                hint={'id': hint.id, 'skill_id': hint.skill_id, 'selected_content': hint.content,
+                      'phase': finished, 'plugin_owned': True, 'mandatory': hint.mandatory,
+                      'safety_or_cleanup': hint.safety_or_cleanup, 'phase_ended': True,
+                      'unfinished_step': 'Native enumerated plan transitioned to all completed. '
+                          'This is not proof of global task completion. Retain the suggestion if the task still needs it.'})
+            self._request('task_revision', facts, action=Action.SELECT_SKILLS, refs=(task[0],),
+                revision=hint.catalog_revision, skill_removal=(entry, finished), recipient=registration,
+                validate=lambda p: {} if (p.feature_id == 'F12' and p.action == Action.SELECT_SKILLS
+                    and p.metadata.get('feature_action') == 'remove_own_hint') else None)
 
     def release_status_future(self, future):
         with self.lock:
@@ -616,10 +756,8 @@ class NativeViewsBinding:
             facts = dict(task_ref=ref, task=text, rule_scope='Existing focused-skill rules; suggestions never load skills.',
                 ambiguous=True, mandatory_match=False, mandatory_ids=[], stage='metadata', candidates=candidates)
             ids = tuple(r['id'] for r in candidates)
-            result = self._request('catalog_ambiguity', facts, action=Action.SELECT_SKILLS, refs=(ref,), candidates=ids,
-                validate=lambda p: self._selection(p, 'F12', ids))
-            if result and result['metadata'].get('phase') == 'ready':
-                revision = self.views.skills.catalog(tuple(SkillCandidate(r['id'], r['description']) for r in candidates), self.views.scope)
-                self.views.skills.rank(tuple(result['selected_ids']), revision=revision, plugin_id='native_views', ambiguous=True)
+            revision = self.views.skills.catalog(tuple(SkillCandidate(r['id'], r['description']) for r in candidates), self.views.scope)
+            self._request('catalog_ambiguity', facts, action=Action.SELECT_SKILLS, refs=(ref,), candidates=ids,
+                revision=revision, validate=lambda p: self._selection(p, 'F12', ids))
         except (ValueError, TypeError, KeyError, AttributeError):
             return

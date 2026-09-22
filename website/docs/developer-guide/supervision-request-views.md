@@ -81,7 +81,7 @@ Skill metadata uses `SkillCandidate(id, description, required=False)` and:
 ```python
 revision = owner.skills.catalog(tuple(candidates), scope)
 owner.skills.rank(tuple(ids), revision=revision, plugin_id=plugin_id, ambiguous=False)
-owner.skills.remove_own_hint(plugin_id)
+owner.skills.remove_own_hint(plugin_id, hint=exact_hint, registration=registration_generation)
 ```
 
 Required IDs rank first. Only an explicitly unresolved ambiguous selection creates
@@ -105,6 +105,45 @@ credential readiness/capture, or credential passthrough registration. Missing,
 pruned, oversized or ambiguous bodies stay baseline. Plugin-qualified skills
 remain unsupported by this local-only detail reader. Catalogs without separate
 exclusion metadata are explicitly labeled unknown, not assigned invented exclusions.
+
+### Native optional-hint retirement
+
+A ready hint belongs to the actual plugin **and registration generation**, not the
+shared `native_views` adapter. Its fresh hint ID, scope, catalog revision, selected
+skill ID and already-qualified <=1,200-character detail snapshot are retained by
+the host. Ranking/hint installation occurs under the same settlement fences as
+removal, before an applied receipt is emitted.
+
+The ordinary phase producer is a **committed native `todo_list` write**. When a
+ready hint is created, it can bind only a nonempty native plan that was itself
+committed under the same accepted task/run/instruction scope (<=8 steps and a
+complete <=1,200-character serialized snapshot). An old task's retained TodoStore
+is not new-task authority. Later, the same plan must move from pending/in-progress
+to all completed with every ID, description, parent and order unchanged. Deleted,
+cancelled, added, rewritten or still-unfinished steps do not authorize retirement.
+This transition describes the enumerated plan only, **not global completion**.
+
+Before the completed batch advances evidence revision, the host emits one scoped
+`task_revision` / `stage=unload` observation to the exact owning registration. It
+supplies the original task, selected skill snapshot, full completed plan and
+explicitly scoped phase facts under the existing task-text and field/source egress
+grants. No grant means no remote request. The original next-round shared 150 ms
+window covers this decision and all subsequent owners; it is not renewed afterward.
+The unchanged feature's `remaining` decision may abstain or retain the hint.
+
+Only `feature_action=remove_own_hint` with that exact hint ID and task reference
+can consume the proposal. The host rechecks the live plan, plugin/registration,
+revision, catalog, hint object, generation, deadline and mandatory/must-keep/
+safety-or-cleanup vetoes under the owner fences. Its sole effect is deleting that
+one optional suggestion. Other plugins' hints, ranked IDs, loaded bodies,
+requirements and source history remain unchanged. A new identical-looking hint
+is a different object and cannot be removed by an old proposal. Ordinary scope
+reset/unload remains lifecycle cleanup, never an applied F12 removal receipt.
+
+Empty, unbound, oversized or changed plans retain baseline. This path does not
+infer completed work from prose, force skill loading, inspect credential readiness,
+create a user turn, or perform an every-turn semantic check. Required focused
+skills and historical safety/cleanup instructions are never owned by this feature.
 
 ## Result and retrieval owners
 

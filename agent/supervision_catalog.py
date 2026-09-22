@@ -103,14 +103,31 @@ class SkillCandidate:
     required: bool = False
 
 
+@dataclass(frozen=True)
+class SkillHint:
+    """Exact ownership of an optional suggestion, never of loaded skill content."""
+    id: str
+    plugin_id: str
+    registration: str
+    scope: str
+    catalog_revision: str
+    skill_id: str
+    text: str
+    content: str = ""
+    mandatory: bool = False
+    must_keep: bool = False
+    safety_or_cleanup: bool = False
+
+
 class SkillView:
-    """Plugin-owned suggestions only. No loaded bodies or transcript references."""
+    """Own suggestions and read-only detail snapshots, never loaded history."""
     def __init__(self):
         self.scope = None
         self.revision = ""
         self.candidates = ()
         self.ranked_ids = ()
         self.hints: dict[str, str] = {}
+        self.owned_hints: dict[str, SkillHint] = {}
 
     def catalog(self, candidates: tuple[SkillCandidate, ...], scope: str):
         if len({c.id for c in candidates}) != len(candidates):
@@ -118,6 +135,7 @@ class SkillView:
         revision = fingerprint((scope, [(c.id, c.description, c.required) for c in candidates]))
         if revision != self.revision:
             self.hints.clear()
+            self.owned_hints.clear()
             self.ranked_ids = tuple(c.id for c in candidates)
         self.scope, self.revision, self.candidates = scope, revision, candidates
         return revision
@@ -131,11 +149,27 @@ class SkillView:
         mandatory = tuple(c.id for c in self.candidates if c.required)
         self.ranked_ids = mandatory + tuple(i for i in ids if i not in mandatory) + tuple(
             c.id for c in self.candidates if c.id not in ids and c.id not in mandatory)
+        self.owned_hints.pop(plugin_id, None)
         if ambiguous:
             self.hints[plugin_id] = "Optional skill candidate: " + ids[0] + ". Apply existing focused-skill rules."
         else:
             self.hints.pop(plugin_id, None)
         return True
 
-    def remove_own_hint(self, plugin_id: str):
-        self.hints.pop(plugin_id, None)
+    def owns_hint(self, hint: SkillHint) -> bool:
+        return (self.owned_hints.get(hint.plugin_id) is hint
+                and hint.scope == self.scope and hint.catalog_revision == self.revision
+                and self.hints.get(hint.plugin_id) == hint.text
+                and hint.skill_id in {c.id for c in self.candidates}
+                and not any(c.required and c.id == hint.skill_id for c in self.candidates)
+                and not (hint.mandatory or hint.must_keep or hint.safety_or_cleanup))
+
+    def remove_own_hint(self, plugin_id: str, *, hint: SkillHint | None = None,
+                        registration: str | None = None) -> bool:
+        if hint is None and plugin_id in self.owned_hints:
+            return False  # Native owned hints require exact registration provenance.
+        if hint is not None and (hint.plugin_id != plugin_id or hint.registration != registration
+                                 or not self.owns_hint(hint)):
+            return False
+        self.owned_hints.pop(plugin_id, None)
+        return self.hints.pop(plugin_id, None) is not None

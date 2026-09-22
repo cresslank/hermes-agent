@@ -1,0 +1,215 @@
+"""Real standalone F12 through native catalog/detail and committed todo phase."""
+import copy
+from dataclasses import replace
+import json
+from types import SimpleNamespace
+
+import pytest
+
+from tests.agent.test_supervision_native_views import native, skill_catalog
+from tests.agent.test_supervision_views import assemble
+from tests.agent.test_tool_call_incremental_persistence import _mock_tool_call, _make_tool_defs
+
+
+def todo(native, messages, items=None, concurrent=False):
+    a = native.agent
+    a.tools = _make_tool_defs('todo_list')
+    args = {} if items is None else {'todos': items}
+    call = _mock_tool_call(name='todo_list', call_id='todo-' + str(len(messages)))
+    call.function.arguments = json.dumps(args)
+    assistant = SimpleNamespace(content='', tool_calls=[call])
+    messages.append({'role': 'assistant', 'content': '', 'tool_calls': [
+        {'id': call.id, 'type': 'function', 'function': {'name': 'todo_list', 'arguments': call.function.arguments}}]})
+    if concurrent:
+        a._execute_tool_calls_concurrent(assistant, messages, 'task')
+    else:
+        a._execute_tool_calls_sequential(assistant, messages, 'task')
+    assert json.loads(messages[-1]['content'])['todos'] == a._todo_store.read()
+
+
+def ready(native):
+    skill_catalog(native)
+    messages: list[dict] = [{'role': 'user', 'content': 'Analyze weather observations.'},
+                {'role': 'tool', 'name': 'skill_view', 'tool_call_id': 'loaded-before',
+                 'content': 'Loaded skill body. Mandatory safety and cleanup remain in history.'}]
+    items = [{'id': 'analysis', 'content': 'Analyze weather observations.', 'status': 'in_progress'},
+             {'id': 'safety', 'content': 'Verify required safety checks.', 'status': 'pending'},
+             {'id': 'cleanup', 'content': 'Clean up the owned scratch artifacts.', 'status': 'pending'}]
+    todo(native, messages, items)
+    result = assemble(native.agent, messages)
+    assert 'Optional skill candidate: alpha' in str(result.api_messages), native.bridge.supervisor.inspect()
+    binding = native.agent._supervision_view_binding
+    entry, = binding.skill_hints.values()
+    assert entry[0].plugin_id == 'fixture-views'
+    assert entry[0].registration == entry[3].generation
+    return messages, items, binding, entry
+
+
+def removal_calls(native):
+    return [b for b, _ in native.calls if 'F12/remaining' in b['questions']]
+
+
+@pytest.mark.parametrize('concurrent', [False, True])
+def test_ready_hint_exact_removal_at_committed_native_phase(native, monkeypatch, concurrent):
+    native.mode['delay'] = .005
+    messages, items, binding, entry = ready(native)
+    hint = entry[0]
+    skills = binding.views.skills
+    skills.rank(('beta',), revision=skills.revision, plugin_id='other-plugin', ambiguous=True)
+    foreign = skills.hints['other-plugin']
+    originals = copy.deepcopy(messages)
+    sources = copy.deepcopy(native.runtime.sources)
+    requirements = native.runtime.requirements
+    ranked = skills.ranked_ids
+    proposals, observations = [], []
+    observe = entry[3].consumer
+    def observe_bound(snapshot):
+        observations.append(copy.deepcopy(snapshot))
+        return observe(snapshot)
+    monkeypatch.setattr(entry[3], 'consumer', observe_bound)
+    submit = native.facade.submit
+    def capture(p):
+        proposals.append(copy.deepcopy(p))
+        return submit(p)
+    monkeypatch.setattr(native.facade, 'submit', capture)
+    todo(native, messages, [{**t, 'status': 'completed'} for t in items], concurrent)
+    native.drain()
+    assert skills.hints == {'other-plugin': foreign}, native.bridge.supervisor.inspect()
+    assert skills.ranked_ids == ranked
+    assert messages[:len(originals)] == originals
+    assert native.runtime.sources == sources and native.runtime.requirements == requirements
+    assert len(removal_calls(native)) == 1
+    body = removal_calls(native)[0]
+    assert observations[0]['event'] == 'task_revision'
+    assert body['state']['facts']['stage'] == 'unload'
+    assert body['state']['facts']['hint']['id'] == hint.id
+    proposal, = [p for p in proposals if p['metadata']['feature_action'] == 'remove_own_hint']
+    assert proposal['action'] == 'select_skills' and proposal['candidate_ids'] == []
+    assert proposal['metadata']['hint_id'] == hint.id
+    assert native.runtime.receipts[proposal['proposal_id']].status == 'applied'
+    assert not binding.skill_hints and not binding.skill_removals
+    native.mode['retirement_trace'] = {'observations': observations, 'proposals': proposals,
+        'receipt': vars(native.runtime.receipts[proposal['proposal_id']]), 'hint': vars(hint),
+        'surviving_hints': dict(skills.hints), 'history_unchanged': messages[:len(originals)] == originals}
+    todo(native, messages)  # no applicable own hint -> no repeated semantic call
+    assert len(removal_calls(native)) == 1
+
+
+@pytest.mark.parametrize('case', ['pending', 'safety', 'cleanup', 'cancelled', 'deleted', 'rewritten',
+                                  'added', 'read', 'mandatory', 'must_keep', 'safety_hint',
+                                  'catalog_required', 'catalog_revision', 'no_hint', 'no_grant', 'no_policy'])
+def test_phase_producer_preserves_incomplete_required_and_absent_hints(native, case):
+    messages, items, binding, entry = ready(native)
+    hint, task, plan, reg = entry
+    finished = [{**t, 'status': 'completed'} for t in items]
+    if case in ('pending', 'safety', 'cleanup'):
+        finished[{'pending': 0, 'safety': 1, 'cleanup': 2}[case]]['status'] = 'pending'
+    elif case == 'cancelled':
+        finished[0]['status'] = 'cancelled'
+    elif case == 'deleted':
+        finished.pop()
+    elif case == 'rewritten':
+        finished[0]['content'] = 'Different work'
+    elif case == 'added':
+        finished.append({'id': 'new', 'content': 'New work', 'status': 'completed'})
+    elif case == 'read':
+        finished = None
+    elif case in ('mandatory', 'must_keep', 'safety_hint'):
+        field = 'safety_or_cleanup' if case == 'safety_hint' else case
+        protected = replace(hint, **{field: True})
+        binding.skill_hints[hint.plugin_id] = (protected, task, plan, reg)
+        binding.views.skills.owned_hints[hint.plugin_id] = protected
+    elif case == 'catalog_required':
+        binding.views.skills.candidates = tuple(replace(c, required=True) if c.id == hint.skill_id else c
+                                               for c in binding.views.skills.candidates)
+    elif case == 'catalog_revision':
+        binding.views.skills.revision = 'changed'
+    elif case == 'no_hint':
+        binding.views.skills.hints.pop(hint.plugin_id)
+    elif case == 'no_grant':
+        reg.grants = frozenset({'observe'})
+    elif case == 'no_policy':
+        reg.egress_policy = {}
+    before = dict(binding.views.skills.hints)
+    todo(native, messages, finished)
+    native.drain()
+    assert not removal_calls(native)
+    assert binding.views.skills.hints == before
+
+
+@pytest.mark.parametrize('case', ['remaining', 'hint_id', 'feature_action', 'feature_id', 'candidate', 'evidence',
+                                  'owner', 'generation', 'expired', 'revoked', 'scope', 'plan_changed',
+                                  'hint_replaced', 'same_text_replaced', 'catalog_changed', 'mandatory_late', 'registration', 'unload'])
+def test_removal_consumer_rechecks_exact_identity_and_vetoes(native, monkeypatch, case):
+    messages, items, binding, entry = ready(native)
+    hint, task, plan, registration = entry
+    before = dict(binding.views.skills.hints)
+    if case == 'remaining':
+        native.mode['remaining'] = .99
+    proposals = []
+    submit = native.facade.submit
+    def intercept(p):
+        p = copy.deepcopy(p)
+        if p['metadata']['feature_action'] == 'remove_own_hint':
+            if case == 'hint_id': p['metadata']['hint_id'] = 'foreign-hint'
+            elif case == 'feature_action': p['metadata']['feature_action'] = 'rank_skill_ids'
+            elif case == 'feature_id': p['feature_id'] = 'F13'
+            elif case == 'candidate': p['candidate_ids'] = ['alpha']
+            elif case == 'evidence': p['evidence_refs'] = ['foreign']
+            elif case == 'owner': p['owner'] = 'foreign'
+            elif case == 'generation': p['plugin_generation'] = 'foreign'
+            elif case == 'expired': monkeypatch.setattr(native.runtime, 'clock', lambda: native.runtime.round_deadline + 1)
+            elif case == 'revoked': registration.active = False
+            elif case == 'unload': native.facade.unregister()
+            elif case == 'same_text_replaced': binding.views.skills.rank((hint.skill_id,), revision=hint.catalog_revision, plugin_id=hint.plugin_id, ambiguous=True)
+            elif case == 'scope': native.runtime.revision = replace(native.runtime.revision, instruction_event=999)
+            elif case == 'plan_changed': native.agent._todo_store.write([{'id': 'new', 'content': 'Unfinished', 'status': 'pending'}])
+            elif case == 'hint_replaced': binding.skill_hints[hint.plugin_id] = tuple(list(entry))
+            elif case == 'catalog_changed': binding.views.skills.revision = 'changed'
+            elif case == 'mandatory_late': binding.views.skills.candidates = tuple(replace(c, required=True) for c in binding.views.skills.candidates)
+            elif case == 'registration': binding.skill_hints[hint.plugin_id] = (hint, task, plan, object())
+            proposals.append(p)
+        return submit(p)
+    monkeypatch.setattr(native.facade, 'submit', intercept)
+    # Reopening the actual store during settlement intentionally differs from the committed result.
+    if case == 'plan_changed':
+        # Use the normal executor too; assertion belongs below, not the helper's equality check.
+        a = native.agent
+        a.tools = _make_tool_defs('todo_list')
+        call = _mock_tool_call(name='todo_list', call_id='finish')
+        call.function.arguments = json.dumps({'todos': [{**t, 'status': 'completed'} for t in items]})
+        messages.append({'role': 'assistant', 'content': '', 'tool_calls': [
+            {'id': call.id, 'type': 'function', 'function': {'name': 'todo_list', 'arguments': call.function.arguments}}]})
+        a._execute_tool_calls_sequential(SimpleNamespace(content='', tool_calls=[call]), messages, 'task')
+    else:
+        todo(native, messages, [{**t, 'status': 'completed'} for t in items])
+    native.drain()
+    assert len(removal_calls(native)) == 1
+    if case == 'unload':
+        assert not binding.skill_hints  # lifecycle reset is not an applied feature effect
+    else:
+        assert binding.views.skills.hints == before
+    for p in proposals:
+        receipt = native.runtime.receipts.get(p['proposal_id'])
+        assert receipt is None or receipt.status != 'applied'
+
+
+def test_old_task_plan_is_not_current_phase_authority(native):
+    messages, items, binding, _ = ready(native)
+    native.accept('Analyze weather observations.')  # new accepted task, old TodoStore retained
+    assemble(native.agent, messages)
+    entry, = binding.skill_hints.values()
+    assert entry[2] is None
+    before = dict(binding.views.skills.hints)
+    todo(native, messages, [{**t, 'status': 'completed'} for t in items])
+    native.drain()
+    assert not removal_calls(native)
+    assert binding.views.skills.hints == before
+
+
+def test_ordinary_unhinted_todo_completion_is_silent(native):
+    native.accept('Ordinary local task.')
+    messages = []
+    todo(native, messages, [{'id': 'one', 'content': 'Done', 'status': 'completed'}])
+    native.drain()
+    assert not native.calls

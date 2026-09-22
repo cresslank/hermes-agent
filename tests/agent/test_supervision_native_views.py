@@ -64,7 +64,7 @@ def native(tmp_path, monkeypatch, request):
     home.mkdir(parents=True)
     monkeypatch.setenv('HERMES_HOME', str(home))
     fields = '''target_id operation_ref operation contract ambiguous explicit_tool deterministic_route candidates
-    mandatory_ids discovery_ids task_ref task rule_scope mandatory_match stage question source_ref oversized structured
+    mandatory_ids discovery_ids task_ref task rule_scope mandatory_match stage hint question source_ref oversized structured
     source_immutable critical_fields_complete baseline_ids omitted_count notification_ref subject_id update previous
     changed_fields optional filterable observation_complete obligations_clear duplicate known_progress_repeat mandatory_controls
     user_ref slot user_wording interpretations permission_ui secret_ui authorization_missing safe_default resolution_candidates user_only_established retrieval_exhausted'''.split()
@@ -85,6 +85,9 @@ def native(tmp_path, monkeypatch, request):
         assert set(body) == {'model', 'state', 'questions'}
         assert body['model'] == 'jev-1.13.0'
         calls.append((body, threading.current_thread().name))
+        if mode.get('delay'):
+            import asyncio
+            await asyncio.sleep(mode['delay'])
         facts = body['state']['facts']
         if 'source_ref' in facts:
             # Resolve the actual host-owned binding, not a plugin filesystem path.
@@ -108,7 +111,7 @@ def native(tmp_path, monkeypatch, request):
                 positive = not key.startswith('F19/material:')
                 if key.startswith(('F13/fit:', 'F16/needed:')):
                     positive = key.split(':', 1)[1] == next(iter(first['criteria']))
-                answers[key] = {'type': 'noul', 'noul': mode.get('material', .01) if key.startswith('F19/material:') else .99 if positive else .01}
+                answers[key] = {'type': 'noul', 'noul': mode.get('remaining', .01) if key == 'F12/remaining' else mode.get('material', .01) if key.startswith('F19/material:') else .99 if positive else .01}
         return httpx.Response(200, json={'model': body['model'], 'usage': {}, 'answers': answers})
     cfg = Config(str(home), True, policy_id='offline-fixture', allowed_classes={'synthetic'}, fixture_policy=True)
     transport = Transport(cfg, FixtureCredential(str(home)), http_transport=httpx.MockTransport(handle))

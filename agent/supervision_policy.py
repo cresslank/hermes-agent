@@ -208,8 +208,9 @@ class SupervisionRuntime:
     def observe(self, event, facts, *, target_id=None, actions=(), evidence_refs=(),
                 deadline=None, completeness=None, origin_kind="owner", data_class="task_text",
                 owner="agent", candidates=(), required_ids=(), relations=(), required_data_classes=(),
-                required_obligations=(), deadline_issued_at=None):
-        regs = [r for r in self._registrations() if "observe" in r.grants and data_class in r.data_policy
+                required_obligations=(), deadline_issued_at=None, recipient=None):
+        regs = [r for r in self._registrations() if (recipient is None or r is recipient)
+                and "observe" in r.grants and data_class in r.data_policy
                 and set(required_data_classes) <= r.data_policy]
         if not regs or self.closed or (deadline is not None and deadline <= self.clock()):
             return None
@@ -457,12 +458,19 @@ class SupervisionRuntime:
         from agent.turn_iteration_prep import _previous_tool_round
         from agent.supervision_context import completed_batch_facts
         batch = _previous_tool_round(messages)
+        # The committed batch starts the next shared owner window. An actual
+        # native plan phase transition may retire an exact optional skill hint
+        # before evidence revision invalidation; reset alone is not that effect.
+        with self.lock:
+            self.round_deadline = None
+            self.round_deadline_issued_at = None
+        binding = getattr(self.agent(), "_supervision_view_binding", None)
+        if binding is not None:
+            binding.skill_phase_committed(messages)
         with self.lock:
             artifacts, self.pending_artifacts = self.pending_artifacts, []
             self.pending_artifact_bytes = 0
             self.revision = replace(self.revision, evidence=self.revision.evidence + 1)
-            self.round_deadline = None
-            self.round_deadline_issued_at = None
             # Only committed exact artifact facts already bound to pending requirements qualify.
             receipts, source_findings, batch_coverage = completed_batch_facts(
                 messages, revision=self.revision, requirements=self.requirements, target_refs=self.designated_refs)
