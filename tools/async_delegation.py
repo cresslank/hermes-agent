@@ -671,8 +671,14 @@ def _dispatch_admitted(
     classify = _batch_status if is_batch else (lambda r: r.get("status") or "completed")
     crash_result = _batch_crash if is_batch else _single_crash
     dispatched_at = time.time()
+    control_ids = []
+    for child in control_children or []:
+        child_id = getattr(child, "_subagent_id", None)
+        # Preserve one slot per child. Unknown legacy linkage is not suppression
+        # authority, but must not break otherwise ordinary source delivery.
+        control_ids.append(child_id if type(child_id) is str and child_id else None)
     record: Dict[str, Any] = {
-        "delegation_id": delegation_id, "goal": goal, **({"goals": list(goals)} if is_batch else {}),
+        "delegation_id": delegation_id, "goal": goal, **({"goals": list(goals)} if goals is not None else {}),
         "context": context, "toolsets": list(toolsets) if toolsets else None, "role": role, "model": model,
         "session_key": session_key, "origin_ui_session_id": origin_ui_session_id,
         "origin_session_id": origin_session_id, "parent_session_id": parent_session_id,
@@ -681,7 +687,7 @@ def _dispatch_admitted(
         "interrupt_fn": interrupt_fn, **({"is_batch": True} if is_batch else {}), "progress_fn": progress_fn,
         "slot_key": slot_key or delegation_id,
         # Identity linkage only. Missing/partial legacy coverage stays unknown at admission.
-        "control_child_ids": [getattr(child, "_subagent_id", None) for child in (control_children or [])],
+        "control_child_ids": control_ids,
         **({"task_transcripts": dict(task_transcripts)} if task_transcripts else {}),
         # Which of the call's ``goals`` this unit runs (None = all of them).
         **({"task_indexes": list(task_indexes)} if task_indexes is not None else {}),

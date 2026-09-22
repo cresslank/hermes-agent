@@ -22,12 +22,7 @@ from agent.owned_delegation import (
 )
 from tools.delegation_control_store import SQLiteControlStore, ControlConflict
 
-# Owned by delivery lane in canonical SCHEMA_SQL; this lane's adapter fixture
-# exercises the exact published DDL without pretending the unmerged owner exists.
-DDL = '''CREATE TABLE delegation_controls (
- child_id TEXT PRIMARY KEY, parent_session_id TEXT NOT NULL, generation TEXT NOT NULL,
- control_revision INTEGER NOT NULL CHECK(control_revision >= 1),
- snapshot_json TEXT NOT NULL, updated_at REAL NOT NULL);'''
+from hermes_state import SessionDB
 
 
 class Child:
@@ -54,9 +49,10 @@ class Child:
 def rig(tmp_path, monkeypatch):
     from tools import delegate_tool as dt
     path = tmp_path / 'state.db'
-    conn = sqlite3.connect(path)
-    conn.executescript(DDL)
-    conn.close()
+    # Use the real canonical initializer now that delivery and lifecycle are joined.
+    db = SessionDB(path)
+    db.create_session('parent', 'cli')
+    db.close()
     store = SQLiteControlStore(lambda: sqlite3.connect(path))
     parent = SimpleNamespace(session_id='parent', _delegate_depth=0)
     consumers = {'parent:parent': Consumer('parent:parent', 'optional'), 'research': Consumer('research', 'optional')}
@@ -111,6 +107,54 @@ def propose(rig, handle, key, *, value=.01, feature='F01', expected=None):
 def prime(rig, handle):
     assert propose(rig, handle, 'first').reason == 'await_distinct_revision'
     rig.revision[2] += 1
+
+
+@pytest.mark.parametrize('subset', [False, True])
+def test_public_launch_links_unit_controls_before_executor_submission(rig, monkeypatch, subset):
+    from tools import async_delegation as source
+    from tools.delegate_tool_dispatch import _dispatch_unit
+
+    first, _ = rig.launch()
+    second, _ = rig.launch()
+    tasks = [rig.batches[0].task_list[0], rig.batches[1].task_list[0]]
+    children = [(0, tasks[0], first), (1, tasks[1], second)]
+    unit = dataclasses.replace(rig.batches[0], task_list=tasks,
+                               children=children[1:] if subset else children)
+    expected_ids = [child._subagent_id for _, _, child in unit.children]
+    futures = []
+    observations = []
+    monkeypatch.setattr(source, '_db_path', lambda: rig.path / 'state.db')
+    monkeypatch.setattr(source, '_ensure_stale_monitor', lambda: None)
+
+    class SchedulerBoundary:
+        def submit(self, worker):
+            # This is the scheduling boundary, not a mock source/control store.
+            # The real public launch has already registered owner controls.
+            with source._connect() as conn:
+                row = conn.execute('SELECT control_child_ids, task_json FROM async_delegations '
+                                   'WHERE delegation_id=?', ('linked-unit',)).fetchone()
+                assert json.loads(row[0]) == expected_ids
+                task = json.loads(row[1])
+                assert task.get('task_indexes') == ([1] if subset else None)
+            control = source.get_launch_control('linked-unit')
+            assert [c['child_id'] for c in control['children']] == expected_ids
+            assert not control['retainable']  # launching is not settlement
+            observations.append(control)
+            future = Future()
+            futures.append(future)
+            return future
+
+    monkeypatch.setattr(source, '_get_executor', lambda _: SchedulerBoundary())
+    try:
+        result = _dispatch_unit(unit, 'linked-unit', None,
+                                dict(session_key='parent', parent_session_id='parent'))
+        assert result['status'] == 'dispatched', result
+        assert len(observations) == 1
+        assert SQLiteControlStore(lambda: sqlite3.connect(rig.path / 'state.db')).read(expected_ids[0])
+    finally:
+        for future in futures:
+            future.cancel()  # release the real retirement reservation
+        source._reset_for_tests()
 
 
 def test_ordinary_delegate_launch_produces_durable_scoped_handle_and_metadata(rig):

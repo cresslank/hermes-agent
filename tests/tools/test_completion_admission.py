@@ -9,7 +9,8 @@ import pytest
 from agent import completion_admission as admission
 from agent import supervision_store as store
 from tools import async_delegation as source
-from tests.agent.test_supervision_store import owner, launch, ready, optional, consume, row, control_snapshot, write_control
+from tests.agent.test_supervision_store import owner as owner
+from tests.agent.test_supervision_store import launch, ready, optional, consume, row, control_snapshot, write_control
 
 
 def test_fixed_object_and_profile_budgets_never_evict_pins(owner):
@@ -173,6 +174,32 @@ def test_launch_control_is_committed_before_the_real_source_dispatch(owner, monk
         session_key='target',parent_session_id='target',runner=runner,control_children=[SimpleNamespace(_subagent_id='actual-child-id')])
     assert handle['status']=='dispatched'
     assert seen==[{'obligation':'optional','children':[snapshot],'retainable':True}]
+
+
+@pytest.mark.parametrize('invalid_id', [None, '', 7, {'not': 'an id'}, object()])
+def test_unknown_child_identity_preserves_slots_and_normal_dispatch(owner, monkeypatch, invalid_id):
+    from concurrent.futures import Future
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(source, '_records', {})
+    class InlineExecutor:
+        def submit(self, fn):
+            future = Future()
+            fn()
+            future.set_result(None)
+            return future
+    monkeypatch.setattr(source, '_get_executor', lambda *_: InlineExecutor())
+    handle = source.dispatch_async_delegation_batch(
+        goals=['known', 'legacy'], context=None, toolsets=[], role='default', model=None,
+        session_key='target', parent_session_id='target', runner=lambda: {'results': []},
+        control_children=[SimpleNamespace(_subagent_id='known'), SimpleNamespace(_subagent_id=invalid_id)])
+    assert handle['status'] == 'dispatched'
+    with source._transaction() as conn:
+        ids = conn.execute('SELECT control_child_ids FROM async_delegations WHERE delegation_id=?',
+                           (handle['delegation_id'],)).fetchone()[0]
+    assert json.loads(ids) == ['known', None]
+    assert source.get_launch_control(handle['delegation_id']) == {
+        'obligation': 'unknown', 'children': [], 'retainable': False}
 
 
 def test_source_persistence_failure_never_starts_worker_and_rolls_back(owner, monkeypatch):
