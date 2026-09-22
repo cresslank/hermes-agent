@@ -6,7 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from tests.agent.test_supervision_native_views import native, skill_catalog
+from tests.agent.test_supervision_native_views import native as native, skill_catalog
 from tests.agent.test_supervision_views import assemble
 from tests.agent.test_tool_call_incremental_persistence import _mock_tool_call, _make_tool_defs
 
