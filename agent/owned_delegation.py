@@ -50,11 +50,12 @@ class Consumer:
     requires_effects: bool = False
     requires_cleanup: bool = False
     requirement_ids: tuple[str, ...] = ()
+    requires_corroboration: bool = False
 
     def __post_init__(self):
         if not isinstance(self.ref, str) or not 1 <= len(self.ref) <= 256 or self.obligation not in {'required', 'optional', 'unknown'}:
             raise ControlDenied('Invalid consumer')
-        if any(type(v) is not bool for v in (self.requires_result, self.requires_effects, self.requires_cleanup)):
+        if any(type(v) is not bool for v in (self.requires_result, self.requires_effects, self.requires_cleanup, self.requires_corroboration)):
             raise ControlDenied('Invalid consumer obligations')
         if (not isinstance(self.requirement_ids, tuple) or len(self.requirement_ids) > 4
                 or len(set(self.requirement_ids)) != len(self.requirement_ids)
@@ -196,12 +197,13 @@ class _Live:
 class OwnedDelegationOwner:
     def __init__(self, *, parent_session_id: str, store, grant: OwnerGrant,
                  consumer_resolver: Callable[[str], Consumer | None], policy: ReadOnlyPolicy,
-                 revision_provider: Callable[[], tuple[int, int, int]]):
+                 revision_provider: Callable[[], tuple[int, int, int]], consumer_inventory=None):
         if not parent_session_id or not isinstance(grant, OwnerGrant) or not isinstance(policy, ReadOnlyPolicy):
             raise ControlDenied('Invalid owner configuration')
         self.parent_session_id = parent_session_id
         self._store, self._grant, self._resolve = store, grant, consumer_resolver
         self._policy, self._revision = policy, revision_provider
+        self._consumer_inventory = consumer_inventory
         self._lock = threading.RLock()
         self._live: dict[str, _Live] = {}
 
@@ -232,6 +234,60 @@ class OwnedDelegationOwner:
         if snapshot['cancel_requested'] or snapshot['settled']:
             raise ControlDenied('Child dispatch is sealed')
 
+    def _launch_controls(self, parent, request, ancestor=None):
+        refs = list(request['consumer_refs']) if request else []
+        parent_ref = 'parent:' + str(getattr(parent, 'session_id', self.parent_session_id))
+        if parent_ref not in refs:
+            refs.append(parent_ref)
+        consumers = []
+        for ref in refs:
+            consumer = self._resolve(ref)
+            if not isinstance(consumer, Consumer) or consumer.ref != ref:
+                consumer = Consumer(ref)
+            consumers.append({**dataclasses.asdict(consumer), 'requirement_ids': list(consumer.requirement_ids)})
+        closed = bool(request and request['consumer_refs'] and request['consumer_set_closed'] and
+                      self._grant.controls_all_consumers and all(c['obligation'] != 'unknown' for c in consumers))
+        obligation = request['obligation'] if request else 'unknown'
+        if any(c['obligation'] == 'required' or any(c[k] for k in ('requires_result', 'requires_effects', 'requires_cleanup', 'requires_corroboration'))
+               for c in consumers):
+            obligation = 'required'
+        elif not closed or not self._grant.allow_optional_readonly:
+            obligation = 'unknown'
+        restricted = bool(request and request['effect_policy_id'] == self._policy.policy_id and
+                          self._grant.allow_optional_readonly)
+        if request and request['effect_policy_id'] != self._policy.policy_id:
+            raise ControlDenied('Unknown effect policy')
+        if ancestor and ancestor.snapshot['effect_class'] == 'read_only' and not restricted:
+            raise ControlDenied('Nested work must inherit the read-only policy')
+        return consumers, closed, obligation, restricted
+
+    def planning_preflight(self, parent, request, *, require_inventory=False):
+        """Observe the same launch restrictions, without constructing or reserving work."""
+        request = validate_request(request)
+        with self._lock:
+            if binding_of(parent) or len(self._live) >= 1024:
+                return None
+            consumers, closed, obligation, restricted = self._launch_controls(parent, request)
+            if not restricted:
+                return None
+            if require_inventory:
+                # Unlike launch's caller-declared closure, stopping expansion must
+                # account a positively enumerated CURRENT native consumer set.
+                if not callable(self._consumer_inventory):
+                    return None
+                inventory = self._consumer_inventory()
+                if (not isinstance(inventory, tuple) or not 1 <= len(inventory) <= 64
+                        or any(not isinstance(c, Consumer) for c in inventory)
+                        or len({c.ref for c in inventory}) != len(inventory)):
+                    return None
+                actual = [{**dataclasses.asdict(c), 'requirement_ids': list(c.requirement_ids)} for c in inventory]
+                if sorted(actual, key=lambda c: c['ref']) != sorted(consumers, key=lambda c: c['ref']):
+                    return None
+            return dict(consumers=consumers, closed=closed, obligation=obligation,
+                        policy_id=self._policy.policy_id,
+                        contracts={c.tool_name: c.version for c in self._policy.contracts},
+                        revision=self._revision())
+
     def launch(self, parent, child, request=None, *, goal=""):
         """Called BEFORE scheduling by BOTH ordinary delegate and public launch."""
         request = validate_request(request)
@@ -254,30 +310,7 @@ class OwnedDelegationOwner:
                 if ancestor.snapshot['effect_class'] == 'read_only' and request is None:
                     request = dict(obligation='unknown', consumer_refs=[], consumer_set_closed=False,
                                    effect_policy_id=self._policy.policy_id)
-            refs = list(request['consumer_refs']) if request else []
-            parent_ref = 'parent:' + str(getattr(parent, 'session_id', self.parent_session_id))
-            if parent_ref not in refs:
-                refs.append(parent_ref)
-            consumers = []
-            for ref in refs:
-                consumer = self._resolve(ref)
-                if not isinstance(consumer, Consumer) or consumer.ref != ref:
-                    consumer = Consumer(ref)
-                consumers.append({**dataclasses.asdict(consumer), 'requirement_ids': list(consumer.requirement_ids)})
-            closed = bool(request and request['consumer_refs'] and request['consumer_set_closed'] and
-                          self._grant.controls_all_consumers and all(c['obligation'] != 'unknown' for c in consumers))
-            obligation = request['obligation'] if request else 'unknown'
-            if any(c['obligation'] == 'required' or any(c[k] for k in ('requires_result', 'requires_effects', 'requires_cleanup'))
-                   for c in consumers):
-                obligation = 'required'
-            elif not closed or not self._grant.allow_optional_readonly:
-                obligation = 'unknown'
-            restricted = bool(request and request['effect_policy_id'] == self._policy.policy_id and
-                              self._grant.allow_optional_readonly)
-            if request and request['effect_policy_id'] != self._policy.policy_id:
-                raise ControlDenied('Unknown effect policy')
-            if ancestor and ancestor.snapshot['effect_class'] == 'read_only' and not restricted:
-                raise ControlDenied('Nested work must inherit the read-only policy')
+            consumers, closed, obligation, restricted = self._launch_controls(parent, request, ancestor)
             handle = OwnedHandle(child_id, secrets.token_hex(16), self.parent_session_id,
                                  self._grant.profile, self._grant.plugin_id)
             snap = dict(child_id=child_id, generation=handle.generation, parent_session_id=self.parent_session_id,
@@ -361,7 +394,7 @@ class OwnedDelegationOwner:
                 s['candidate'] = None
                 if consumer.obligation == 'unknown':
                     s.update(consumer_set_closed=False, obligation='unknown')
-                elif consumer.obligation == 'required' or any((consumer.requires_result, consumer.requires_effects, consumer.requires_cleanup)):
+                elif consumer.obligation == 'required' or any((consumer.requires_result, consumer.requires_effects, consumer.requires_cleanup, consumer.requires_corroboration)):
                     s['obligation'] = 'required'
             return self._commit(live, change)['control_revision']
 
@@ -529,7 +562,7 @@ class OwnedDelegationOwner:
             if (not self.semantic_authorized(handle) or s['cancel_requested'] or s['settled'] or s['obligation'] != 'optional' or
                     not s['consumer_set_closed'] or not s['consumers'] or s['effect_class'] != 'read_only' or
                     s['handoffs'] or s['cleanup_pending'] or not self._grant.allow_optional_readonly or
-                    any(c['obligation'] != 'optional' or c['requires_result'] or c['requires_effects'] or c['requires_cleanup'] for c in s['consumers'])):
+                    any(c['obligation'] != 'optional' or c['requires_result'] or c['requires_effects'] or c['requires_cleanup'] or c.get('requires_corroboration', True) for c in s['consumers'])):
                 return self._receipt(s, False, 'ineligible')
             revision = self._revision()
             if (not isinstance(evidence, SemanticEvidence) or evidence.revision != revision or
@@ -583,9 +616,10 @@ class OwnedDelegationOwner:
                 pass
 
 
-def install_owner(parent, *, store, grant, consumer_resolver, policy, revision_provider):
+def install_owner(parent, *, store, grant, consumer_resolver, policy, revision_provider, consumer_inventory=None):
     owner = OwnedDelegationOwner(parent_session_id=str(parent.session_id), store=store, grant=grant,
-                                 consumer_resolver=consumer_resolver, policy=policy, revision_provider=revision_provider)
+                                 consumer_resolver=consumer_resolver, policy=policy, revision_provider=revision_provider,
+                                 consumer_inventory=consumer_inventory)
     parent._owned_delegation_owner = owner
     return owner
 

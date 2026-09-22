@@ -52,7 +52,10 @@ def writer(runtime):
 
 
 def prune(conn, now=None):
-    cutoff = (time.time() if now is None else now) - RETENTION_SECONDS
+    now = time.time() if now is None else now
+    from agent.supervision_planning_records import prune as prune_owner_records
+    prune_owner_records(conn, now)
+    cutoff = now - RETENTION_SECONDS
     from agent.supervision_store import UNSETTLED_CONTROL_SQL
     conn.execute(f"""DELETE FROM supervision_receipts WHERE updated_at<?
         AND NOT EXISTS (SELECT 1 FROM delegation_controls c
@@ -63,7 +66,10 @@ def prune(conn, now=None):
     conn.execute("""DELETE FROM supervision_work WHERE closed=1 AND updated_at<?
         AND NOT EXISTS (SELECT 1 FROM supervision_receipts r WHERE
           r.profile=supervision_work.profile AND r.work_id=supervision_work.work_id
-          AND r.lineage=supervision_work.lineage)""", (cutoff,))
+          AND r.lineage=supervision_work.lineage)
+        AND NOT EXISTS (SELECT 1 FROM supervision_owner_records o WHERE
+          o.profile=supervision_work.profile AND o.work_id=supervision_work.work_id
+          AND o.lineage=supervision_work.lineage)""", (cutoff,))
 
 
 def _work(conn, runtime, session):

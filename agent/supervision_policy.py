@@ -347,6 +347,8 @@ class SupervisionRuntime:
             facts = action_conflict_facts(self, name, args, proposal.target_id, targets)
             if facts is None or facts["link"]["id"] != link_id:
                 return "stale", "action_link_changed"
+        if proposal.owner == "planning" and not self.dependencies.planning.validate(proposal):
+            return "rejected", "invalid_planning_proposal"
         if proposal.owner == "dependencies" and not self.dependencies.validate(proposal):
             return "rejected", "invalid_dependency_relation"
         if proposal.incident_id in self.incidents:
@@ -464,7 +466,7 @@ class SupervisionRuntime:
                 if advisory:
                     return (advisory,)
             for target in tuple(self.opportunities):
-                if self.opportunities[target]["owner"] in {"efficiency", "efficiency.check"}:
+                if self.opportunities[target]["owner"] in {"efficiency", "efficiency.check", "planning"}:
                     continue
                 proposal = self._take(target, {Action.ADVISE})
                 if proposal:
@@ -556,6 +558,8 @@ class SupervisionRuntime:
                                 self.invalidated_action_facts[old_target] = (path, pin, todo_revision, old_step["todo_id"], requirements)
                     self.work_maps[path] = work_map
                     self.work_map_revisions[path] = todo_revision
+            if verified and main_agent and path in designated:
+                self.dependencies.planning.committed(path, text)
             claims, coverage = claim_candidates(text, path, required_refs=self.designated_refs, previous_text=previous_text)
             self.pending_artifacts.append({"receipt": project(receipt), "claims": project(claims),
                 "work_map": project(self.work_maps.get(path)), "plan_revision": todo_revision,
@@ -595,6 +599,7 @@ class SupervisionRuntime:
                 self.evidence.popitem(last=False)
         from agent.supervision_delivery import record_tool_findings
         record_tool_findings(self, messages)
+        self.dependencies.planning.settled(messages)
         self.dependencies.committed()
         if artifacts or findings:
             self.observe("tool_batch_committed", {"artifacts": artifacts, "findings": findings,
@@ -618,6 +623,7 @@ class SupervisionRuntime:
 
     def prepare_action(self, tool_name, arguments, tool_call_id):
         self._assert_owner(tool_worker=True)
+        self.dependencies.planning.dispatch(tool_name, arguments, tool_call_id)
         # These owners expose a literal resource field. Shell/code/opaque connector
         # argument strings are not evidence of the target or effect class.
         target_fields = {"read_file": ("path",), "write_file": ("path",), "patch": ("path",)}.get(tool_name, ())

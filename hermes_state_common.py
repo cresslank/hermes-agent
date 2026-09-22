@@ -601,6 +601,24 @@ WHEN NEW.end_reason IN ('session_reset','session_switch','idle','daily','suspend
         WHERE session_id=OLD.id AND status='accepted';
 END;
 
+CREATE TABLE IF NOT EXISTS supervision_owner_records (
+    profile TEXT NOT NULL, lineage TEXT NOT NULL, work_id TEXT NOT NULL,
+    record_id TEXT NOT NULL, kind TEXT NOT NULL CHECK(kind IN
+        ('planning','research_pass','gap_obligation','claim_delivery','correction')),
+    session_id TEXT NOT NULL, revision INTEGER NOT NULL, status TEXT NOT NULL,
+    body_json TEXT NOT NULL CHECK(length(CAST(body_json AS BLOB))<=16384), updated_at REAL NOT NULL,
+    PRIMARY KEY(profile,lineage,work_id,record_id)
+);
+CREATE INDEX IF NOT EXISTS idx_supervision_owner_session ON supervision_owner_records(session_id);
+CREATE TRIGGER IF NOT EXISTS supervision_owner_delete BEFORE DELETE ON sessions BEGIN
+    DELETE FROM supervision_owner_records WHERE session_id=OLD.id OR lineage=OLD.id;
+END;
+CREATE TRIGGER IF NOT EXISTS supervision_owner_reset AFTER UPDATE OF end_reason ON sessions
+WHEN NEW.end_reason IN ('session_reset','session_switch','idle','daily','suspended','resume_pending_expired','new_session','user_exit','closed')
+ AND (OLD.end_reason IS NULL OR OLD.end_reason != NEW.end_reason) BEGIN
+    UPDATE supervision_owner_records SET status='stale' WHERE session_id=OLD.id;
+END;
+
 -- Source bytes and destination receipts share the canonical state owner. No plugin DB.
 CREATE TABLE IF NOT EXISTS supervision_generations (
     session_id TEXT PRIMARY KEY, generation INTEGER NOT NULL DEFAULT 1,

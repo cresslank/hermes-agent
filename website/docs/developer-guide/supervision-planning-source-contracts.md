@@ -1,126 +1,210 @@
-# Delegation and research source-contract gaps
+# Source-bound planning proposals
 
-This is a pinned-source gap report, **not** an F05/F08 implementation or acceptance
-claim. Host inspected: `b7634ad345b03af934a9b8da466ed8b105020269`; standalone
-inspected: `3e0b510f0b9164b7240744610177063ad7ac79d9`. Later integration may supply
-the missing owner joins. No production code is changed by this report.
+The optional `hermes-planning-proposals-v1` annex supplies **declarations**, not
+permissions or semantic truth. It is separate from, and does not extend,
+`hermes-work-map-v1`. No new model tool, model turn, background patrol, provider
+call, automatic delegation, cancellation, or task-completion action is added.
+The supervisor remains optional; missing inputs/grants keep ordinary behavior.
 
-## F05: an authorized launch is not a planner value decision
+## Ordinary producer and next-request consumer
 
-The ordinary path is `tools/delegate_tool.py::delegate_task` ->
-`_normalize_task_list` / `_coerce_task_schemas` -> `_build_children` ->
-`owned_delegation.register_launch` ->
-`supervision_efficiency.observe_native(..., "delegation_built", ...)` ->
-`EfficiencyOwner.delegation_built`, followed by `_run_batch`.
+1. An existing todo or authenticated requirement designates the plan artifact.
+2. The ordinary local file writer commits exact main-agent bytes.
+   `record_file_owner_commit` / `record_committed_write` ->
+   `SupervisionRuntime.record_artifact` -> `DependencyOwner.planning.committed`
+   parses the annex in the verified-main-agent branch. Successful reads, child
+   copies, provider text and successful unpinned writes cannot enroll a proposal.
+3. `SupervisionRuntime.prepare_action` enrolls exact operation fingerprints before
+   ordinary dispatch. `_dispatch_authorized_once` wraps the existing execution in
+   `run_capture`; the native complete file-read descriptor supplies a source pin.
+   `committed_batch` joins it to the full, unchanged actual returned tool row.
+4. The main agent's later normal plan write partitions a settled pass's exact
+   member set into accepted/rejected **selection decisions** with exact rationales.
+5. `turn_request_assembly.assemble_api_request` calls `request_views` before cache
+   markers/provider conversion. This is the consumer: batch facts arrive *after*
+   individual tool-result drains. One eligible, still-unissued planning node is
+   evaluated through the registered decision plugin and revalidated under its
+   original shared deadline. A fixed lower-trust, ID-bound advisory is appended
+   only to a clone of the latest tool result in this normal request. Canonical
+   transcript/tool bytes, system prefix, tool schemas and F12 hint state are not
+   edited. There is no synthetic user message or extra API turn.
 
-The native call reaches the efficiency owner, but stops at its lookup of
-`self.delegations[goal]`. The only supplier of that ledger is
-`EfficiencyOwner.admit_delegation`; the pinned tree has no ordinary production
-caller. The existing positive test seeds that method before constructing a child.
-That test proves adapter/consumer mechanics, not ordinary supplier closure.
+Legacy `EfficiencyOwner` intent/pass setters cannot authorize these effects.
+`delegation_built` is too late to advise about that candidate; it does nothing.
+`retain_plan` is not an applied effect. Advice does not certify saved execution.
 
-The available sources are narrower than the requested facts:
+## Closed annex grammar
 
-- `delegate_task` supplies goal, context, optional output JSON schema, role and
-  actual routing/configuration. A schema is a result-shape constraint, not all
-  semantic acceptance criteria; a context string is not a validated dependency
-  declaration.
-- `owned_delegation.SUPERVISION_SCHEMA` has exactly `obligation`, `consumer_refs`,
-  `consumer_set_closed`, `effect_policy_id`. The owner validates consumer and
-  effect authority. Optional read-only authority does not certify parent-input
-  readiness, a specialist advantage, useful parallelism or favorable overhead.
-- Children inherit the parent's tools. A model/provider route identity is not a
-  competence claim. Available concurrency and a configured iteration ceiling
-  are capacity bounds, not a comparison of parent critical path against launch
-  and integration overhead.
-- The call site occurs after actual child construction/launch registration. There
-  is no retained, unissued planner-candidate selection at this boundary. Merely
-  attaching a recommendation to the next parent request would recommend a child
-  that has already been submitted. Suppressing or replaying that launch would
-  change native execution semantics, not implement an advisory.
+One fenced JSON object, exactly `{"version":1,"records":[...]}`. Duplicate/unknown
+keys, nonfinite numbers, multiple blocks, duplicate identities, more than 32
+records or a block over 16 KiB reject the annex. Each record has a `type` plus
+exactly the following keys (no host scope, permission or timing booleans):
 
-**Smallest missing join:** a concrete, still-unissued candidate in the existing
-planner owner, bound to a current work-map/todo revision, source-linked acceptance
-and input declarations, and the relations owner's dependency/readiness view;
-plus a native route-capability and overhead/critical-path policy projection.
-Evaluate and consume its recommendation at the next existing parent planning
-safe point, before normal `delegate_task` authorization. Do not create or launch
-another task. An explicit owner-local proposal format can carry the declarations;
-it cannot turn its own `overhead_favorable` / `parallelism_favorable` booleans into
-host computations or confer route permission.
+| Type | Keys |
+|---|---|
+| `delegation_candidate` | `local_id`, `todo_id`, `parent_next_todo_id`, `candidate_span`, `acceptance_refs`, `input_refs`, `dependency_todo_ids`, `operation`, `required_resource_ref` |
+| `research_pass_open` | `local_id`, `gap_refs`, `completion_criteria_refs`, `source_method_ref`, `operations` |
+| `research_pass_close` | `pass_id`, `member_dispositions` |
+| `optional_expansion` | `local_id`, `gap_refs`, `completion_criteria_refs`, `source_method_ref`, `operation`, `consumer_refs`, `effect_policy_id`, `obligation_request` |
+| `withdraw_expansion` | `expansion_id` |
 
-`retain_plan` is intentionally **not added**. The normative no-qualifying-candidate
-case is A0: keep the parent's plan and dispatch behavior unchanged. There is no
-native candidate-plan transition here for an additional applied-effect receipt
-to represent. A new ADVISE alias would not make that no-op a real effect.
+An exact reference is `{source_ref, source_revision, start, end}`. Revision is the
+native `supervision_context.digest` of the complete retained original text;
+offsets are Python character offsets, end-exclusive. Windows must be nonempty,
+complete and at most 2400 characters. Accepted criteria/gaps must identify a whole
+clause enumerated from authenticated input, not a model-created paraphrase or a
+substring omitting its qualifications. Candidate/input/method/rationale windows
+must resolve against current retained native sources. Use another designated
+artifact for candidate prose; do not try to self-hash a JSON block containing its
+own hash. Accepted clauses can also be rationales.
 
-## F08: candidate receipts are not an evidence-disposition/pass ledger
+An operation is exactly `{tool_name, arguments, route_id}`. Supported routes are
+`native:read_file` and `native:delegate_task`, with the corresponding literal tool
+name. Fingerprints are canonical sorted JSON over `(tool_name, arguments)`;
+arguments are not normalized to manufacture a match. One pass has 1–16 unique
+read operations. A close has one `{member_id, source, disposition, rationale_ref}`
+per native member; `disposition` is exactly `accepted` or `rejected`. Foreign,
+missing, duplicate, changed-pin, undecided or not-yet-settled members reject close.
+Repeated source identity remains repeated evidence, even across different reads;
+a changed selection judgment is not a newly discovered source.
 
-The ordinary path is the tool executor's `_finalize_tool_batch` ->
-`SupervisionRuntime.committed_batch` -> `completed_batch_facts`. It retains exact
-serialized tool-result receipts and source-linked finding **candidates**.
-`EffectReceiptV1` outcomes/status remain unknown for these retrieval results.
-Main-agent verified artifact writes prove committed bytes, not research quality
-or acceptance of a cited source.
+Already requested `todo_list` results expose `work_map_sources.planning_records`
+with bounded IDs, statuses and exact native membership. This is how the main
+agent can name a pass for its later ordinary close; there is no hidden test-only
+ID supplier. The inventory exposes at most the latest eight records.
 
-`EfficiencyOwner.commit_research_pass` and `propose_expansion` have no production
-callers at the inspected base. Their existing positive test directly supplies two
-empty `ResearchPass` objects and an optional `ResearchGap`. Membership of a ref in
-`runtime.evidence` proves a retained receipt exists; it does not prove accepted or
-rejected evidence, a complete pass inventory, comparable gap scope, or novelty
-relative to a previous pass. Two search calls are not two comparable research
-passes. Provider-returned keys named `accepted_evidence_ids`, `mandatory_gap`, or
-`ledger_complete` remain untrusted result content.
+## F05: actual separate-conversation resource
 
-The pinned work-map parser admits only root keys `version`, `requirements`,
-`steps`, `claims`, and step keys `todo_id`, `requirement_indexes`, `target_refs`.
-It supplies exact requirement links but no source disposition, pass identity,
-optional-gap authority or next-expansion proposal. A singleton requirement list
-cannot supply any of those missing associations. No relation/dependency owner
-implementation providing those projections exists in this pinned host tree.
+The candidate operation is one `delegate_task` task with exactly `goal`, `context`
+and `supervision`. Goal equals `candidate_span`; context equals the ordered exact
+input windows joined by a newline. No unsupported output/image/role variant is
+silently equated. Acceptance has 1–2 full accepted clauses; the resource reference
+must be one of them and explicitly contain the literal **separate conversation**.
+This narrow resource spelling is not a general prose intent classifier.
 
-**Smallest missing join:** the source/relations owner must expose a bounded,
-revision-bound research decision projection with:
+Native `OwnedDelegationOwner.planning_preflight` shares `_launch_controls` with
+actual launch; it cannot construct children, resolve credentials, reserve slots,
+charge spawn budget or manufacture handles. Current profile/session, read-only
+policy, closed native consumer controls, exposed read/delegation tools, input
+policy, remaining native iteration budget, depth, spawn pause and read-only
+one-shot budget checks all apply. Declared dependencies must be completed todos;
+unknown/unresolved parent dependencies veto. This is declared readiness, not proof
+that no hidden dependency exists.
 
-1. An actual committed pass ID and enumerated candidate membership, with distinct
-   accepted/rejected source receipts (and exact relevant source spans), preserving
-   whether the disposition is main-agent acceptance rather than verified truth.
-2. The exact unresolved requirement/gap IDs for that pass, gap-state revision,
-   mandatory/corroboration obligations and completion criteria. Unknown
-   obligation must veto the optional-stop recommendation.
-3. A still-unissued optional expansion ID and source/method, owned by the planner,
-   with a native budget class and a fresh currentness predicate.
+`tools/delegate_context_recipe.py` supplies the **same** constructor/run recipe to
+`_build_child_agent`, `_ChildRun.run_conversation` and preflight. It uses a fresh
+conversation with no supplied parent history, `skip_context_files=True`,
+`skip_memory=True` and a fresh iteration budget. Nonempty inherited parent prefills
+veto the separate-conversation projection. The native child system prompt still
+includes normal delegation instructions and may load designated workspace
+AGENTS/CLAUDE/cursorrules guidance through `_build_child_system_prompt`; the
+constructor flags do **not** mean a clean-room context. The descriptor preserves
+that qualifier. This is not independent training, competence, unbiased reasoning
+or a filesystem sandbox. Native overhead and
+critical-path categories stay `unknown`; favorable flags are false. Only the
+independence plus clearly-needed-resource branch can qualify this minimum.
 
-Efficiency can retain the last three such pass projections, compare at least two
-for the same gap scope, and consume one ID-bound stop-optional-expansion advisory
-at the existing parent safe point. It must neither close requirements nor declare
-the task complete. Any actual removal of optional queued work additionally needs
-the queue owner's explicit disposition transition; generic ADVISE rendering is
-not evidence of stopped execution. Keep the dependency graph and authoritative
-dispositions in the relations owner, and durable receipts in the common host
-storage owner; do not introduce parallel stores in efficiency.
+The recommendation binds exact candidate/route IDs. Later ordinary dispatch (and
+public `delegate_task` construction admission) marks matching candidates issued
+before child construction; the original launch still uses ordinary controls.
+No already-issued candidate is recommended or relaunched by the supervisor.
 
-A separate versioned owner-local proposal block is compatible in principle, and
-is **not** rejected merely because work-map-v1 lacks these fields. What is missing
-at this base is the owner projection that validates/binds its facts. Shipping a
-parser and test-only setter without that join would repeat the existing gap.
+## F08: finite pass and positively optional expansion
 
-## Executed boundary controls
+Passes progress `open -> settled -> disposition_committed`. Partial, redacted,
+truncated, opaque, failed or unchanged-dedup-stub reads are not full source
+inventories. Unsupported search/LCM inventories abstain in this implementation;
+serialized fields named `ledger_complete` or `accepted_evidence_ids` cannot mint
+native membership. Closing must happen after full native batch settlement, not
+merely after an individual tool result in the same batch.
 
-`tests/agent/test_supervision_planning_sources.py` adds nine negative controls
-using the installed full Jev registry and strict MockTransport fixture:
+The next expansion requires two or three comparable completed passes, exact gap
+and completion-criteria refs (at most four), a current source/method ref, native
+`within_native_limit` budget, and `obligation_request: "optional"`. Each pass sends
+its exact bounded source windows and rationale/selection decisions, not just call
+counts or IDs. An oversized complete projection abstains instead of dropping a
+member. Dispositions are not truth, corpus completeness, or gap resolution.
 
-- Two public `delegate_task` cases (with/without an output schema) traverse real
-  normalization, SQLite launch/control admission and `_build_children`, and reach
-  the scheduler boundary unchanged. Child model construction, credentials,
-  presentation and scheduler I/O are substituted; no real child execution is
-  claimed. Goal/context prose does not produce an F05 value recommendation.
-- Two committed result batches for each of `web_search`, `web_extract`,
-  `read_file` retain two native receipts without minting accepted research passes,
-  even when result content forges disposition/completion fields. No F08 call,
-  optional-stop hint, requirement closure or task-complete transition occurs.
-- Four actual committed work-map writes reject undeclared acceptance/dependency/
-  evidence/expansion fields instead of silently widening work-map-v1.
+A **separate, default-off** profile policy is required:
 
-These controls protect honest abstention. They do not satisfy the requested
-ordinary F05/F08 positive feature traces. Those remain blocked on the joins above.
+```yaml
+supervision:
+  planning:
+    allow_discretionary_readonly_labels: true
+```
+
+This flag is not a worker cancellation grant. The already installed native owner
+must also provide `install_owner(..., consumer_inventory=callback)`, returning a
+bounded tuple of the **entire current controlled Consumer set**. The proposed
+consumer refs plus the implicit parent must exactly match this positive inventory
+and the live resolver. The owner must control all consumers. Missing inventory,
+unknown/required obligations, result/effect/cleanup/corroboration requirements,
+unaccounted consumers, absent requirement links or a different linked gap scope
+veto. `Consumer.requires_corroboration` is explicit and also protects worker
+cancellation. Existing installers without the inventory retain baseline behavior.
+
+Advice changes only `proposed -> advised`; the parent still decides. A later exact
+ordinary `withdraw_expansion` commit records `withdrawn_by_parent`. Neither advice
+nor a low-yield answer marks work skipped/cancelled/completed or closes an F20
+requirement. A later actually dispatched expansion is recorded as issued, not
+prevented work. No performance savings are inferred from the advisory receipt.
+
+## Canonical owner-record API and bounds
+
+`DependencyOwner.planning` is the graph authority. `supervision_planning_records`
+uses `supervision_receipts.writer` and the already initialized SessionDB; no
+alternate database, source corpus or plugin-owned state authority exists.
+
+- `save(runtime, rows) -> bool`: atomic, zero-busy-wait, compare-and-swap revisions;
+  revision 1 creates, exact replay is idempotent, each update advances by one.
+  Owner-thread/worker checks exclude semantic observer callbacks. Persistence
+  failure invalidates eligibility rather than claiming a successful effect.
+- `load(runtime) -> tuple[dict,...]`: exact current profile/lineage/work records;
+  revoked/deleted generations return no records. Graph recovery reconstructs only
+  against retained exact sources and current epoch. It never replays a tool or
+  carries an old proposal into a new authenticated instruction/run.
+- `current(runtime,row) -> bool`: fences cached graphs against reset, deletion,
+  retention and competing revision changes at use time.
+- `prune(conn, now)`: existing canonical retention transaction; closed historical
+  records may expire after seven days, unresolved states are not evicted.
+
+`supervision_owner_records` keys `(profile,lineage,work_id,record_id)` and stores a
+CAS `revision`, closed `kind`, `session_id`, `status`, bounded `body_json` and
+`updated_at`. Graph rows stamp the native epoch, todo revision, exact plan pin,
+declaration, enrollment, members, dispositions and optional obligation snapshot.
+Delegation goal/context bytes are **not duplicated** in storage: an operation
+fingerprint and supervision controls bind reconstruction from original owners.
+There are at most 64 combined planning/dependency nodes, 4096 owner records per
+profile, 16 KiB per record, eight pending candidates and three comparable passes.
+Missing/evicted dependencies invalidate advice, never imply completeness.
+Session deletion/reset triggers and automatic maintenance protection include the
+new family. Current immutable declaration identity is never silently rebound.
+
+The DDL reserves `planning`, `research_pass`, `gap_obligation`, `claim_delivery`
+and `correction` kinds for the common owner. **This lane writes only the first
+three.** The parser API is
+`supervision_context.parse_planning_proposals(text, artifact_ref=...,
+designated_refs=...)`; it supplies declarations only. F22 literal-source adoption,
+claim-use/correction grammar, emission receipts and the parent join are not
+implemented here. No feature registry closure or all22 qualification is implied.
+
+## Offline qualification workflow
+
+Use the canonical host `scripts/run_tests.sh --file-retries 0` with the real
+standalone plugin entry point and strict MockTransport. The planning contract
+suite exercises actual file writers, complete native reads, batch settlement,
+SessionDB and normal request assembly, including later public delegation and
+parent withdrawal. Child provider construction/scheduler I/O is substituted; a
+separate constructor test checks the shared context recipe. No inference provider
+or live profile is contacted. Preserve failed-run evidence; fixing source defects
+is not permission to retry unchanged timing tests to green.
+
+Negative controls cover source/child copies, old work-map grammar, generic/missing
+resources, prefills, dependencies, changed inputs, absent tools/owner/budget,
+partial/unenrolled/deduplicated pass membership, bad partitions, obligations,
+unknown or extra consumers, default-off policy, response ambiguity/malformed
+answers/expiry, stale instructions/control/source/plugin revocation, same-batch
+issuance, unavailable canonical writes, deletion/reset/retention and record caps.
+The existing request-view suites qualify unchanged F12 behavior and provider/cache
+assembly. These are local implementation tests, not measured latency benefits or
+production activation approval.

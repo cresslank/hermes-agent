@@ -287,6 +287,15 @@ def request_views(agent, api_messages, schemas):
     owner = getattr(agent, "_supervision_views", None)
     if not isinstance(owner, SupervisionViews):
         return api_messages, schemas
+    # Batch facts are produced AFTER tool-result draining. Consume planning only
+    # here, on a clone of the latest tool row, before cache/provider conversion.
+    # Do not mutate skill state, the system prefix, canonical rows, or add a turn.
+    from agent.supervision_policy import runtime_for_agent
+    runtime = runtime_for_agent(agent)
+    if runtime is not None and api_messages and api_messages[-1].get("role") == "tool" and isinstance(api_messages[-1].get("content"), str):
+        advisory = runtime.dependencies.planning.advisory()
+        if advisory:
+            api_messages = [*api_messages[:-1], {**api_messages[-1], "content": api_messages[-1]["content"] + "\n\n" + advisory}]
     binding = getattr(agent, "_supervision_view_binding", None)
     if binding is not None:
         binding.prepare_catalogs()

@@ -582,73 +582,18 @@ class EfficiencyOwner:
             self.delegations[intent.goal] = intent
 
     def delegation_built(self, child, *, goal):
-        """Observe an already-authorized concrete native launch before scheduling."""
-        self.runtime._assert_owner(tool_worker=True)
-        from agent.owned_delegation import binding_of
-        binding = binding_of(child)
-        if binding is None:
-            return None
-        owner, handle = binding
-        state = owner.status(handle)
-        with self.lock:
-            self._sync()
-            intent = self.delegations.get(goal)
-            route = self.routes.get(intent.route_id) if intent else None
-        if (intent is None or route is None or not route.available() or state["cancel_requested"]
-                or state["settled"] or state["effect_class"] != "read_only"):
-            return None
-        target = "delegation:" + handle.child_id
-        return self._emit("delegation_proposed", {
-            "subtask": {"id": target, "text": goal, "acceptance": intent.acceptance,
-                "inputs": intent.inputs, "separable": intent.separable, "trivial_lookup": intent.trivial_lookup,
-                "shared_mutation": intent.shared_mutation},
-            "parent": {"id": intent.parent_step_id, "next_step": intent.parent_next_step, "capability": intent.parent_capability},
-            "delegation_allowed": True, "budget_available": intent.budget_available,
-            "overhead_favorable": intent.overhead_favorable, "parallelism_favorable": intent.parallelism_favorable,
-            "specialists": [{"id": handle.child_id, "text": route.text, "route_id": route.id,
-                             "available": True, "authorized": True}]},
-            target, (handle.child_id, intent.parent_step_id, route.id), routes=(route,), wait=True,
-            valid=lambda: owner.status(handle)["control_revision"] == state["control_revision"] and
-                self.delegations.get(goal) == intent)
+        # A built child is already issued. Only a committed unissued planning node
+        # can establish an F05 opportunity at the next normal request boundary.
+        return None
 
     def commit_research_pass(self, record):
-        """Commit an enumerated evidence-owner pass, not a tool-call/yield heuristic.
+        # A caller-created ResearchPass is not native finite membership or a
+        # main-agent disposition commitment. DependencyOwner owns that ledger.
+        return False
 
-        Nonempty accepted/rejected IDs must be retained native receipts. Empty
-        ledgers are legitimate empty pass outcomes, never whole-corpus coverage.
-        """
-        self.runtime._assert_owner(tool_worker=True)
-        if not isinstance(record, ResearchPass):
-            raise TypeError("research_pass_required")
-        with self.lock:
-            self._sync()
-            refs = set(record.accepted_evidence_ids) | set(record.rejected_evidence_ids)
-            if not refs <= self.runtime.evidence.keys() or any(p.id == record.id for p in self.passes):
-                return False
-            self.passes.append(record)
-        return True
-
-    def propose_expansion(self, *, pass_id, text, source_method, gaps, completion_criteria,
-                          budget_class, optional, corroboration_required):
-        self.runtime._assert_owner(tool_worker=True)
-        if (not all(_text(s) for s in (pass_id, text, source_method, completion_criteria, budget_class))
-                or not isinstance(gaps, tuple) or not 1 <= len(gaps) <= 4
-                or any(not isinstance(g, ResearchGap) for g in gaps)
-                or len({g.id for g in gaps}) != len(gaps)
-                or optional is not True or corroboration_required is not False or any(g.mandatory for g in gaps)):
-            return None
-        with self.lock:
-            self._sync()
-            passes = [p for p in self.passes if set(p.gap_ids) == {g.id for g in gaps}]
-            if len(passes) < 2:
-                return None
-            refs = tuple(p.id for p in passes) + tuple(g.id for g in gaps)
-        return self._emit("expansion_proposed", {
-            "passes": [{**p.__dict__, "ledger_complete": True} for p in passes],
-            "gaps": [g.__dict__ for g in gaps], "mandatory_gap": False, "corroboration_required": False,
-            "next_pass": {"id": pass_id, "text": text, "gap_ids": [g.id for g in gaps],
-                          "source_method": source_method, "optional": True, "proposed": True},
-            "completion_criteria": completion_criteria, "budget_class": budget_class}, pass_id, refs, wait=True)
+    def propose_expansion(self, **kwargs):
+        # Legacy fact setters cannot establish optionality or pass completeness.
+        return None
 
     def record_check(self, check, receipt, *, validated):
         """Bind a successful native verification receipt, NEVER a generic shell result."""

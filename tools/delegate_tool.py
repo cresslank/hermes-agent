@@ -184,6 +184,7 @@ def _build_child_agent(
     import uuid as _uuid
     from run_agent import AIAgent
     from agent.delegation_context import delegated_child_context
+    from tools.delegate_context_recipe import constructor_context
     # Role is depth-derived: a child may delegate iff the kill switch is on and
     # depth budget remains below max_spawn_depth. The `role` arg is ignored.
     child_depth = getattr(parent_agent, "_delegate_depth", 0) + 1
@@ -234,17 +235,16 @@ def _build_child_agent(
     with delegated_child_context():
         try:
             child = AIAgent(
-                **rt, max_iterations=max_iterations, prefill_messages=getattr(parent_agent, "prefill_messages", None),
+                **rt, max_iterations=max_iterations, **constructor_context(parent_agent),
                 enabled_toolsets=child_toolsets, disabled_toolsets=child_disabled_toolsets, quiet_mode=True,
                 ephemeral_system_prompt=child_prompt, log_prefix=f"[subagent-{task_index}]", platform="subagent",
-                skip_context_files=True, skip_memory=True, clarify_callback=None,
+                clarify_callback=None,
                 thinking_callback=(
                     (lambda text: _safe_progress(child_progress_cb, "_thinking", text) if text else None)
                     if child_progress_cb else None
                 ),
                 session_db=child_session_db, parent_session_id=parent_sid, request_overrides=request_overrides,
                 tool_progress_callback=child_progress_cb,
-                iteration_budget=None,  # fresh budget per subagent
             )
         except BaseException:
             # No child close() will ever run: release the dedicated handle here.
@@ -386,6 +386,10 @@ def _build_children(
             _child_context = append_output_contract(_child_context, _task_schema)
         child = None
         try:
+            from agent.supervision_policy import runtime_for_agent
+            planning_runtime = runtime_for_agent(parent_agent)
+            if planning_runtime is not None:
+                planning_runtime.dependencies.planning.dispatch("delegate_task", {"tasks": [t]}, "native-launch:" + str(i))
             child = _build_child_preserving_parent_tools(
                 task_index=i, goal=t["goal"], context=_child_context,
                 toolsets=None,  # always inherit the parent's toolsets
@@ -431,9 +435,8 @@ def _build_children(
     return children, None
 
 
-def _oneshot_spawn_budget(parent_agent: Any, requested: int) -> Optional[str]:
-    """Charge *requested* children against the finite one-shot session's total (delegation.oneshot_max_children);
-    the error text tells the model to do the work inline. Interactive and gateway sessions are never charged."""
+def _oneshot_spawn_preflight(parent_agent: Any, requested: int) -> Optional[str]:
+    """Read-only budget validation shared with actual charging; no reservation."""
     from agent.oneshot_footprint import is_single_query_session
     if not is_single_query_session():
         return None
@@ -447,7 +450,16 @@ def _oneshot_spawn_budget(parent_agent: Any, requested: int) -> Optional[str]:
             f"delegation.oneshot_max_children). Do the remaining work yourself in this session — reviewing "
             f"your own diff and running the tests inline is expected here, not a delegated review."
         )
-    parent_agent._oneshot_children_spawned = spent + requested
+    return None
+
+
+def _oneshot_spawn_budget(parent_agent: Any, requested: int) -> Optional[str]:
+    error = _oneshot_spawn_preflight(parent_agent, requested)
+    if error:
+        return error
+    from agent.oneshot_footprint import is_single_query_session
+    if is_single_query_session() and _get_oneshot_max_children() > 0:
+        parent_agent._oneshot_children_spawned = getattr(parent_agent, "_oneshot_children_spawned", 0) + requested
     return None
 
 

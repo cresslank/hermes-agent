@@ -253,6 +253,53 @@ def parse_work_map(text: str, *, artifact_ref: str, designated_refs: set[str],
         return None
 
 
+def parse_planning_proposals(text, *, artifact_ref, designated_refs):
+    """Separate optional annex. This parser grants no source or planner authority.
+
+    Only a verified main-agent commit may pass its result to DependencyOwner.
+    Version one's closed records intentionally do not extend work-map-v1.
+    """
+    if artifact_ref not in designated_refs or len(text.encode("utf-8")) > MAX_TEXT_BYTES:
+        return None
+    blocks = re.findall(r"(?m)^```hermes-planning-proposals-v1\s*\n(.*?)^```\s*$", text, re.S)
+    if len(blocks) != 1 or len(blocks[0].encode()) > 16384:
+        return None
+    keys = {
+        "delegation_candidate": {"local_id", "todo_id", "parent_next_todo_id", "candidate_span", "acceptance_refs", "input_refs", "dependency_todo_ids", "operation", "required_resource_ref"},
+        "research_pass_open": {"local_id", "gap_refs", "completion_criteria_refs", "source_method_ref", "operations"},
+        "research_pass_close": {"pass_id", "member_dispositions"},
+        "optional_expansion": {"local_id", "gap_refs", "completion_criteria_refs", "source_method_ref", "operation", "consumer_refs", "effect_policy_id", "obligation_request"},
+        "withdraw_expansion": {"expansion_id"},
+    }
+    def finite_float(raw):
+        import math
+        value = float(raw)
+        if not math.isfinite(value):
+            raise ValueError("nonfinite")
+        return value
+    try:
+        value = json.loads(blocks[0], object_pairs_hook=_strict_object, parse_float=finite_float,
+                           parse_constant=lambda _: (_ for _ in ()).throw(ValueError("nonfinite")))
+        if (type(value) is not dict or set(value) != {"version", "records"}
+                or type(value["version"]) is not int or value["version"] != 1
+                or type(value["records"]) is not list or len(value["records"]) > 32):
+            return None
+        seen = set()
+        for row in value["records"]:
+            if type(row) is not dict or type(row.get("type")) is not str:
+                return None
+            kind = row["type"]
+            if kind not in keys or set(row) != keys[kind] | {"type"}:
+                return None
+            identity = row.get("local_id", row.get("pass_id", row.get("expansion_id")))
+            if type(identity) is not str or not 0 < len(identity) <= 256 or (kind, identity) in seen:
+                return None
+            seen.add((kind, identity))
+        return value["records"]
+    except (ValueError, TypeError, RecursionError):
+        return None
+
+
 def visible_exact_occurrence(text, candidate):
     """Locate one literal claim outside code/quotes without semantic decomposition."""
     if not candidate or text.count(candidate) != 1:
@@ -381,6 +428,7 @@ def work_map_source_refs(store):
     if not any(set(refs_in_text(str(t.get("content", "")))) & runtime.designated_refs for t in todos.values()):
         return None
     return {"version": 1, "scope": "enumerated_items", "global_coverage": "unknown",
+            "planning_records": runtime.dependencies.planning.inventory(),
             "requirements": [{"id": r.id, "source_message_id": r.source_message_id,
                               "start": r.start, "end": r.end, "text": r.text}
                              for r in runtime.requirements]}
@@ -420,6 +468,8 @@ def record_file_owner_read(path, result, *, offset, redacted, snapshot):
     for candidate in (body, body + "\n"):
         raw = candidate.encode("utf-8")
         if len(raw) == result["file_size"] and hashlib.sha256(raw).digest() == snapshot[-1]:
+            from agent.supervision_planning import publish_read
+            publish_read(path, candidate)
             runtime.record_artifact(path, candidate, verified=False, main_agent=False)
             return
 

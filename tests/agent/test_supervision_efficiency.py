@@ -48,6 +48,7 @@ def native(rig, monkeypatch):
     (rig.home / "config.yaml").write_text(json.dumps(rig.config))
     calls = []
     on_response = []
+    answer_mutators = []
     choice = {"F07": "none", "F10": "no_progress_cause_unknown", "F11": "diagnostic"}
     def respond(request):
         assert str(request.url) == ENDPOINT and request.method == "POST"
@@ -72,6 +73,8 @@ def native(rig, monkeypatch):
                 assert winner in q["criteria"]
                 answers[key] = {"type": "choice", "choice": winner, "confidence": 1.0,
                     "probabilities": {k: float(k == winner) for k in q["criteria"]}}
+        for mutate in answer_mutators:
+            mutate(answers)
         for callback in on_response:
             callback()
         return httpx.Response(200, json={"model": body["model"], "answers": answers, "usage": {}})
@@ -98,7 +101,7 @@ def native(rig, monkeypatch):
         "hard_stop_enabled": False, "warnings_enabled": False}))
     rig.agent._stall_guards_enabled = lambda: False
     rig.agent._tool_guardrail_halt_decision = None
-    yield SimpleNamespace(rig=rig, bridge=bridge, runtime=rt, owner=owner, calls=calls, permitted=permitted, choice=choice, on_response=on_response)
+    yield SimpleNamespace(rig=rig, bridge=bridge, runtime=rt, owner=owner, calls=calls, permitted=permitted, choice=choice, on_response=on_response, answer_mutators=answer_mutators)
     bridge.close()
 
 
@@ -257,13 +260,13 @@ def build_child(native, monkeypatch, tmp_path):
     return child, owner
 
 
-def test_f05_normal_child_construction_emits_existing_route_only(native, monkeypatch, tmp_path):
+def test_f05_legacy_setter_cannot_recommend_already_constructed_child(native, monkeypatch, tmp_path):
     native.owner.admit_delegation(DelegationIntent("Inspect fixture", "Return source references", "Synthetic source",
         "parent-step", "Review another source", "read_file", True, False, False, True, True, True, "delegate:leaf"))
     child, owner = build_child(native, monkeypatch, tmp_path)
     flush(native)
-    assert feature_calls(native, "F05")
-    assert "delegate:leaf" in native.runtime.drain_at_safe_point()[0]
+    assert not feature_calls(native, "F05")
+    assert not native.runtime.drain_at_safe_point()
     assert not child.stopped.is_set()
     assert not owner.status(owner.list_owned()[0])["cancel_requested"]
 
@@ -306,17 +309,17 @@ def test_route_revocation_between_proposal_and_owner_consumption(native, monkeyp
 def test_f08_owner_yield_ledger_cannot_close_open_requirements(native):
     gap = ResearchGap("optional-detail", "Optional corroborating background", False)
     for i in range(2):
-        assert native.owner.commit_research_pass(ResearchPass(str(i), "No additional matching sources", "same-source", (gap.id,), (), ()))
+        assert not native.owner.commit_research_pass(ResearchPass(str(i), "No additional matching sources", "same-source", (gap.id,), (), ()))
     before = native.runtime.requirements
     hint = native.owner.propose_expansion(pass_id="next", text="Repeat the same search", source_method="same-source",
         gaps=(gap,), completion_criteria="Corroborating detail is optional", budget_class="bounded",
         optional=True, corroboration_required=False)
-    assert hint and feature_calls(native, "F08")
+    assert hint is None and not feature_calls(native, "F08")
     assert native.runtime.requirements == before and not native.runtime.closed
     assert native.owner.propose_expansion(pass_id="mandatory", text="Check required evidence", source_method="same-source",
         gaps=(replace(gap, mandatory=True),), completion_criteria="Must verify", budget_class="bounded",
         optional=True, corroboration_required=False) is None
-    assert len(feature_calls(native, "F08")) == 1
+    assert not feature_calls(native, "F08")
 
 
 def check(ident="check", **overrides):

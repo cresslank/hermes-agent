@@ -45,6 +45,8 @@ class DependencyOwner:
         self.instruction_relations = OrderedDict()
         self.revocations = OrderedDict()
         self.contested_claims = set()
+        from agent.supervision_planning import PlanningGraph
+        self.planning = PlanningGraph(self)
 
     def clear(self):
         self.edges.clear()
@@ -53,6 +55,7 @@ class DependencyOwner:
         self.instruction_relations.clear()
         self.revocations.clear()
         self.contested_claims.clear()
+        self.planning.clear()
 
     def invalidate_source(self, path, new_pin):
         # Immediate exact version invalidation, independent of semantic availability.
@@ -234,7 +237,7 @@ class DependencyOwner:
                     if not edges or all(self.optional_support(e.id) for e in edges):
                         continue
                     # Never evict unresolved source dependencies to claim coverage.
-                    if len(self.edges.keys() | {e.id for e in edges}) > 64:
+                    if len(self.edges.keys() | {e.id for e in edges}) + len(self.planning.nodes) > 64:
                         continue
                     self.edges.update((e.id, e) for e in edges)
                     candidates = [{"id": e.id, "ref": e.source.id, "excerpt": e.source.text,

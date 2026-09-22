@@ -89,6 +89,8 @@ class SessionMaintenanceMixin:
                   AND title IS NULL
                   AND ended_at IS NOT NULL
                   AND started_at < ?
+                  AND NOT EXISTS (SELECT 1 FROM supervision_owner_records o WHERE o.session_id=sessions.id
+                      AND o.status IN ('open','settled','proposed','advised'))
                   AND NOT EXISTS (SELECT 1 FROM supervision_receipts r WHERE r.session_id=sessions.id
                       AND r.status IN ('accepted','selected','unknown'))
                   AND NOT EXISTS (SELECT 1 FROM delegation_controls c WHERE c.parent_session_id=sessions.id
@@ -299,6 +301,7 @@ class SessionMaintenanceMixin:
                     (SELECT object_id FROM supervision_admissions WHERE state!='consumed')""")}
                 protected.update(r[0] for r in conn.execute("SELECT target_session_id FROM supervision_admissions WHERE state!='consumed'"))
                 protected.update(r[0] for r in conn.execute("SELECT session_id FROM supervision_receipts WHERE status IN ('accepted','selected','unknown')"))
+                protected.update(r[0] for r in conn.execute("SELECT session_id FROM supervision_owner_records WHERE status IN ('open','settled','proposed','advised')"))
                 session_ids -= protected | protected_control_sessions(conn)
                 session_ids -= {sid for sid in session_ids
                                 if self._write_guards_reject(conn, sid, allow_closed_compression_parent=True)}
