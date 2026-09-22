@@ -113,6 +113,6 @@ def test_instruction_work_is_durable_before_child_observer_receipt(rig, monkeypa
         assert receipt["status"] == "accepted"
         observed.append(receipt)
 
-    monkeypatch.setattr(runtime, "children", SimpleNamespace(changed=changed))
+    monkeypatch.setattr(runtime, "children", SimpleNamespace(changed=changed), raising=False)
     accept(rig.agent, "- Updated requirement.", continuation=True)
     assert len(observed) == 1
