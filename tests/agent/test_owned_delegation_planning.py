@@ -65,7 +65,10 @@ def factory(native, tmp_path, monkeypatch):
                 extra_facades.append(facade)
             (n.rig.home / "config.yaml").write_text(json.dumps(n.rig.config))
             return input_change(user) if input_change else user
-        return make_planning(native, tmp_path, monkeypatch, configure=configure)
+        result = make_planning(native, tmp_path, monkeypatch, configure=configure)
+        if policy_change is None and not competing:
+            assert isinstance(result.owner, ConfiguredDelegationOwner)
+        return result
     yield make
     for facade in extra_facades:
         facade.unregister()
@@ -175,6 +178,8 @@ def test_configured_authority_negative_vertical(factory, feature, fault, monkeyp
         if fault == "disabled": section["plugins"]["fixture-supervisor"]["owned_delegation"]["allow_optional_readonly"] = False
         if fault == "policy": section["plugins"]["fixture-supervisor"]["owned_delegation"]["consumer_contract"] = CONSUMERS
     p = factory(policy_change=policy, input_change=(lambda s: s.split("```", 1)[0]) if fault == "no_contract" else None)
+    if fault not in {"grant", "disabled"}:
+        assert isinstance(p.owner, ConfiguredDelegationOwner)
     if feature == "F08": p.pass_commit(1); p.pass_commit(2)
     p.commit([p.delegation if feature == "F05" else p.expansion])
     if fault == "steering": accept(p.a, "- Current instruction without a new census.", continuation=True)
@@ -342,6 +347,8 @@ def test_f08_separate_optional_label_policy_default_off(factory):
     p = factory()
     p.native.rig.config["supervision"].pop("planning")
     (p.native.rig.home / "config.yaml").write_text(json.dumps(p.native.rig.config))
+    from hermes_cli.config import load_config_readonly
+    load_config_readonly()
     assert p.owner.current()  # worker grant is not optional planning permission
     p.pass_commit(1); p.pass_commit(2)
     p.commit([p.expansion])

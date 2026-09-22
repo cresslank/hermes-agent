@@ -63,8 +63,14 @@ def make_planning(native, tmp_path, monkeypatch, *, configure=None):
             f"- Assess `{source}` in a separate conversation, not continuing the parent transcript; native workspace guidance is allowed.\n"
             f"- Discretionary background research about `{source}` may be omitted; report uncertainty.")
     goal_text, input_text, method_text = "Assess the supplied source and return its limitations.", "Synthetic source: a bounded background observation.\n", "Read the same local source for optional background."
+    native.rig.config["supervision"]["planning"] = {"allow_discretionary_readonly_labels": True}
     if configure is not None:
         user = configure(native, user, goal_text)
+    (native.rig.home / "config.yaml").write_text(json.dumps(native.rig.config))
+    # Model ordinary configuration loading before authenticated ingress, never
+    # refresh the cache from an optional-control fence or install a fixture owner.
+    from hermes_cli.config import load_config_readonly
+    load_config_readonly()
     rt = accept(a, user)
     with bind_subagent_parent(a):
         listing = json.loads(todo_tool([
@@ -87,8 +93,6 @@ def make_planning(native, tmp_path, monkeypatch, *, configure=None):
         from agent.owned_delegation import owner_of
         owner = owner_of(a)
         policy = owner._policy if owner else SimpleNamespace(policy_id="host.owned-parent-read.v1")
-    native.rig.config["supervision"]["planning"] = {"allow_discretionary_readonly_labels": True}
-    (native.rig.home / "config.yaml").write_text(json.dumps(native.rig.config))
     monkeypatch.setattr("agent.tool_executor._pre_tool_block", lambda agent, r: (None, r.args))
     monkeypatch.setattr("agent.tool_executor._begin_tool_execution", lambda *args: None)
     monkeypatch.setattr("agent.tool_executor._run_with_activity_heartbeat", lambda agent, name, fn: fn())
