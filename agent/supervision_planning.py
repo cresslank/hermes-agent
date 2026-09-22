@@ -230,6 +230,37 @@ class PlanningGraph:
                 return
             self._transition(node, "open", enrollment={**node["enrollment"], pin: call_id})
 
+    def read_intent(self, arguments, call_id):
+        """Resolve an already requested main read through the native consumer owner.
+
+        The annex supplies exact operation membership, not independence. Only the
+        configured owner's authenticated complete consumer census supplies that
+        fact. This is advisory eligibility; dispatch remains mandatory.
+        """
+        from agent.owned_delegation_policy import ConfiguredDelegationOwner
+        from agent.owned_delegation import owner_of
+        with self.rt.lock:
+            owner = owner_of(self.rt.agent())
+            if not isinstance(owner, ConfiguredDelegationOwner):
+                return None
+            pin = _pin(("read_file", arguments))
+            matches = [n for n in self.nodes.values()
+                if n["declaration"]["type"] == "optional_expansion"
+                and (n["status"] in {"proposed", "advised"}
+                     or n["status"] == "issued" and n.get("call_id") == call_id)
+                and operation(n["declaration"]["operation"]) == pin and self._current(n)]
+            if len(matches) != 1:
+                return None
+            node = matches[0]
+            view = self._preflight(node["declaration"], optional=True)
+            links = self.rt.action_requirements(arguments)
+            if (not view or len(links) != 1 or not view["consumers"]
+                    or any(c.get("requires_corroboration") is not False for c in view["consumers"])
+                    or any(set(c["requirement_ids"]) != set(links) for c in view["consumers"])):
+                return None
+            return {"node_id": node["id"],
+                    "plan_pin": node["pin"], "requirement_id": links[0], "owner_view": view}
+
     def returned(self, call_id, arguments, result, capture):
         with self.rt.lock:
             if (len(self.returns) < 16 and type(result) is str and len(capture) == 1

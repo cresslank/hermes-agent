@@ -183,7 +183,6 @@ class EfficiencyOwner:
         self.attempt_policies = {}
         self.native_attempts = {}
         self.requirement_links = {}
-        self.read_intents = {}
         self.delegations = {}
         self.hints = deque(maxlen=4)
         self.attempts = deque(maxlen=12)
@@ -209,7 +208,6 @@ class EfficiencyOwner:
             self.attempt_policies.clear()
             self.native_attempts.clear()
             self.requirement_links.clear()
-            self.read_intents.clear()
             self.delegations.clear()
             self.hints.clear()
             self.reads.clear()
@@ -226,17 +224,12 @@ class EfficiencyOwner:
             self.epoch = epoch
 
     def admit_read_intent(self, path, *, independent_check, requirement_id=None):
-        """Native planner declares independence; missing intent never means false."""
+        """Legacy declaration retained for compatibility; not F04 admission authority."""
         self.runtime._assert_owner(tool_worker=True)
         if (type(independent_check) is not bool or not _text(path)
                 or requirement_id is not None and not _text(requirement_id)):
             raise ValueError("read_intent")
-        with self.lock:
-            self._sync()
-            if len(self.read_intents) >= 32 and path not in self.read_intents:
-                raise ValueError("read_intent_capacity")
-            self.read_intents[path] = independent_check
-            self.requirement_links["read_file", path] = requirement_id
+        return False  # caller flags are not an authenticated consumer census
 
     def admit_attempt_policy(self, name, path, *, registered_poll, registered_retry,
                              pagination, user_repetition, deterministic_handler_available, requirement_id=None):
@@ -509,13 +502,14 @@ class EfficiencyOwner:
     def before_read(self, arguments, call_id):
         """Recommend prior exact local read receipts, but NEVER suppress main calls."""
         self.runtime._assert_owner(tool_worker=True)
-        requirement = self._requirement("read_file", arguments)
-        path = arguments.get("path")
-        with self.lock:
-            self._sync()
-            independent = self.read_intents.get(path) if isinstance(path, str) else None
-        if not requirement or not _text(path) or not _text(call_id) or independent is not False:
+        if not isinstance(arguments, dict) or not _text(call_id):
             return None
+        graph = self.runtime.dependencies.planning
+        intent = graph.read_intent(arguments, call_id)
+        path = arguments.get("path")
+        if intent is None or not isinstance(path, str) or not _text(path):
+            return None
+        requirement = {"id": intent["requirement_id"]}
         try:
             resolved = Path(path).resolve(strict=True)
             stat = resolved.stat()
@@ -532,22 +526,46 @@ class EfficiencyOwner:
             "effect_class": "readonly", "owner": "main", "optional": False, "issued": False}
         with self.lock:
             self._sync()
-            # No claim that required/independent reads are waste: all main reads
-            # still execute. An explicit independence owner flag is not inferable.
-            candidates = [v for v in self.reads.values() if v["target"] == str(resolved) and v["snapshot"] == snapshot][-4:]
+            # A current authenticated consumer census, not the legacy setter,
+            # establishes no corroboration need. Every main read still executes.
+            candidates = [v for v in self.reads.values() if v["target"] == str(resolved)
+                          and v["snapshot"] == snapshot and v["requirement_id"] == requirement["id"]][-4:]
             if len(self.read_pending) < 32:
-                self.read_pending[call_id] = operation
+                self.read_pending[call_id] = (operation, dict(arguments), intent)
+        def current():
+            try:
+                info = resolved.stat()
+                return (graph.read_intent(arguments, call_id) == intent and
+                        _pin((str(resolved), info.st_dev, info.st_ino, info.st_size,
+                              info.st_mtime_ns, info.st_ctime_ns)) == snapshot and
+                        all(self.reads.get(c["id"]) == c for c in candidates))
+            except OSError:
+                return False
         # Identical native read requests already have a deterministic file-owner
         # reuse path. Semantic work is only for differing requested windows.
         if not candidates or any(c["acceptance"] == operation["acceptance"] for c in candidates):
             return None
         return self._emit("operation_proposed", {"proposed": operation, "candidates": candidates,
-            "exact_reusable": False}, call_id, (requirement["id"], *(c["source_ref"] for c in candidates)), wait=True)
+            "exact_reusable": False}, call_id, (requirement["id"], *(c["source_ref"] for c in candidates)),
+            wait=True, valid=current)
 
     def read_completed(self, call_id, *, failed, result=None):
-        with self.lock:
-            operation = self.read_pending.pop(call_id, None)
-            if operation is None or failed or not isinstance(result, str) or len(result.encode("utf-8")) > 131072:
+        # Match consumption's runtime -> efficiency lock order.
+        with self.runtime.lock, self.lock:
+            pending = self.read_pending.pop(call_id, None)
+            if pending is None or failed or not isinstance(result, str) or len(result.encode("utf-8")) > 131072:
+                return
+            operation, arguments, intent = pending
+            graph = self.runtime.dependencies.planning
+            from agent.supervision_context import digest
+            captured = graph.returns.get(call_id)
+            # Only the existing local file owner's descriptor-verified capture
+            # authenticates bytes. Remote results, partial/redacted windows and
+            # caller-shaped JSON cannot mint a reusable source receipt.
+            if (graph.read_intent(arguments, call_id) != intent or captured is None
+                    or captured[0] != digest(result)
+                    or captured[1]["source_ref"] != arguments["path"]
+                    or captured[1]["source_revision"] != self.runtime.artifact_pins.get(arguments["path"])):
                 return
             try:
                 readback = json.loads(result)

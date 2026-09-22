@@ -27,9 +27,14 @@ the same round, no polling loop and no extra main-model request.
 
 The owner APIs deliberately require explicit contracts:
 
-- `admit_read_intent(path, independent_check=...)`: unknown or independent checks
-  never acquire a dedup judgment. File identity comes from native filesystem
-  metadata; only a real content-bearing read result becomes a reuse candidate.
+- Main reads resolve intent from an exact committed `optional_expansion` operation
+  in the existing planning annex and its current work-map requirement edge. The
+  configured delegation owner supplies the authenticated v2 complete parent-only
+  consumer census. Every consumer must explicitly require no corroboration and
+  refer to that same requirement. Neither the annex nor a caller boolean supplies
+  independence. The legacy `admit_read_intent` setter returns false and grants
+  nothing. Only a descriptor-verified local file-owner capture, matching the real
+  original tool-result bytes and unchanged snapshot, becomes a reuse candidate.
 - `admit_attempt_policy(...)`: polling, registered retries, pagination, requested
   repetition and an existing deterministic error handler are vetoes. A missing
   policy is not equivalent to six false flags. Opaque shell/code commands do not
@@ -55,16 +60,17 @@ The current ordinary-path inventory is deliberately incomplete:
 
 | Feature | Present ordinary hook | Missing production producer/contract |
 | --- | --- | --- |
-| F04 | Public `SupervisionFacade.read_optional_context` executes profile-authorized supplemental reads and retains exact original bytes | Optional duplicate suppression is implemented for this narrow owner. Main `read_file` calls still have no ordinary independence supplier and are never suppressed. |
+| F04 | Ordinary `read_file` pre-dispatch joins an exact committed planning operation to the configured authenticated consumer census; native result capture supplies the original receipt | One consumed, persisted tool-result advisory for matching local snapshots. Main calls always execute. Missing/independent/required/foreign/stale consumer contracts, partial or remote source captures, and absent grants remain baseline. The separate optional-read SDK is preserved but has no shipped caller established by this join. |
 | F05 | Constructed, owned child before scheduling | No ordinary caller of `admit_delegation`; planner acceptance, independence, overhead and parallelism remain unknown. |
 | F06 / F11 | Authorized ordinary file dispatch captures a private typed failure and consumes exact profile retry/repetition declarations; native `search_files` metadata supplies the alternative | Qualified local file attempts reach a one-incident advisory without a test setter. Unclassified terminal, remote-file and retrieval failures remain silent; no main call is suppressed. |
 | F07 | `run_verify` supplies closed `nativeChecks`; an installed supervisor requests them from the ordinary `pre_verify` hook and the host drains on the execution owner | JSON-object/key checks only. Arbitrary shell recipes have no complete scope contract and remain nonreusable. In-process main runners consume advisories but always execute; detached CLI processes have no parent runtime binding. |
 | F08 | Explicit evidence-owner API | No ordinary caller commits complete `ResearchPass` ledgers or proposes an optional expansion. Raw retrieval yields are not classified into accepted evidence. |
 | F10 | Native frozen-child heartbeat branch | Requires an existing supervision runtime and owned-child binding; a real local status route is supplied when available. It cannot diagnose arbitrary unowned operations. |
 
-Except for public optional reads, declared native file attempts, and the native verification runner below,
-the contract-supplying calls for F04/F05/F08 still occur in qualification tests, not in
-ordinary planner/retrieval integrations. The hooks do
+F04 uses the existing configured planning/consumer contracts; it does not add a
+planner grammar, model-visible tool, hook, source read, or provider request merely
+to create an opportunity. Identical windows still bypass semantic inference.
+The F05/F08 inventory above is separate from this F04 join. The hooks do
 **not** infer absent independence, acceptance, environment identity or complete
 yield ledgers. These are bounded owner implementations, not full ordinary-path
 feature completion, and no production savings or accuracy has been established.

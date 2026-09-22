@@ -129,7 +129,7 @@ def feature_calls(native, feature):
     return [b for b in native.calls if any(k.startswith(feature + "/") for k in b["questions"])]
 
 
-def test_f04_native_dispatch_retains_main_read_and_reuses_only_advisory(native, monkeypatch, tmp_path):
+def test_f04_legacy_intent_setter_cannot_authorize_main_read_advisory(native, monkeypatch, tmp_path):
     path = tmp_path / "fixture.txt"
     path.write_text("synthetic source")
     native.owner.admit_read_intent(str(path), independent_check=False,
@@ -148,9 +148,8 @@ def test_f04_native_dispatch_retains_main_read_and_reuses_only_advisory(native, 
             begin_execution=None, authorization_gate=None)
         assert "synthetic source" in result and not state.blocked  # real file read still executes
         observe_result(native, "read_file", args, result, ident, False)
-    assert len(feature_calls(native, "F04")) == 1
-    assert any(r.status == "applied" for r in native.runtime.receipts.values())
-    assert native.runtime.drain_at_safe_point()
+    assert not feature_calls(native, "F04")
+    assert not native.runtime.receipts
     assert not native.runtime.drain_at_safe_point()
 
 
