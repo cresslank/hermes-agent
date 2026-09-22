@@ -1098,6 +1098,13 @@ def _commit_tool_result(
             env=get_active_env(effective_task_id),
             config=budget,
         )
+    # Single canonical result boundary for direct, deferred, inline, execute_code,
+    # connector and concurrent calls; never transform each dispatch route twice.
+    from agent.supervision_views import canonical_result_view
+    persisted_result = canonical_result_view(
+        agent, function_result, persisted_result, tool_name=function_name, call_id=tool_call_id,
+        env=get_active_env(effective_task_id), budget=budget,
+    )
     _record_persisted_path_for_stub(agent, tool_call_id, persisted_result)
 
     subdir_hints = agent._subdirectory_hints.check_tool_call(function_name, function_args)
