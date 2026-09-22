@@ -9,7 +9,7 @@ import json
 import pytest
 
 from tests.agent.test_supervision_planning_contracts import (
-    base_rig, rig, native, make_planning,  # noqa: F401 -- pytest fixture dependency chain
+    base_rig as base_rig, rig as rig, native as native, make_planning,  # pytest fixture exports
     test_f05_commit_plugin_next_request_then_ordinary_launch as prove_f05,
     test_f08_native_finite_passes_dispositions_next_request_withdrawal as prove_f08,
     test_real_transport_noop_and_expiry as prove_transport,
@@ -168,7 +168,7 @@ def test_f08_missing_source_facts_never_become_positive_absence(factory, fault):
 
 
 @pytest.mark.parametrize("feature", ["F05", "F08"])
-@pytest.mark.parametrize("fault", ["grant", "disabled", "policy", "no_contract", "steering", "session", "foreign_profile", "no_db", "unload"])
+@pytest.mark.parametrize("fault", ["grant", "disabled", "policy", "no_contract", "steering", "session", "foreign_profile", "no_db", "closed_db", "unload"])
 def test_configured_authority_negative_vertical(factory, feature, fault, monkeypatch, tmp_path):
     def policy(section):
         if fault == "grant": section["plugins"]["fixture-supervisor"]["grants"].remove("cancel_child")
@@ -181,6 +181,9 @@ def test_configured_authority_negative_vertical(factory, feature, fault, monkeyp
     if fault == "session": p.a.session_id = "foreign-session"
     if fault == "foreign_profile": monkeypatch.setenv("HERMES_HOME", str(tmp_path / "foreign"))
     if fault == "no_db": p.a._session_db = None
+    if fault == "closed_db":
+        assert p.a._session_db is not None
+        p.a._session_db.close()
     if fault == "unload": p.native.bridge.native.unregister()
     assert "Task-bound planning advisory" not in str(assemble(p.a, p.history).api_messages)
     assert not feature_calls(p.native, feature)
