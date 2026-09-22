@@ -181,6 +181,7 @@ class EfficiencyOwner:
         self.lock = threading.RLock()
         self.routes = OrderedDict()
         self.attempt_policies = {}
+        self.native_attempts = {}
         self.requirement_links = {}
         self.read_intents = {}
         self.delegations = {}
@@ -206,6 +207,7 @@ class EfficiencyOwner:
         if epoch != self.epoch:
             self.attempts.clear()
             self.attempt_policies.clear()
+            self.native_attempts.clear()
             self.requirement_links.clear()
             self.read_intents.clear()
             self.delegations.clear()
@@ -383,6 +385,7 @@ class EfficiencyOwner:
         with self.lock:
             self._sync()
             self.sequence += 1
+            receipt = self.native_attempts.pop(call_id, None)
             if not failed:
                 self.attempts.clear()  # conservative progress: never equate success with no progress
                 return None
@@ -390,39 +393,65 @@ class EfficiencyOwner:
             target = arguments.get("path") if isinstance(arguments, dict) else None
             if (not requirement or not _text(target) or not isinstance(result, str)
                     or not _text(call_id) or is_stall_guard_repeatable(name)):
+                self.attempts.clear()
                 return None
             policy = self.attempt_policies.get((name, target))
+            valid = None
+            category, mechanism = name, "tool_reported_failure"
+            if receipt is not None:
+                if (name != "read_file" or receipt.arguments_pin != _pin(arguments) or receipt.result != result
+                        or not receipt.current()):
+                    return None
+                policy = receipt.policy
+                valid = receipt.current
+                category, mechanism, _ = receipt.classification
             if policy is None or any(policy.values()):
+                self.attempts.clear()  # unknown/exempt work cannot certify uninterrupted no progress
                 return None
             routes = self._available()
+            if receipt is not None:
+                routes = [r for r in routes if r == receipt.route]
             if not routes:
+                self.attempts.clear()
                 return None
             r = self.runtime.revision
-            pin = _pin((r.instruction_event, r.requirements, tuple(sorted(self.runtime.artifact_pins.items()))))
+            pin = _pin((r.instruction_event, r.requirements, tuple(sorted(self.runtime.artifact_pins.items())),
+                        receipt.route.prerequisite_revision if receipt is not None else None))
             attempt = {"id": call_id, "text": name + " " + target, "outcome": "failed",
                        "failure_excerpt": result[:600], "target": target, "route_family": name,
                        "artifact_revision": pin, "evidence_revision": _pin(result),
                        "progress_revision": pin, "input_revision": _pin(arguments), "sequence": self.sequence}
             self.attempts.append(attempt)
             keys = ("target", "route_family", "artifact_revision", "evidence_revision", "progress_revision", "input_revision")
-            matching = [a for a in self.attempts if all(a[k] == attempt[k] for k in keys)][-6:]
+            # A multi-target/parameter loop is not one repeatedly failed approach.
+            # Count only the trailing unchanged streak, never A/B/A/B/A as A/A/A.
+            matching = []
+            for prior in reversed(self.attempts):
+                if any(prior[k] != attempt[k] for k in keys):
+                    break
+                matching.append(prior)
+                if len(matching) == 6:
+                    break
+            matching.reverse()
             incident = "failure:" + _pin((self.epoch, tuple(attempt[k] for k in keys)))
             if incident in self.handled_incidents:
                 return None
         # Emit the concrete failure once; exact error handlers still own their paths.
         hint = self._emit("failure_incident", {"incident_id": incident,
-            "error": {"id": call_id, "text": result[:600], "mechanism": "tool_reported_failure", "category": name},
+            "error": {"id": call_id, "text": result[:600], "mechanism": mechanism, "category": category},
             "requirement": requirement, "deterministic_handler_available": False,
             "routes": [r.facts() for r in routes], "attempted_routes": list(self.attempted_routes)},
-            incident, (call_id, requirement["id"], *(r.id for r in routes)), routes=routes, wait=True)
-        if len(matching) >= 3 and matching[-1]["sequence"] - matching[0]["sequence"] < 12:
+            incident, (call_id, requirement["id"], *(r.id for r in routes)), routes=routes, wait=True, valid=valid)
+        if (incident not in self.handled_incidents and len(matching) >= 3
+                and matching[-1]["sequence"] - matching[0]["sequence"] < 12):
             loop = "loop:" + incident.removeprefix("failure:")
             return self._emit("guardrail_candidate", {"incident_id": incident, "requirement": requirement,
                 "attempts": matching, "window_start_sequence": matching[0]["sequence"],
                 "window_end_sequence": matching[-1]["sequence"], "registered_poll": False,
                 "registered_retry": False, "pagination": False, "user_repetition": False,
                 "healthy_progress": False, "already_intervened": False, "recovery_route": routes[0].facts()},
-                loop, tuple(a["id"] for a in matching) + (requirement["id"], routes[0].id), routes=routes, wait=True) or hint
+                loop, tuple(a["id"] for a in matching) + (requirement["id"], routes[0].id),
+                routes=routes, wait=True, valid=valid) or hint
         return hint
 
     def heartbeat_stopped(self, child, last_seen, *, threshold):

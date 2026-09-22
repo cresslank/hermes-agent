@@ -57,17 +57,98 @@ The current ordinary-path inventory is deliberately incomplete:
 | --- | --- | --- |
 | F04 | Public `SupervisionFacade.read_optional_context` executes profile-authorized supplemental reads and retains exact original bytes | Optional duplicate suppression is implemented for this narrow owner. Main `read_file` calls still have no ordinary independence supplier and are never suppressed. |
 | F05 | Constructed, owned child before scheduling | No ordinary caller of `admit_delegation`; planner acceptance, independence, overhead and parallelism remain unknown. |
-| F06 / F11 | Actual post-call failure | No ordinary caller of `admit_attempt_policy` or failure-route registration; unclassified failures keep native handling. |
+| F06 / F11 | Authorized ordinary file dispatch captures a private typed failure and consumes exact profile retry/repetition declarations; native `search_files` metadata supplies the alternative | Qualified local file attempts reach a one-incident advisory without a test setter. Unclassified terminal, remote-file and retrieval failures remain silent; no main call is suppressed. |
 | F07 | `run_verify` supplies closed `nativeChecks`; an installed supervisor requests them from the ordinary `pre_verify` hook and the host drains on the execution owner | JSON-object/key checks only. Arbitrary shell recipes have no complete scope contract and remain nonreusable. In-process main runners consume advisories but always execute; detached CLI processes have no parent runtime binding. |
 | F08 | Explicit evidence-owner API | No ordinary caller commits complete `ResearchPass` ledgers or proposes an optional expansion. Raw retrieval yields are not classified into accepted evidence. |
 | F10 | Native frozen-child heartbeat branch | Requires an existing supervision runtime and owned-child binding; a real local status route is supplied when available. It cannot diagnose arbitrary unowned operations. |
 
-Except for the public optional-read operation and the native verification runner below,
-the contract-supplying calls for F04/F05/F06/F08/F11 still occur in qualification tests, not in
+Except for public optional reads, declared native file attempts, and the native verification runner below,
+the contract-supplying calls for F04/F05/F08 still occur in qualification tests, not in
 ordinary planner/retrieval integrations. The hooks do
 **not** infer absent independence, acceptance, environment identity or complete
 yield ledgers. These are bounded owner implementations, not full ordinary-path
 feature completion, and no production savings or accuracy has been established.
+
+## Declared ordinary file attempts (F06 / F11)
+
+`agent/supervision_tool_attempts.py::run_attempt` runs inside the existing
+authorized tool dispatcher, after scope, hooks, guardrails and effect fencing.
+It never skips execution. `read_file` publishes a private, dispatch-local receipt
+from its native failure branch; copying the returned JSON cannot mint a receipt.
+The result, arguments, call ID, accepted work revision, live local file backend
+and original target metadata must still match at settlement. Generic stderr is
+not an error category or retry policy.
+
+The optional host-profile declaration (not a model argument or work-map field) is:
+
+```yaml
+supervision:
+  enabled: true
+  file_attempts:
+    - version: supervision.file-attempt.v1
+      path: /absolute/project/source
+      instructions_sha256: ["SHA256 of the exact accepted instruction UTF-8 bytes"]
+      registered_poll: false
+      registered_retry: false
+      pagination: false
+      user_repetition: false
+      alternative:
+        tool: search_files
+        arguments:
+          path: /absolute/project/source
+          pattern: "*.txt"
+          target: files
+          limit: 10
+          offset: 0
+          order: discovery
+        authorized: true
+        privacy_allowed: true
+```
+
+This is an explicit native-owner declaration, not a claim inferred from missing
+metadata. All four booleans are required; any true value exempts the attempts.
+Any non-first-page read is also exempt even if a declaration was written for page
+one. `instructions_sha256` must match all retained accepted inputs in order;
+steering invalidates the declaration and its current work-map link. Truncated
+instruction coverage and a full/possibly-evicted 12-source ledger are refused.
+A single requirement is not a target link.
+
+The only supplied alternative is the **existing** `search_files` handler, available
+in the current session, with the exact declared filename-search arguments. Its
+path must be the target or its immediate parent, an existing local directory.
+The profile explicitly authorizes the directory scope and privacy of its filename
+enumeration. The owner neither generates the glob nor invents a command. Secret
+paths, symlink redirection, remote backends, unknown fields and absent grants fail
+closed for advice, while the original tool keeps its baseline behavior.
+
+The local non-regular-file refusal carries `not_regular / regular_file_guard`
+and explicitly declares no deterministic recovery handler. When the target is a
+directory, the offered filename search can be judged as an alternative way to
+locate the requested evidence. The native missing-file Unicode recovery and
+similar-file suggestions (including their negative cache) instead carry
+`not_found / unicode_recovery_and_similar_files` with a deterministic-handler
+veto. No semantic call replaces that recovery. Other errors stay unclassified.
+
+F11 may produce one bounded advisory on the first qualified failure. If it
+abstains, F06 can consider three unchanged failed attempts in the existing
+12-event window. The streak breaks on a changed target/input, unknown or exempt
+work, a successful result, or a changed artifact/target pin. This avoids treating
+interleaved multi-target work as a single loop. F06 and F11 share one handled
+incident but retain their own opportunity target. Neither changes timer thresholds
+or renews the shared deadline. Live profile permission, grant generations, tool
+availability, backend identity and source pins are rechecked at consumption.
+
+Advice never runs the alternative. If the main agent later dispatches that exact
+`search_files` call normally, the native dispatch owner records the attempted
+route/prerequisite revision, preventing another recommendation of the same route.
+Required reads, writes, checks and child lifecycles continue unchanged. There is
+no optional-plugin-attempt suppression claim on this main-tool path.
+
+`tests/agent/test_supervision_tool_attempts.py` exercises authentic accepted input,
+native todo and work-map commits, the real file registry dispatch, full installed
+Jev feature registry and strict MockTransport. Positives do not call
+`admit_attempt_policy` or register a fixture route. The declaration is opt-in;
+automatic policy derivation for arbitrary terminal/retrieval owners is not claimed.
 
 ## Host-attested optional context reads (F04)
 
@@ -134,10 +215,10 @@ measurement, **not** a latency, token-cost or production-quality claim.
   dependency, specialist capability or overhead/parallelism. Goals/tool lists do
   not supply those facts. `retain_plan` still has no ordinary producer/disposition
   owner; the current policy returns no proposal when no candidate passes.
-- F06/F11: main post-call results do not establish user-requested repetition or
-  registered retry/poll policy. Route metadata must come from its real owner,
-  not a guessed false flag. Failure and loop opportunities now share a host-owned
-  intervention ledger while retaining distinct opportunity targets.
+- F06/F11: the file-attempt declaration above supplies ordinary retry/repetition
+  intent, and private file-owner receipts supply error category and handler status.
+  Unclassified tools remain unknown. Failure and loop opportunities share a
+  host-owned intervention ledger while retaining distinct opportunity targets.
 - F07: arbitrary bootstrap/build/test recipes still lack a complete input, dependency
   and environment scope. Command spelling or workspace status cannot fill those
   fields. The closed native-check contract below supplies a narrow ordinary path,

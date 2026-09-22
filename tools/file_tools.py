@@ -656,7 +656,9 @@ def read_file_tool(path: str, offset: int = 1, limit: int = DEFAULT_READ_LIMIT, 
         resolved_str = str(_resolved)
         cached_not_found = _check_not_found_cache("read", resolved_str, task_id)
         if cached_not_found is not None:
-            return cached_not_found
+            from agent.supervision_tool_attempts import publish_file_failure
+            return publish_file_failure(cached_not_found,
+                                        ("not_found", "unicode_recovery_and_similar_files", True))
 
         # Dedup: identical (path, offset, limit) on an unchanged file returns a
         # lightweight stub instead of re-sending the content.
@@ -683,7 +685,9 @@ def read_file_tool(path: str, offset: int = 1, limit: int = DEFAULT_READ_LIMIT, 
         if isinstance(_err, str) and _err.startswith("File not found:"):
             _record_not_found("read", resolved_str, task_id, json.dumps(result_dict, ensure_ascii=False))
         if _err or result_dict.get("is_binary"):
-            return json.dumps(result_dict, ensure_ascii=False)
+            from agent.supervision_tool_attempts import publish_file_failure
+            return publish_file_failure(json.dumps(result_dict, ensure_ascii=False),
+                                        getattr(result, "_attempt_failure", None))
 
         # Char budget on the FORMATTED content (what enters context), BEFORE
         # redaction (skip the regex pass on huge content); truncate gracefully

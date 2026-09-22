@@ -736,7 +736,9 @@ def _dispatch_authorized_once(
             prepare_current_terminal(ref)
             _advance_start_order(lambda: _begin_tool_execution(agent, ref, display_index))
             started = True
-            return _run_with_activity_heartbeat(agent, ref.name, lambda: execute(ref.args))
+            from agent.supervision_tool_attempts import run_attempt
+            return _run_with_activity_heartbeat(agent, ref.name,
+                lambda: run_attempt(agent, ref.name, ref.args, ref.call_id, ref.task_id, lambda: execute(ref.args)))
     except ControlDenied:
         if not started:
             _advance_start_order()
