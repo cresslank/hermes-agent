@@ -473,12 +473,14 @@ class NativeViewsBinding:
     @staticmethod
     def _phase_reopened(previous, current):
         before, after = previous['todos'], current['todos']
-        # Bookkeeping revisions and progress toward completion do not create a
-        # new phase. A changed declaration or reopening terminal work does.
-        return ([{k: v for k, v in t.items() if k != 'status'} for t in before]
-                != [{k: v for k, v in t.items() if k != 'status'} for t in after]
-                or (all(t['status'] in ('completed', 'cancelled') for t in before)
-                    and any(t['status'] in ('pending', 'in_progress') for t in after)))
+        # IDs/order cannot establish a new phase, especially after completion:
+        # lost row lineage is not evidence of unfinished work. Only a positively
+        # new/reopened eligible declaration can reopen selection. Count repeated
+        # declarations without treating pending -> in_progress as new work.
+        from collections import Counter
+        def eligible(rows):
+            return Counter(t['content'] for t in rows if t['status'] in ('pending', 'in_progress'))
+        return bool(eligible(after) - eligible(before))
 
     def skill_phase_committed(self, messages):
         """A committed todo phase transition, not an every-turn semantic patrol.

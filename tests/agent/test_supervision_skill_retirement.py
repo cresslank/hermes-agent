@@ -258,7 +258,8 @@ def test_old_task_plan_is_not_current_phase_authority(native, phase):
     assert len(native.calls) == calls
 
 
-@pytest.mark.parametrize('event', ['same_completed', 'changed_phase', 'reopened', 'catalog',
+@pytest.mark.parametrize('event', ['same_completed', 'changed_phase', 'reopened', 'reopened_renamed',
+                                  'changed_completed', 'deleted_completed', 'catalog',
                                   'steering', 'task', 'unload', 'uncommitted_plan'])
 def test_retirement_reopens_only_for_relevant_native_events(native, event):
     messages, items, binding, entry = ready(native)
@@ -284,6 +285,9 @@ def test_retirement_reopens_only_for_relevant_native_events(native, event):
         'changed_phase': lambda: todo(native, messages, [
             {'id': 'next', 'content': 'Analyze another weather report.', 'status': 'pending'}]),
         'reopened': lambda: todo(native, messages, items),
+        'reopened_renamed': lambda: todo(native, messages, [{**t, 'id': 'new-' + t['id']} for t in items]),
+        'changed_completed': lambda: todo(native, messages, [{**t, 'content': 'Changed ' + t['content']} for t in finished]),
+        'deleted_completed': lambda: todo(native, messages, finished[:1]),
         'catalog': new_catalog,
         'steering': steering,
         'task': lambda: native.accept('Analyze weather forecasts.'),
@@ -294,7 +298,7 @@ def test_retirement_reopens_only_for_relevant_native_events(native, event):
     history = copy.deepcopy(messages)
     result = assemble(native.agent, messages)
     native.drain()
-    reopened = event in {'changed_phase', 'reopened', 'catalog', 'steering', 'task'}
+    reopened = event in {'changed_phase', 'reopened', 'reopened_renamed', 'catalog', 'steering', 'task'}
     assert ('Optional skill candidate: alpha' in str(result.api_messages)) is reopened
     assert len(native.calls) == calls + (2 if reopened else 0)
     assert messages == history
@@ -307,7 +311,7 @@ def test_retirement_reopens_only_for_relevant_native_events(native, event):
         if event in {'steering', 'task'}:
             assert binding.skill_scope != previous_task_scope
             assert new[2] is None  # previous task's plan cannot be rebound
-        if event in {'changed_phase', 'reopened'}:
+        if event in {'changed_phase', 'reopened', 'reopened_renamed'}:
             assert binding.skill_phase != previous_phase
             assert new[2] == native.agent._todo_store.snapshot()
     else:
@@ -371,3 +375,30 @@ def test_ordinary_unhinted_todo_completion_is_silent(native):
     todo(native, messages, [{'id': 'one', 'content': 'Done', 'status': 'completed'}])
     native.drain()
     assert not native.calls
+
+
+@pytest.mark.parametrize('bookkeeping', ['reorder', 'ids'])
+def test_retired_hint_stays_retired_after_completed_bookkeeping(native, record_property, bookkeeping):
+    messages, items, binding, entry = ready(native)
+    completed = [{**t, 'status': 'completed'} for t in items]
+    todo(native, messages, completed)
+    result = assemble(native.agent, messages)
+    assert 'Optional skill candidate: alpha' not in str(result.api_messages)
+    assert len(removal_calls(native)) == 1
+    phase = binding.skill_phase
+    changed = (list(reversed(completed)) if bookkeeping == 'reorder' else
+               [{**t, 'id': 'renamed-' + t['id']} for t in completed])
+    assert sorted((t['content'], t['status']) for t in changed) == sorted(
+        (t['content'], t['status']) for t in completed)
+    todo(native, messages, changed)
+    history = copy.deepcopy(messages)
+    result = assemble(native.agent, messages)
+    native.drain()
+    assert [b['state']['facts']['stage'] for b, _ in native.calls] == ['metadata', 'detail', 'unload']
+    assert 'Optional skill candidate: alpha' not in str(result.api_messages)
+    assert binding.skill_phase == phase
+    record_property('retirement', dict(bookkeeping=bookkeeping, old_hint=entry[0].id,
+        stages=[b['state']['facts']['stage'] for b, _ in native.calls], next_request=result.api_messages))
+    assert not binding.skill_hints
+    assert len(removal_calls(native)) == 1
+    assert messages == history
