@@ -743,6 +743,9 @@ def read_file_tool(path: str, offset: int = 1, limit: int = DEFAULT_READ_LIMIT, 
                 f"You have read this exact file region {count} times consecutively. "
                 "The content has not changed since your last read. Use the information you already have. "
                 "If you are stuck in a loop, stop reading and proceed with writing or responding.")
+        from agent.supervision_context import record_file_owner_read
+        record_file_owner_read(path, result_dict, offset=offset, redacted=redacted,
+                               snapshot=getattr(result, "_snapshot", None))
         return json.dumps(result_dict, ensure_ascii=False)
     except Exception as e:
         return tool_error(str(e))

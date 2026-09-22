@@ -242,14 +242,78 @@ def parse_work_map(text: str, *, artifact_ref: str, designated_refs: set[str],
             allowed = set(designated_refs) | set(refs_in_text(str(todos[step["todo_id"]].get("content", ""))))
             if not step["target_refs"] or not all(type(r) is str and r in allowed for r in step["target_refs"]):
                 return None
+        claim_spans = []
         for claim in value["claims"]:
             if set(claim) != {"artifact_ref", "start", "end", "requirement_indexes"} or not indices(claim):
                 return None
             artifact = artifacts[claim["artifact_ref"]]
-            exact_span(claim["artifact_ref"], digest(artifact), artifact, claim["start"], claim["end"])
-        return freeze({**value, "requirement_spans": requirements})
+            claim_spans.append(exact_span(claim["artifact_ref"], digest(artifact), artifact, claim["start"], claim["end"], kind="linked_claim"))
+        return freeze({**value, "requirement_spans": requirements, "claim_spans": claim_spans})
     except (ValueError, TypeError, KeyError, IndexError):
         return None
+
+
+def visible_exact_occurrence(text, candidate):
+    """Locate one literal claim outside code/quotes without semantic decomposition."""
+    if not candidate or text.count(candidate) != 1:
+        return False
+    start = text.index(candidate)
+    end = start + len(candidate)
+    covered = sum(max(0, min(end, offset + len(line)) - max(start, offset))
+                  for offset, line, _ in _visible_lines(text))
+    return covered == len(candidate)
+
+
+def complete_requirement_context(runtime, span):
+    """Only a complete enumerated item (including indented qualifiers), or an
+    entire bounded authenticated source, can be a semantic requirement window.
+    Work-map substring validity alone does not prove qualifier completeness.
+    """
+    source = runtime.sources.get(span.source_message_id)
+    if source is None or digest(source) != span.source_revision:
+        return False
+    if span.start == 0 and span.end == len(source):
+        return True
+    return any(r.source_message_id == span.source_message_id
+               and r.source_revision == span.source_revision
+               and r.start == span.start and r.end == span.end for r in runtime.requirements)
+
+
+def action_conflict_facts(runtime, tool_name, arguments, call_id, targets):
+    """Project an actual changed plan link, keeping unknown obligations explicit.
+
+    current_authorization describes current accepted requirement provenance, not
+    permission to execute the tool. The ordinary dispatcher still owns permission.
+    A work map cannot declare absence of prerequisites or cleanup under v1.
+    """
+    records = [runtime.invalidated_action_facts[t] for t in targets
+               if t in runtime.invalidated_action_facts]
+    if len(records) != 1:
+        return None
+    path, pin, revision, todo_id, requirements = records[0]
+    todos, current_revision = runtime.plan_steps()
+    if (runtime.artifact_pins.get(path) != pin or revision != current_revision
+            or todo_id not in todos or todos[todo_id].get("status") == "completed"
+            or not 1 <= len(requirements) <= 4):
+        return None
+    for req in requirements:
+        source = runtime.sources.get(req.source_message_id)
+        if (not complete_requirement_context(runtime, req) or source is None
+                or digest(source) != req.source_revision or source[req.start:req.end] != req.text):
+            return None
+    action = json.dumps({"tool_name": tool_name, "arguments": arguments}, ensure_ascii=False)
+    step = todos[todo_id].get("content")
+    if not isinstance(step, str) or not step or max(len(action), len(step), *(len(r.text) for r in requirements)) > 2400:
+        return None
+    refs = tuple(r.id for r in requirements)
+    return {"changed": True, "evidence_refs": refs, "requirement_refs": refs,
+        "action": {"id": call_id, "text": action, "issued": False},
+        "current_step": {"id": todo_id, "text": step},
+        "requirements": [{"id": r.id, "text": r.text, "source_ref": r.id} for r in requirements],
+        "authorized_scope": "Current accepted source clauses; tool permission is separately host-checked.",
+        "link": {"id": digest(path + pin + todo_id), "validated": True,
+            "requirement_ids": refs, "conflict": "invalidated_known_edge",
+            "current_authorization": True, "valid_prerequisite": None, "required_cleanup": None}}
 
 
 def completed_batch_facts(messages, *, revision, requirements, target_refs):
@@ -322,6 +386,44 @@ def work_map_source_refs(store):
                              for r in runtime.requirements]}
 
 
+def record_file_owner_read(path, result, *, offset, redacted, snapshot):
+    """Retain only exact complete bytes already returned by the native read owner.
+
+    The native read hashes bytes on the same descriptor. Strip only its literal
+    line gutters, then require that digest; truncated, redacted, extracted, remote
+    and newline-normalized output cannot masquerade as an exact source window.
+    """
+    from agent.subagent_lifecycle import get_active_subagent_parent
+    from agent.supervision_policy import runtime_for_agent
+    agent = get_active_subagent_parent()
+    runtime = runtime_for_agent(agent) if agent is not None else None
+    if runtime is None or path not in runtime.designated_artifact_refs():
+        return
+    native_snapshot = isinstance(snapshot, tuple) and len(snapshot) == 6 and type(snapshot[-1]) is bytes
+    # A changed descriptor digest invalidates the old complete source even when
+    # this particular read returns only a page, or its new text is redacted.
+    if (native_snapshot and path in runtime.artifact_pins
+            and runtime.artifact_pins[path] != snapshot[-1].hex()):
+        runtime.invalidate_artifact(path)
+    if (offset != 1 or redacted or not native_snapshot
+            or result.get("truncated") or result.get("truncated_lines") or result.get("error")
+            or result.get("is_binary") or result.get("extracted_document")
+            or type(result.get("file_size")) is not int or not 0 < result["file_size"] <= MAX_TEXT_BYTES):
+        return
+    formatted = result.get("content")
+    if not isinstance(formatted, str) or len(formatted.encode("utf-8")) > 2 * MAX_TEXT_BYTES:
+        return
+    lines = formatted.split("\n")
+    if any(not line.startswith(str(i) + "|") for i, line in enumerate(lines, 1)):
+        return
+    body = "\n".join(line.split("|", 1)[1] for line in lines)
+    for candidate in (body, body + "\n"):
+        raw = candidate.encode("utf-8")
+        if len(raw) == result["file_size"] and hashlib.sha256(raw).digest() == snapshot[-1]:
+            runtime.record_artifact(path, candidate, verified=False, main_agent=False)
+            return
+
+
 def record_file_owner_commit(tool_name, path, *, task_id="default", source_ref=None):
     """Called INSIDE the canonical local file owner's successful commit/path lock.
 
@@ -344,9 +446,11 @@ def record_file_owner_commit(tool_name, path, *, task_id="default", source_ref=N
         with Path(path).open("rb") as handle:
             raw = handle.read(MAX_TEXT_BYTES + 1)
         if len(raw) > MAX_TEXT_BYTES:
+            runtime.invalidate_artifact(source_ref)
             return
         text = raw.decode("utf-8")
     except (OSError, UnicodeError):
+        runtime.invalidate_artifact(source_ref)
         return
     runtime.record_artifact(source_ref, text, verified=True,
         main_agent=getattr(agent, "platform", None) != "subagent" and not getattr(agent, "_delegate_id", None))
@@ -378,10 +482,13 @@ def record_committed_write(agent, tool_name, args, result, *, landed, task_id=No
         with Path(identity).open("rb") as handle:
             raw = handle.read(MAX_TEXT_BYTES + 1)
         if len(raw) > MAX_TEXT_BYTES:
+            runtime.invalidate_artifact(path)
             return
         text = raw.decode("utf-8")
     except (OSError, UnicodeError):
+        runtime.invalidate_artifact(path)
         return
     exact_write = tool_name == "write_file" and type(args.get("content")) is str and text == args["content"]
     runtime.record_artifact(path, text, verified=exact_write,
-                            main_agent=getattr(agent, "platform", None) != "subagent")
+                            main_agent=getattr(agent, "platform", None) != "subagent"
+                            and not getattr(agent, "_delegate_id", None))

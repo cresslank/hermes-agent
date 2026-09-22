@@ -89,6 +89,9 @@ class SupervisionFacade:
             from agent.supervision_delivery import FINAL_ACTIONS_VERSION, FINAL_ACTIONS
             capabilities["final_actions_version"] = FINAL_ACTIONS_VERSION
             capabilities["final_actions"] = dict(FINAL_ACTIONS)
+            from agent.supervision_dependencies import RELATION_VERSION, RELATION_ACTIONS
+            capabilities["dependency_relations_version"] = RELATION_VERSION
+            capabilities["dependency_relations"] = dict(RELATION_ACTIONS)
         return capabilities
 
     def _owner_capabilities(self):

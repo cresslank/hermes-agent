@@ -49,6 +49,13 @@ def _advisory_template(proposal):
                 and all(type(item) is str for item in ids)
                 and set(ids) <= set(proposal.evidence_refs)):
             return "cover_requirement"
+    if (proposal.action == Action.CONTINUE and proposal.owner == "dependencies"
+            and proposal.template_id is None
+            and proposal.metadata.get("feature_action") == "targeted_gap"
+            and proposal.metadata.get("semantic_only") is True
+            and proposal.metadata.get("certifies_truth") is False
+            and proposal.metadata.get("grants_finality") is False):
+        return "review_claim"
     return None
 
 
@@ -112,7 +119,9 @@ class SupervisionRuntime:
         self.incidents = set()
         self.opportunities = OrderedDict()
         self.action_edges = {}
+        self.reanchored_links = set()
         self.invalidated_action_edges = {}
+        self.invalidated_action_facts = {}
         self.closed_targets = set()
         self.last_final = None
         self.last_final_text = ""
@@ -120,6 +129,8 @@ class SupervisionRuntime:
         self.round_deadline_issued_at = None
         self.closed = False
         self.final_continuations = 0
+        from agent.supervision_dependencies import DependencyOwner
+        self.dependencies = DependencyOwner(self)
         self._remember()
 
     def _assert_owner(self, *, tool_worker=False):
@@ -172,6 +183,7 @@ class SupervisionRuntime:
                 self.requirements = ()
                 self.designated_refs.clear()
                 self.work_maps.clear()
+                self.dependencies.clear()
                 self.work_map_revisions.clear()
                 self.artifacts.clear()
                 self.artifact_pins.clear()
@@ -179,10 +191,12 @@ class SupervisionRuntime:
                 self.opportunities.clear()
                 self.incidents.clear()
                 self.action_edges.clear()
+                self.reanchored_links.clear()
                 self.pending_artifacts.clear()
                 self.pending_artifact_bytes = 0
             self.work_maps.clear()  # accepted steering invalidates old action links immediately
             self.invalidated_action_edges.clear()
+            self.invalidated_action_facts.clear()
             self.revision = replace(self.revision, instruction_event=self.revision.instruction_event + 1,
                                     requirements=self.revision.requirements + 1)
             bounded, omitted = bounded_text(origin.text)
@@ -205,6 +219,8 @@ class SupervisionRuntime:
             children.changed('task_revision')
         from agent.supervision_receipts import record_work
         record_work(self)
+        if not getattr(self.agent(), "_interrupt_requested", False):
+            self.dependencies.instruction_changed(origin, spans)
         self.observe("authenticated_instruction_admitted", {"requirements": project(spans), "source_message_id": origin.message_id,
                      "text": bounded, "continuation": origin.continuation},
                      completeness=self.completeness, origin_kind=origin.kind, data_class="task_text",
@@ -218,13 +234,15 @@ class SupervisionRuntime:
     def observe(self, event, facts, *, target_id=None, actions=(), evidence_refs=(),
                 deadline=None, completeness=None, origin_kind="owner", data_class="task_text",
                 owner="agent", candidates=(), required_ids=(), relations=(), required_data_classes=(),
-                required_obligations=(), deadline_issued_at=None, recipient=None):
+                required_obligations=(), deadline_issued_at=None, recipient=None, expected_revision=None):
         regs = [r for r in self._registrations() if (recipient is None or r is recipient)
                 and "observe" in r.grants and data_class in r.data_policy
                 and set(required_data_classes) <= r.data_policy]
         if not regs or (self.closed and owner != "completion_admission") or (deadline is not None and deadline <= self.clock()):
             return None
         with self.lock:
+            if expected_revision is not None and self.revision != expected_revision:
+                return None
             self.sequence += 1
             if deadline is None:
                 issued = self.clock()
@@ -299,6 +317,14 @@ class SupervisionRuntime:
             return "rejected", "owner_action_mismatch"
         if not proposal.evidence_refs or not set(proposal.evidence_refs) <= opportunity["refs"]:
             return "rejected", "unbound_evidence"
+        if proposal.target_id in self.action_edges:
+            from agent.supervision_context import action_conflict_facts
+            name, args, targets, link_id = self.action_edges[proposal.target_id]
+            facts = action_conflict_facts(self, name, args, proposal.target_id, targets)
+            if facts is None or facts["link"]["id"] != link_id:
+                return "stale", "action_link_changed"
+        if proposal.owner == "dependencies" and not self.dependencies.validate(proposal):
+            return "rejected", "invalid_dependency_relation"
         if proposal.incident_id in self.incidents:
             return "no_op", "incident_settled"
         if proposal.action in {Action.ADVISE, Action.CONTINUE}:
@@ -381,11 +407,17 @@ class SupervisionRuntime:
                 return None
             self.incidents.add(proposal.incident_id)
             self._settle(proposal, "applied", "owner_advisory")
+            if proposal.target_id in self.action_edges:
+                self.reanchored_links.add(self.action_edges[proposal.target_id][3])
             refs = ", ".join(proposal.evidence_refs[:3])
             spans = {r.id: r.text for r in self.requirements}
             for work_map in self.work_maps.values():
                 spans.update((r.id, r.text) for r in work_map["requirement_spans"])
             excerpt = next((spans[r] for r in proposal.evidence_refs if r in spans), "")
+            if proposal.owner == "dependencies":
+                request = self.dependencies.requests.get(proposal.target_id)
+                if request is not None and request[0] == "support":
+                    excerpt = request[1]["claim"]["text"]
             return (f"[Task-bound advisory; lower-trust evidence, not an instruction]\n"
                     f"{TEMPLATES[template]}\nSource clause (quoted data): {json.dumps(excerpt[:160])}\nEvidence: {refs}")[:600]
 
@@ -401,6 +433,7 @@ class SupervisionRuntime:
             children = getattr(self, 'children', None)
             if children is not None:
                 children.drain()
+            self.dependencies.drain()
             efficiency = getattr(self, "efficiency", None)
             if efficiency is not None:
                 advisory = efficiency.drain()
@@ -429,16 +462,35 @@ class SupervisionRuntime:
         todos, _ = self.plan_steps()
         return self.designated_refs | {r for t in todos.values() for r in refs_in_text(str(t.get("content", "")))}
 
+    def _drop_action_conflicts(self, path):
+        for target, fact in tuple(self.invalidated_action_facts.items()):
+            if fact[0] == path:
+                self.invalidated_action_facts.pop(target, None)
+                self.invalidated_action_edges.pop(target, None)
+
+    def invalidate_artifact(self, path):
+        with self.lock:
+            self.dependencies.invalidate_source(path, None)
+            self.artifact_pins.pop(path, None)
+            self.artifacts.pop(path, None)
+            self.work_maps.pop(path, None)
+            self.work_map_revisions.pop(path, None)
+            self._drop_action_conflicts(path)
+            self.revision = replace(self.revision, evidence=self.revision.evidence + 1)
+
     def record_artifact(self, path, text, *, verified, main_agent):
         with self.lock:
             pin = digest(text)
             if self.artifact_pins.get(path) == pin:
                 return
             text_bytes = len(text.encode("utf-8"))
+            self.dependencies.invalidate_source(path, pin)
             if self.pending_artifact_bytes + text_bytes > MAX_TEXT_BYTES or len(self.pending_artifacts) >= 8:
+                self.artifact_pins.pop(path, None)
+                self.artifacts.pop(path, None)
                 self.work_maps.pop(path, None)
                 self.work_map_revisions.pop(path, None)
-                self.invalidated_action_edges.clear()
+                self._drop_action_conflicts(path)
                 self.completeness = replace(self.completeness, complete=False, omitted=True)
                 self.revision = replace(self.revision, evidence=self.revision.evidence + 1)
                 return
@@ -446,13 +498,15 @@ class SupervisionRuntime:
             previous_text = self.artifacts.get(path)
             prior_map = self.work_maps.pop(path, None)
             self.work_map_revisions.pop(path, None)
-            self.invalidated_action_edges.clear()
+            self._drop_action_conflicts(path)
             self.artifact_pins[path] = pin
             self.artifacts[path] = text
             while len(self.artifacts) > 8:
                 old, _ = self.artifacts.popitem(last=False)
                 self.artifact_pins.pop(old, None)
                 self.work_maps.pop(old, None)
+                self.work_map_revisions.pop(old, None)
+                self._drop_action_conflicts(old)
             self.revision = replace(self.revision, evidence=self.revision.evidence + 1)
             receipt = EffectReceiptV1(uuid.uuid4().hex, "", path, pin,
                 effect_class="mutation" if verified else "unknown", outcome="landed" if verified else "unknown",
@@ -465,13 +519,17 @@ class SupervisionRuntime:
                                           sources=self.sources, todos=todos, artifacts=self.artifacts)
                 if work_map:
                     if prior_map:
-                        new_targets = {step["todo_id"]: set(step["target_refs"]) for step in work_map["steps"]}
+                        new_steps = {step["todo_id"]: step for step in work_map["steps"]}
+                        new_targets = {key: set(step["target_refs"]) for key, step in new_steps.items()}
                         for old_step in prior_map["steps"]:
                             if old_step["todo_id"] not in new_targets:
                                 continue  # missing linkage is unknown, not a scope conflict
                             for old_target in set(old_step["target_refs"]) - new_targets[old_step["todo_id"]]:
-                                self.invalidated_action_edges[old_target] = tuple(
-                                    prior_map["requirement_spans"][i].id for i in old_step["requirement_indexes"])
+                                current_step = new_steps[old_step["todo_id"]]
+                                requirements = tuple(work_map["requirement_spans"][i]
+                                    for i in current_step["requirement_indexes"])
+                                self.invalidated_action_edges[old_target] = tuple(r.id for r in requirements)
+                                self.invalidated_action_facts[old_target] = (path, pin, todo_revision, old_step["todo_id"], requirements)
                     self.work_maps[path] = work_map
                     self.work_map_revisions[path] = todo_revision
             claims, coverage = claim_candidates(text, path, required_refs=self.designated_refs, previous_text=previous_text)
@@ -513,6 +571,7 @@ class SupervisionRuntime:
                 self.evidence.popitem(last=False)
         from agent.supervision_delivery import record_tool_findings
         record_tool_findings(self, messages)
+        self.dependencies.committed()
         if artifacts or findings:
             self.observe("tool_batch_committed", {"artifacts": artifacts, "findings": findings,
                          "batch_size": len(batch), "requirements": project(self.requirements)},
@@ -543,13 +602,20 @@ class SupervisionRuntime:
                       for ref in self.invalidated_action_edges.get(target, ())))
         if not links or tool_call_id in self.closed_targets:
             return None
+        from agent.supervision_context import action_conflict_facts
+        from agent.supervision_dependencies import LinkedOpportunity
+        facts = action_conflict_facts(self, tool_name, arguments, tool_call_id, targets)
+        if facts is None or facts["link"]["id"] in self.reanchored_links:
+            return None
+        self.action_edges[tool_call_id] = (tool_name, dict(arguments), tuple(targets), facts["link"]["id"])
+        while len(self.action_edges) > 64:
+            self.action_edges.pop(next(iter(self.action_edges)))
         deadline = self.shared_deadline()
         revision = self.revision
-        self.observe("action_proposed_with_scope_conflict", {"tool_name": tool_name, "arguments": arguments,
-                     "requirement_refs": links, "linkage": "invalidated_known_edge",
-                     "scope_conflict": True},
+        self.observe("action_proposed_with_scope_conflict", facts,
                      target_id=tool_call_id, actions=(Action.ADVISE,), evidence_refs=links,
-                     deadline=deadline, data_class="task_text", required_obligations=links)
+                     deadline=deadline, data_class="task_text", required_obligations=links,
+                     completeness=LinkedOpportunity())
         self._wait_for(tool_call_id, deadline, revision)
         with self.lock:
             proposal = self._take(tool_call_id, {Action.ADVISE})
@@ -579,10 +645,6 @@ class SupervisionRuntime:
             return None
         from agent.supervision_final_projection import coverage_windows
         windows = list(coverage_windows(self.requirements, self.sources, text))
-        if not windows:
-            # Linked claims remain available to their evidence owner, but a clipped
-            # answer or unauthenticated clause is not a negative-coverage window.
-            return None
         target_root = "final:" + self.last_final
         deadline, revision = self.shared_deadline(), self.revision
         targets = []
@@ -598,16 +660,26 @@ class SupervisionRuntime:
                          data_class="task_text", required_obligations=refs)
             if snapshot is not None:
                 targets.append(target)
+        # Explicit request gaps retain priority over advisory source relations.
+        targets.extend(self.dependencies.final_windows(text, deadline))
         if not targets:
             return None
+        def final_ready():
+            # Consume ready support on the owner thread BEFORE expiry, but do not
+            # close the F20 windows just because a non-continuation result arrived.
+            # All windows retain the single original absolute wait budget.
+            self.dependencies.drain()
+            return (self.revision != revision or self.closed or
+                any(p.target_id in targets and p.action == Action.CONTINUE for p, _ in self.pending))
         with self.ready:
-            self.ready.wait_for(lambda: self.revision != revision or self.closed or
-                any(p.target_id in targets for p, _ in self.pending),
-                timeout=max(0, deadline - self.clock()))
+            self.ready.wait_for(final_ready, timeout=max(0, deadline - self.clock()))
             advisory = None
             for target in targets:
-                proposal = self._take(target, {Action.CONTINUE})
-                if proposal and advisory is None:
+                proposal = self._take(target, {Action.CONTINUE, Action.UPDATE_DEPENDENCIES})
+                if proposal and proposal[0].owner == "dependencies":
+                    result = self.dependencies.consume(proposal, allow_continuation=advisory is None)
+                    advisory = advisory or result
+                elif proposal and advisory is None:
                     advisory = self._apply_advisory(proposal)
                 elif proposal:
                     self._settle(proposal[0], "no_op", "continuation_budget")
@@ -780,4 +852,5 @@ class SupervisionRuntime:
             self.artifacts.clear()
             self.work_maps.clear()
             self.evidence.clear()
+            self.dependencies.clear()
             self.ready.notify_all()
