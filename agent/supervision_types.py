@@ -255,6 +255,7 @@ class Action(str, Enum):
     CLARIFY_DEFAULT = "clarify_default"
     CLARIFY_RETRIEVE = "clarify_retrieve"
     CLARIFY_ASK = "clarify_ask"
+    REUSE_RECEIPT = "reuse_receipt"
 
 
 @dataclass(frozen=True)

@@ -368,7 +368,14 @@ class SupervisionRuntime:
             if not allow_advisory:
                 self._take("", set())  # only settle invalidated/expired proposals
                 return ()
+            efficiency = getattr(self, "efficiency", None)
+            if efficiency is not None:
+                advisory = efficiency.drain()
+                if advisory:
+                    return (advisory,)
             for target in tuple(self.opportunities):
+                if self.opportunities[target]["owner"] in {"efficiency", "efficiency.check"}:
+                    continue
                 proposal = self._take(target, {Action.ADVISE})
                 if proposal:
                     advisory = self._apply_advisory(proposal)

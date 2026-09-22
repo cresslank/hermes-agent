@@ -60,16 +60,23 @@ class SupervisionFacade:
         self._registration = None
 
     def negotiate(self, version=VERSION):
-        return {"version": VERSION, "supported": version == VERSION,
-                "proposal_metadata": METADATA_VERSION,
-                "skill_details": "supervision.skill-details.v1",
-                "view_actions_version": "supervision.view-actions.v1",
-                "view_actions": {"present_material_once": "present_status",
-                                 "retrieve": "clarify_retrieve", "ask_material": "clarify_ask"},
-                "owner_capabilities": self._owner_capabilities() if version == VERSION else [],
-                "owner_deadline": True,
-                "grants": sorted(self._registration.grants) if self._registration else [],
-                "data_policy": sorted(self._registration.data_policy) if self._registration else []}
+        capabilities = {"version": VERSION, "supported": version == VERSION,
+                        "proposal_metadata": METADATA_VERSION,
+                        "skill_details": "supervision.skill-details.v1",
+                        "view_actions_version": "supervision.view-actions.v1",
+                        "view_actions": {"present_material_once": "present_status",
+                                         "retrieve": "clarify_retrieve", "ask_material": "clarify_ask"},
+                        "owner_capabilities": self._owner_capabilities() if version == VERSION else [],
+                        "owner_deadline": True,
+                        "grants": sorted(self._registration.grants) if self._registration and self._registration.active else [],
+                        "data_policy": sorted(self._registration.data_policy) if self._registration and self._registration.active else []}
+        if version == VERSION:
+            # Support comes from the actual native owner, not an enum alias or a
+            # plugin claim. It is NOT authority: register still intersects this
+            # facade's profile policy with the separately requested action grant.
+            from agent.supervision_efficiency import EfficiencyOwner
+            capabilities["receipt_reuse"] = EfficiencyOwner.receipt_reuse_version
+        return capabilities
 
     def _owner_capabilities(self):
         from agent.supervision_owner_protocol import OWNERS, LOCAL_CLASSES

@@ -465,7 +465,7 @@ def record_terminal_result(
 
 def record_verify_run(
     *, root: str | Path, session_id: str | None = None, ok: bool, command: str = "hermes verify",
-    scope: str = "full", output: str = "",
+    scope: str = "full", output: str = "", supervision_check=None,
 ) -> Optional[dict[str, Any]]:
     """Record a completed ``hermes verify`` run as verification evidence.
 
@@ -476,13 +476,71 @@ def record_verify_run(
     if not _ledger_enabled():
         return None
     resolved = str(Path(root).resolve())
-    return _insert_evidence(VerificationEvidence(
+    receipt = _insert_evidence(VerificationEvidence(
         command=command, canonical_command="hermes verify", kind="verify",
         scope=scope if scope in {"full", "targeted"} else "full",
         status="passed" if ok else "failed", exit_code=0 if ok else 1, cwd=resolved,
         root=str((_project_facts(root) or {}).get("root") or resolved),
         session_id=str(session_id or "default"), output_summary=_summarize_output(output),
     ))
+    if supervision_check is not None:
+        from agent.subagent_lifecycle import get_active_subagent_parent
+        from agent.supervision_efficiency import for_agent
+        agent = get_active_subagent_parent()
+        owner = for_agent(agent) if agent is not None else None
+        if owner is not None:
+            owner.record_check(supervision_check, receipt, validated=ok)
+    return receipt
+
+
+def with_current_verification_receipt(receipt, consume):
+    """Bounded optional receipt admission under native and SQLite writer fences.
+
+    Never initialize a DB, wait for its lock, or promote a shell success. A newer
+    result (including a failure), any recorded edit, missing row or busy/unavailable
+    ledger preserves baseline. An immediate transaction also excludes writers on
+    other connections in WAL mode; it makes no data changes. ``consume`` is the
+    synchronous native owner commit, not a plugin callback; it must not perform
+    provider I/O or acquire another owner lock.
+    """
+    if not _ledger_enabled() or not isinstance(receipt, dict) or receipt.get("kind") != "verify":
+        return None
+    if not _DB_LOCK.acquire(blocking=False):
+        return None
+    conn = None
+    try:
+        conn = sqlite3.connect(_db_path().resolve().as_uri() + "?mode=rw", uri=True, timeout=0)
+        conn.row_factory = sqlite3.Row
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute(
+            "SELECT e.*, s.last_edit_at FROM verification_events e JOIN verification_state s "
+            "ON s.session_id=e.session_id AND s.root=e.root AND s.last_event_id=e.id "
+            "WHERE e.id=? AND e.session_id=? AND e.root=?",
+            (receipt.get("id"), receipt.get("session_id"), receipt.get("root")),
+        ).fetchone()
+        if (row is None or row["last_edit_at"] is not None or row["status"] != "passed"
+                or row["kind"] != "verify" or row["exit_code"] != 0):
+            return None
+        native = dict(row)
+        native.pop("last_edit_at")
+        if native != receipt:
+            return None
+        return consume()
+    except (OSError, ValueError, sqlite3.Error):
+        return None
+    finally:
+        if conn is not None:
+            conn.close()
+        _DB_LOCK.release()
+
+
+def propose_verification_reuse(check, *, current):
+    """Optional check-owner boundary; required checks and absent supervisor run normally."""
+    from agent.subagent_lifecycle import get_active_subagent_parent
+    from agent.supervision_efficiency import for_agent
+    agent = get_active_subagent_parent()
+    owner = for_agent(agent) if agent is not None else None
+    return owner.propose_check(check, current=current) if owner is not None else None
 
 
 def _insert_evidence(evidence: VerificationEvidence) -> dict[str, Any]:

@@ -343,6 +343,9 @@ class _Heartbeat:
                 )
                 # A finite/-Q turn has no gateway watchdog behind this; the wait itself must end (#109749).
                 self.stale_threshold_seconds = stale_cycles * _HEARTBEAT_INTERVAL
+                from agent.supervision_efficiency import observe_native
+                observe_native(parent_agent, "heartbeat_stopped", child, dict(last_seen),
+                               threshold=self.stale_threshold_seconds)
                 self.settled.set()
                 return False
             if child_tool:

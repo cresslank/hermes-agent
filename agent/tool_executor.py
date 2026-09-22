@@ -715,6 +715,9 @@ def _dispatch_authorized_once(
     from agent.supervision_policy import runtime_for_agent
     supervision = runtime_for_agent(agent)
     if supervision is not None:
+        if ref.name == "read_file":
+            from agent.supervision_efficiency import observe_native
+            observe_native(agent, "read_proposed", ref.args, ref.call_id)
         advisory = supervision.prepare_action(ref.name, ref.args, ref.call_id)
         if advisory:
             _advance_start_order()

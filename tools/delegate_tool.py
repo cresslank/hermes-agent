@@ -394,6 +394,8 @@ def _build_children(
             )
             from agent.owned_delegation import register_launch
             register_launch(parent_agent, child, t.get("supervision"), goal=t["goal"])
+            from agent.supervision_efficiency import observe_native
+            observe_native(parent_agent, "delegation_built", child, goal=t["goal"])
         except Exception as exc:
             # No scheduling occurred. Close all already-built siblings and retain
             # their durable terminal control records rather than orphaning them.
