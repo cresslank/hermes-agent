@@ -242,6 +242,7 @@ class Action(str, Enum):
     ADVISE = "advise"
     CONTINUE = "continue"
     UPDATE_DEPENDENCIES = "update_dependencies"
+    CONTEST_CLAIM = "contest_dependent_claim"
     RANK_CANDIDATES = "rank_candidates"
     SELECT_WINDOWS = "select_windows"
     EVALUATE_RELATION = "evaluate_relation"

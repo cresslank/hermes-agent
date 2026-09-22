@@ -351,6 +351,8 @@ class SupervisionRuntime:
             facts = action_conflict_facts(self, name, args, proposal.target_id, targets)
             if facts is None or facts["link"]["id"] != link_id:
                 return "stale", "action_link_changed"
+        if proposal.owner == "claim_uses" and not self.dependencies.claim_uses.validate(proposal):
+            return "rejected", "invalid_dependency_relation"
         if proposal.owner == "planning" and not self.dependencies.planning.validate(proposal):
             return "rejected", "invalid_planning_proposal"
         if proposal.owner == "dependencies" and not self.dependencies.validate(proposal):

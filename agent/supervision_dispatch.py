@@ -7,6 +7,7 @@ consume immediately before transport I/O, with no await in between. No lock esca
 this module and no inference result, retry, or durable external-effect claim lives here.
 """
 from dataclasses import replace
+from contextlib import nullcontext
 import math
 import uuid
 
@@ -49,7 +50,11 @@ def consume(facade, request):
         opportunity = runtime.opportunities.get(request["target_id"])
         if opportunity is None:
             return False
-        with registration.fence, consumption_fence(opportunity):
+        claim_fence = (runtime.dependencies.claim_uses.dispatch_fence(request["target_id"], registration)
+            if opportunity["owner"] == "claim_uses" else nullcontext(True))
+        with registration.fence, consumption_fence(opportunity), claim_fence as claim_current:
+            if not claim_current:
+                return False
             entry = opportunity.get("dispatch", {}).get(registration.generation)
             if entry is None:
                 return False

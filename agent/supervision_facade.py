@@ -100,6 +100,9 @@ class SupervisionFacade:
             from agent.supervision_dependencies import RELATION_VERSION, RELATION_ACTIONS
             capabilities["dependency_relations_version"] = RELATION_VERSION
             capabilities["dependency_relations"] = dict(RELATION_ACTIONS)
+            from agent.supervision_claim_uses import VERSION as CLAIM_VERSION, ACTIONS as CLAIM_ACTIONS
+            capabilities["claim_contest_version"] = CLAIM_VERSION
+            capabilities["claim_contest_actions"] = dict(CLAIM_ACTIONS)
             capabilities["native_verification"] = "hermes.verify-check.v1"
             from agent.supervision_literal_sources import VERSION as LITERAL_SOURCES_VERSION
             capabilities["literal_sources"] = LITERAL_SOURCES_VERSION
@@ -122,7 +125,11 @@ class SupervisionFacade:
     def publish_literal_sources(self, *, version, invocation, source_refs):
         from agent.supervision_literal_sources import VERSION
         registration = getattr(self, "_literal_source_registration", None)
-        return registration.publish(invocation, source_refs) if version == VERSION and registration else ()
+        refs = registration.publish(invocation, source_refs) if version == VERSION and registration else ()
+        runtime = self._active_runtime()
+        if refs and runtime is not None:
+            runtime.dependencies.claim_uses.published(registration, refs)
+        return refs
 
     def cancel_literal_sources(self, *, version, invocation):
         from agent.supervision_literal_sources import VERSION, LiteralSourceInvocationV1

@@ -68,7 +68,7 @@ class PlanningGraph:
         if self.loaded_work != work:
             self.clear()
             for row in records.load(self.rt):
-                if row["kind"] not in {"planning", "research_pass", "gap_obligation"}:
+                if row["kind"] not in {"planning", "research_pass", "gap_obligation", "claim_delivery"}:
                     continue
                 if row["declaration"]["type"] == "delegation_candidate":
                     d = row["declaration"]
@@ -136,7 +136,9 @@ class PlanningGraph:
         for declaration in declarations:
             try:
                 kind = declaration["type"]
-                if kind == "research_pass_close":
+                if kind == "claim_use":
+                    self.owner.claim_uses.declare(path, text, declaration)
+                elif kind == "research_pass_close":
                     self._close(path, text, declaration)
                 elif kind == "withdraw_expansion":
                     node = self.nodes.get(declaration["expansion_id"])

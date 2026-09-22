@@ -47,6 +47,8 @@ class DependencyOwner:
         self.contested_claims = set()
         from agent.supervision_planning import PlanningGraph
         self.planning = PlanningGraph(self)
+        from agent.supervision_claim_uses import ClaimUses
+        self.claim_uses = ClaimUses(self)
 
     def clear(self):
         self.edges.clear()
@@ -56,6 +58,7 @@ class DependencyOwner:
         self.revocations.clear()
         self.contested_claims.clear()
         self.planning.clear()
+        self.claim_uses.clear()
 
     def invalidate_source(self, path, new_pin):
         # Immediate exact version invalidation, independent of semantic availability.
@@ -88,7 +91,10 @@ class DependencyOwner:
             edge = self.edges.get(edge_id)
             if rt.closed:
                 return None
-            if edge is None or edge.state != "supported" or edge.claim.id in self.contested_claims:
+            self.planning._load()
+            contested = self.contested_claims | {n["claim_id"] for n in self.planning.nodes.values()
+                if n["kind"] == "claim_delivery" and n["status"] == "contested"}
+            if edge is None or edge.state != "supported" or edge.claim.id in contested:
                 return None
             if not any(r.generation == edge.registration and r.active for r in rt._registrations()):
                 return None

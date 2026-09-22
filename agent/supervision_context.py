@@ -270,6 +270,7 @@ def parse_planning_proposals(text, *, artifact_ref, designated_refs):
         "research_pass_close": {"pass_id", "member_dispositions"},
         "optional_expansion": {"local_id", "gap_refs", "completion_criteria_refs", "source_method_ref", "operation", "consumer_refs", "effect_policy_id", "obligation_request"},
         "withdraw_expansion": {"expansion_id"},
+        "claim_use": {"local_id", "claim_ref", "source_ref", "use", "requirement_refs"},
     }
     def finite_float(raw):
         import math

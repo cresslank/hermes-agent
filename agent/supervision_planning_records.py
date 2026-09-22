@@ -17,7 +17,7 @@ KINDS = frozenset({"planning", "research_pass", "gap_obligation", "claim_deliver
 TERMINAL = frozenset({"superseded", "withdrawn_by_parent", "disposition_committed", "stale", "issued", "invalid"})
 
 
-def save(runtime, rows):
+def save(runtime, rows, *, validate=None, predecessors=None):
     """Atomically replace the named graph records. Fail closed on storage/capacity."""
     runtime._assert_owner(tool_worker=True)
     try:
@@ -45,6 +45,8 @@ def save(runtime, rows):
         rev = runtime.revision
         key = (rev.profile, rev.lineage, rev.work_id)
         with writer(runtime) as (conn, session):
+            if validate is not None and not validate():
+                return False
             _work(conn, runtime, session)
             existing = {r[0] for r in conn.execute("SELECT record_id FROM supervision_owner_records WHERE profile=? AND lineage=? AND work_id=?", key)}
             novel = {r["id"] for r, _ in encoded} - existing
@@ -54,6 +56,8 @@ def save(runtime, rows):
             for row, body in encoded:
                 old = conn.execute("SELECT kind,session_id,revision,status,body_json FROM supervision_owner_records WHERE profile=? AND lineage=? AND work_id=? AND record_id=?",
                                    (*key, row["id"])).fetchone()
+                if predecessors is not None and (old is None or old[2:4] != predecessors.get(row["id"])):
+                    raise sqlite3.IntegrityError("owner_record_predecessor_changed")
                 if old:
                     if old == (row["kind"], session, row["revision"], row["status"], body):
                         continue  # exact acknowledged write replay only
