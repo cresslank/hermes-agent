@@ -637,7 +637,7 @@ class EfficiencyOwner:
                 self.checks.popitem(last=False)
         return True
 
-    def propose_check(self, pending, *, current):
+    def propose_check(self, pending, *, current, exact=False):
         """A check-owner API returning a bound prior receipt, never verification success.
 
         Only plugin-owned OPTIONAL checks may reuse. Main-agent checks receive an
@@ -672,6 +672,17 @@ class EfficiencyOwner:
 
         if not owner_current() or not with_current_verification_receipt(receipt, lambda: True):
             return None
+        # Only an identical owner contract is deterministic; matching command
+        # names or partial fingerprints never establish this branch.
+        if exact and pending.plugin_owned and pending.text == prior.text and pending.claim_ids == prior.claim_ids:
+            from agent.supervision_facade import registrations_for_scope
+            def consume_exact():
+                if (owner_current() and not self.runtime.closed
+                        and not getattr(self.runtime.agent(), "_interrupt_requested", False)
+                        and any("reuse_receipt" in r.grants for r in registrations_for_scope(self.runtime.revision.profile))):
+                    return dict(receipt)
+                return None
+            return with_current_verification_receipt(receipt, consume_exact)
         receipt_id = "verification:" + str(receipt["id"])
         facts = {"pending": pending.facts(), "prior": {**prior.facts(), "receipt_id": receipt_id,
             "source_ref": receipt_id, "status": "succeeded", "validated": True}, "exact_reusable": False,

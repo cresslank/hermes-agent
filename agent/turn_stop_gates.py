@@ -65,12 +65,20 @@ def _pre_verify_nudge(agent, final_response, attempt: int) -> Optional[str]:
                 from agent.coding_context import is_coding_context
                 coding = bool(is_coding_context(platform=getattr(agent, "platform", "") or ""))
                 agent._resolved_is_coding = coding
-            return get_pre_verify_continue_message(
+            result = get_pre_verify_continue_message(
                 session_id=getattr(agent, "session_id", None) or "",
                 platform=getattr(agent, "platform", "") or "",
                 model=getattr(agent, "model", "") or "", coding=coding, attempt=attempt,
                 final_response=final_response, changed_paths=_edited,
             )
+            # Hook workers only queue requests. Execution and receipt consumption
+            # happen here on the normal verification owner, not on plugin threads.
+            from agent.verify.native_checks import drain_configured_checks
+            try:
+                drain_configured_checks(agent)
+            except Exception:
+                logger.debug("optional native verification failed", exc_info=True)
+            return result
     except Exception:
         logger.debug("pre_verify hook check failed", exc_info=True)
     return None

@@ -92,6 +92,7 @@ class SupervisionFacade:
             from agent.supervision_dependencies import RELATION_VERSION, RELATION_ACTIONS
             capabilities["dependency_relations_version"] = RELATION_VERSION
             capabilities["dependency_relations"] = dict(RELATION_ACTIONS)
+            capabilities["native_verification"] = "hermes.verify-check.v1"
         return capabilities
 
     def _owner_capabilities(self):
@@ -232,6 +233,11 @@ class SupervisionFacade:
         """
         from agent.supervision_optional_reads import read_optional_context
         return read_optional_context(self, request)
+
+    def request_verification_checks(self, *, session_id, changed_paths):
+        """Queue a bounded native verification request; hook workers never execute it."""
+        from agent.verify.native_checks import request_configured_checks
+        return request_configured_checks(self, session_id=session_id, changed_paths=changed_paths)
 
     def current_revision(self):
         runtime = self._active_runtime()

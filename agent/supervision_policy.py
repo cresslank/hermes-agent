@@ -90,7 +90,7 @@ def runtime_for_revision(revision):
 class SupervisionRuntime:
     """One agent's semantic work. Only host execution owners may call effect methods.
 
-    submit() is the sole worker-safe mutation; it only enqueues. Authenticated ingress
+    Worker-safe mutations only enqueue proposals or bounded native owner requests. Authenticated ingress
     invalidates revisions immediately under the same fence used by effect settlement.
     """
     def __init__(self, agent, profile, lineage, *, clock=time.monotonic):
@@ -113,6 +113,7 @@ class SupervisionRuntime:
         self.pending_artifacts = []
         self.pending_artifact_bytes = 0
         self.pending = deque(maxlen=32)
+        self._native_verification_requests = {}
         self.receipts = OrderedDict()
         self.owner_selections = {}
         self.history_visibility = None
@@ -829,6 +830,7 @@ class SupervisionRuntime:
             self.closed = True
             self._abandon_owner_selections()
             self.history_visibility = None
+            self._native_verification_requests.clear()
             self.ready.notify_all()
         from agent.supervision_receipts import record_work
         record_work(self)
@@ -841,6 +843,7 @@ class SupervisionRuntime:
         close_views(self)
         with self.ready:
             self.closed = True
+            self._native_verification_requests.clear()
             self.revision = replace(self.revision, run_generation=self.revision.run_generation + 1)
             for proposal, _ in self.pending:
                 self._settle(proposal, "rejected", "revoked")

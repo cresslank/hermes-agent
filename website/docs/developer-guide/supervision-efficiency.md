@@ -58,12 +58,12 @@ The current ordinary-path inventory is deliberately incomplete:
 | F04 | Public `SupervisionFacade.read_optional_context` executes profile-authorized supplemental reads and retains exact original bytes | Optional duplicate suppression is implemented for this narrow owner. Main `read_file` calls still have no ordinary independence supplier and are never suppressed. |
 | F05 | Constructed, owned child before scheduling | No ordinary caller of `admit_delegation`; planner acceptance, independence, overhead and parallelism remain unknown. |
 | F06 / F11 | Actual post-call failure | No ordinary caller of `admit_attempt_policy` or failure-route registration; unclassified failures keep native handling. |
-| F07 | Optional explicit binding in `record_verify_run`, plus `propose_verification_reuse` | No ordinary verification runner supplies `supervision_check` or calls reuse. No automatic fingerprint/claim derivation; the negotiated plugin codec is integrated, but ordinary contract supply remains open. |
+| F07 | `run_verify` supplies closed `nativeChecks`; an installed supervisor requests them from the ordinary `pre_verify` hook and the host drains on the execution owner | JSON-object/key checks only. Arbitrary shell recipes have no complete scope contract and remain nonreusable. In-process main runners consume advisories but always execute; detached CLI processes have no parent runtime binding. |
 | F08 | Explicit evidence-owner API | No ordinary caller commits complete `ResearchPass` ledgers or proposes an optional expansion. Raw retrieval yields are not classified into accepted evidence. |
 | F10 | Native frozen-child heartbeat branch | Requires an existing supervision runtime and owned-child binding; a real local status route is supplied when available. It cannot diagnose arbitrary unowned operations. |
 
-Except for the public optional-read operation below, the contract-supplying
-calls for F04/F05/F06/F07/F08/F11 still occur in qualification tests, not in
+Except for the public optional-read operation and the native verification runner below,
+the contract-supplying calls for F04/F05/F06/F08/F11 still occur in qualification tests, not in
 ordinary planner/retrieval integrations. The hooks do
 **not** infer absent independence, acceptance, environment identity or complete
 yield ledgers. These are bounded owner implementations, not full ordinary-path
@@ -138,14 +138,129 @@ measurement, **not** a latency, token-cost or production-quality claim.
   registered retry/poll policy. Route metadata must come from its real owner,
   not a guessed false flag. Failure and loop opportunities now share a host-owned
   intervention ledger while retaining distinct opportunity targets.
-- F07: the existing `hermes verify` CLI can execute arbitrary bootstrap/build/test
-  recipes. There is no optional/independence declaration or complete input,
-  dependency and environment scope from which to safely derive reusable checks.
-  Command spelling or workspace status cannot fill those fields. Existing
-  receipt-reuse codec and SQLite receipt fence are unchanged.
+- F07: arbitrary bootstrap/build/test recipes still lack a complete input, dependency
+  and environment scope. Command spelling or workspace status cannot fill those
+  fields. The closed native-check contract below supplies a narrow ordinary path,
+  not a certification of arbitrary test commands or terminal backends.
 - F08: raw retrieval results and ranking are not accepted/rejected evidence
   decisions. No ordinary research owner currently supplies that pass ledger and
   an explicit optional expansion. No stop-execution effect is claimed.
+
+## Ordinary native verification checks (F07)
+
+`hermes verify` recipes may add an owner-local `nativeChecks` list. Version
+`hermes.verify-check.v1` deliberately supports only a **bounded UTF-8 JSON object
+with specified literal top-level keys** (Python's JSON decoder semantics).
+It has no shell, project imports, schema refs, custom hooks, environment reads,
+network, clock, or external mutable service input. Up to eight checks, three keys
+per check and 64 KiB per regular input file are supported. Secret paths and
+symlink redirection are refused. Unknown check shape/version fails the native
+check instead of silently making the recipe green.
+
+Example inside `.hermes/environment.json`'s `recipe` object:
+
+```json
+{
+  "name": "Metadata checks",
+  "nativeChecks": [{
+    "version": "hermes.verify-check.v1",
+    "kind": "json_object_keys",
+    "path": "metadata.json",
+    "keys": ["name", "version"],
+    "description": "Confirm the metadata object has name and version keys",
+    "required": false,
+    "external_write_readback": false,
+    "acceptance_test": false,
+    "independent_review": false,
+    "time_sensitive": false,
+    "explicit_user_check": false
+  }]
+}
+```
+
+Those booleans are proposed scope, **not permission**. Main `hermes verify`
+execution always runs every selected native check and every original shell
+command, regardless of repeated descriptions. Missing/non-boolean protection
+fields leave a runnable native check nonreusable. True protection flags always
+retain execution. Shell commands never acquire fingerprints from their names.
+
+Automatic **additional supplemental** checks require separate exact profile
+approval, under the registered supervisor's host policy entry:
+
+```yaml
+supervision:
+  enabled: true
+  plugins:
+    jev-supervisor:
+      optional_verification:
+        version: hermes.verify-check.v1
+        purpose: supplemental_confirmation
+        root: /absolute/project
+        recipe_sha256: <SHA-256 of the exact environment.json bytes>
+```
+
+Receipt production/reuse also requires the existing verification ledger to be
+enabled (`agent.verify_on_stop: true`); otherwise checks still execute and no
+receipt is claimed.
+
+This policy does not authorize arbitrary commands. The hook runner selects only
+`nativeChecks`; it cannot execute bootstrap/build/test/start. Each input path
+must also resolve through a current, actually committed work-map edge. The
+work-map-v1 grammar is unchanged. A changed manifest needs a new explicit policy
+pin; a recipe cannot self-authorize optionality or waive main/user work.
+
+The real ordinary call chain is:
+
+1. `turn_stop_gates._pre_verify_nudge` invokes the normal `pre_verify` hooks.
+2. The installed plugin, only after negotiating `native_verification`, queues a
+   bounded request with `SupervisionFacade.request_verification_checks`.
+3. The host drains after hook completion on the execution-owner thread. Plugin
+   callback workers may not execute checks or consume receipts.
+4. `run_verify(..., native_only=True)` calls the same native checker used by the
+   CLI. It reads the actual bytes, derives assertion IDs, fingerprints scope,
+   input, parser/interpreter dependencies and environment, executes the check,
+   and binds the successful **original** verification-ledger row.
+5. Exact optional repeat: deterministic receipt admission, no semantic question.
+   Nonidentical descriptions on identical qualified scope: real F07 codec,
+   `reuse_receipt` grant, common `consume_owner_action` settlement, original row.
+   Unknown/stale/error/expired decisions run the baseline check if permission
+   still exists; revoked permission stops only the optional supplemental work.
+
+Fingerprints bind the exact input bytes and path; the actual key assertion set;
+full runtime revision, profile/lineage/work and active registration generations;
+installed evaluator/JSON parser/interpreter bytes; Python implementation,
+version, byte order, integer-string limit and recursion limit. The closed
+operation has no ambient environment-variable dependencies. Unavailable
+fingerprints remain nonreusable. This assumes trusted in-process Python code
+and ordinary local filesystem currentness, not hostile interpreter-memory or
+privileged filesystem tampering. No receipt is reused across process restart.
+Hashing dependencies may cost more than these small checks; no latency/cost
+improvement is claimed.
+
+Supplemental rows stay in the **existing** verification evidence DB using
+`scope="supplemental"`; they never advance workspace-green state or clear its
+mutation marker. Reuse is fenced under the existing nonwaiting SQLite writer
+reservation and requires exact original row identity, no later verification,
+no later recorded edit, and fresh owner pins. Existing workspace receipt pointers
+are retained during pruning. There is no new DB, DDL, or competing supervision
+settlement implementation.
+
+Main in-process `run_verify` calls may consume an advisory into their normal
+result (`checks[].advisory`, also rendered by the CLI), but still execute the
+check. A **separately spawned** `hermes verify` has no active parent-agent runtime:
+it executes normally, records evidence, and does not issue a semantic hint.
+The parent interpreter/environment must not be presented as the child's complete
+fingerprint. Covering that separate-process pre-action case needs an authenticated,
+versioned runner handoff carrying actual child environment/dependency pins and
+live owner scope, or an explicitly authorized in-process native runner route.
+A shell command name alone is not that contract.
+
+`test_native_verification_supplier.py` enters through authentic input, real todo
+and committed file operations, the normal stop-gate hook, installed plugin entry
+point/full registry/strict MockTransport, and the real CLI handler. Tests count
+actual evaluator calls and compare complete original receipts, including protected
+work, missing grants/links/policy, failed prior results, changed/unknown pins,
+revocation, expiry, transport error, profile switching and mandatory shell work.
 
 ## Exact plugin codec join for receipt reuse
 
@@ -203,5 +318,6 @@ checks, forged receipts and refusal to treat `advise` as reuse. They are explici
 receipt round-trip is a required positive test, asserting negotiated support and
 return of the original native receipt without waiving mandatory checks. The
 standalone installed-entry suite also covers missing grants and older hosts.
-Ordinary fingerprint/claim producers remain a distinct integration requirement;
-synthetic judgments do not measure remote accuracy, savings or activation.
+The closed native runner supplies ordinary fingerprints/claims as described above;
+other verification classes remain unsupported. Synthetic judgments do not measure
+remote accuracy, savings or activation.
