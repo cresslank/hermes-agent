@@ -94,7 +94,45 @@ class SupervisionFacade:
             capabilities["dependency_relations_version"] = RELATION_VERSION
             capabilities["dependency_relations"] = dict(RELATION_ACTIONS)
             capabilities["native_verification"] = "hermes.verify-check.v1"
+            from agent.supervision_literal_sources import VERSION as LITERAL_SOURCES_VERSION
+            capabilities["literal_sources"] = LITERAL_SOURCES_VERSION
+            registration = getattr(self, "_literal_source_registration", None)
+            capabilities["literal_source_owner"] = bool(registration and registration.current(self._active_runtime()))
         return capabilities
+
+    def register_literal_source_owner(self, *, version, engine, provider):
+        from agent.supervision_literal_sources import register
+        return register(self, version=version, engine=engine, provider=provider)
+
+    def begin_literal_sources(self, *, version, engine):
+        from agent.supervision_literal_sources import VERSION
+        registration = getattr(self, "_literal_source_registration", None)
+        try:
+            return registration.begin(engine) if version == VERSION and registration else None
+        except RuntimeError:  # a non-owner thread has no publication authority
+            return None
+
+    def publish_literal_sources(self, *, version, invocation, source_refs):
+        from agent.supervision_literal_sources import VERSION
+        registration = getattr(self, "_literal_source_registration", None)
+        return registration.publish(invocation, source_refs) if version == VERSION and registration else ()
+
+    def cancel_literal_sources(self, *, version, invocation):
+        from agent.supervision_literal_sources import VERSION, LiteralSourceInvocationV1
+        registration = getattr(self, "_literal_source_registration", None)
+        if version != VERSION or registration is None or not isinstance(invocation, LiteralSourceInvocationV1):
+            return
+        with registration.lock:
+            if registration.pending.get(invocation.id) is invocation:
+                del registration.pending[invocation.id]
+                registration.provider.release_literal_sources(invocation.id)
+
+    def literal_source(self, *, version, ref):
+        from agent.supervision_literal_sources import VERSION, lookup_literal_source
+        runtime = self._active_runtime()
+        if version != VERSION or runtime is None:
+            return None
+        return lookup_literal_source(runtime, ref, self._registration)
 
     def _owner_capabilities(self):
         from agent.supervision_owner_protocol import OWNERS, LOCAL_CLASSES
@@ -164,6 +202,9 @@ class SupervisionFacade:
                 "data_policy": sorted(reg.data_policy), "active": bool(grants)}
 
     def unregister(self):
+        source_registration = getattr(self, "_literal_source_registration", None)
+        if source_registration is not None:
+            source_registration.close()
         if self._registration:
             self._registration.close()
 
