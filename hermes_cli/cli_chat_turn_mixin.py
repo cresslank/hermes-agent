@@ -6,6 +6,8 @@ inside each method — importing ``cli`` at module load time would be a cycle.
 
 from __future__ import annotations
 
+from agent.native_emission import observe_agent_output
+
 import logging
 import os
 import queue
@@ -667,6 +669,7 @@ class CLIChatTurnMixin:
                     display_reasoning = reasoning.strip()
                 _cprint(f"\n{r_top}\n{_DIM}{display_reasoning}{_RST}\n{r_bot}")
 
+    @observe_agent_output
     def _chat_print_response_panel(self, turn, response):
         """Response box (close TTS-drawn box / post-stream transform / Rich Panel), then billing CTA."""
         from cli import (

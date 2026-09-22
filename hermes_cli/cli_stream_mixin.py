@@ -7,6 +7,8 @@ never imports ``cli`` at module load time (import cycle).
 
 from __future__ import annotations
 
+from agent.native_emission import observe_agent_output
+
 import json
 import re
 import shutil
@@ -391,6 +393,7 @@ class CLIStreamMixin:
                 self._stream_prefilt = self._stream_prefilt[-_MAX_CLOSE_TAG_LEN:]
             return
 
+    @observe_agent_output
     def _emit_stream_line(self, printed_line: str) -> None:
         """Print one response line with the skin's true-color text escape (if any)."""
         from cli import _RST, _STREAM_PAD, _cprint

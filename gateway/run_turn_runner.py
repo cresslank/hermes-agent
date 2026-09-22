@@ -950,6 +950,7 @@ class TurnRunner:
                         ),
                         on_before_finalize=pause_typing_before_finalize,
                         initial_reply_to_id=ctx.event_message_id, run_still_current=ctx._run_still_current,
+                        emission_agent=lambda: ctx.agent_holder[0] if ctx.agent_holder else None,
                     )
                     ctx.stream_consumer_holder[0] = stream_consumer
                     # #105341: a consumer created only for interim commentary (text streaming off)

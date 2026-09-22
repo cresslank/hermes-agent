@@ -655,7 +655,9 @@ def _emit(event: str, sid: str, payload: dict | None = None) -> bool:
     from agent.notification_presentation import event_presentation_muted
     if event_presentation_muted(event, sid):
         return False
-    return write_json(_event_frame(event, sid, payload))
+    from agent.native_emission import for_agent
+    with for_agent((_sessions.get(sid) or {}).get("agent")):
+        return write_json(_event_frame(event, sid, payload))
 
 
 from tui_gateway import server_requests as _server_requests  # noqa: E402

@@ -4,6 +4,8 @@ ack tracking (official replyStreamNonBlocking semantics), keep-alive heartbeat, 
 from __future__ import annotations
 
 import asyncio
+from contextvars import ContextVar
+
 import logging
 import time
 import uuid
@@ -11,6 +13,7 @@ from dataclasses import dataclass
 from typing import Any, Dict, Optional
 
 logger = logging.getLogger("plugins.platforms.wecom.adapter")
+_emission_chat: ContextVar[str] = ContextVar("wecom_emission_chat", default="")
 
 APP_CMD_RESPONSE = "aibot_respond_msg"
 
@@ -247,7 +250,22 @@ class WeComStreamMixin:
         body: Dict[str, Any] = {"msgtype": "stream", "stream": {"id": stream_id, "finish": bool(finish), "content": truncated}}
         if not finish:
             return await self._send_reply_queued(reply_req_id, body, is_final=False, skip_if_pending=True)
+        from agent.native_emission import prepare, transport_generation
+        ws = getattr(self, "_ws", None)
+        pending = prepare(truncated, surface="gateway.wecom", generation=transport_generation(ws),
+            target=(("chat_id", _emission_chat.get()), ("reply_req_id", reply_req_id), ("stream_id", stream_id)),
+            operation="stream.final", frame_id=stream_id)
+        prior_queue = self._reply_queues.get(self._require_reply_req_id(reply_req_id)) if pending else None
+        prior_frame = prior_queue.pending_ack if prior_queue is not None else None
         response = await self._send_reply_queued(reply_req_id, body, is_final=True, skip_if_pending=False)
+        # The protocol reuses req_id. After a preview drain timeout its late ACK
+        # can resolve the final's waiter; only a successfully drained predecessor
+        # makes that correlation unambiguous. Do not alter native send/retry policy.
+        prior_drained = (prior_frame is None or (prior_frame.future.done()
+                         and not prior_frame.future.cancelled() and prior_frame.future.exception() is None))
+        if (pending and prior_drained and self._ws is ws and not ws.closed and response.get("errcode") == 0
+                and not response.get("ack_pending") and not response.get("skipped")):
+            pending.succeeded()
         errcode = response.get("errcode", 0)
         if errcode in (STREAM_EXPIRED_ERRCODE, STREAM_REQUEST_EXPIRED_ERRCODE):
             raise WeComStreamExpiredError(errcode=errcode, errmsg=str(response.get("errmsg") or ""))
@@ -313,7 +331,11 @@ class WeComStreamMixin:
         self._cancel_keepalive(turn)
         # A final frame identical to the last intermediate is silently dropped — differ via ZWSP.
         final_text = text + "\u200b" if text and text == turn.last_sent_content else text
-        await self._send_stream_reply(turn.req_id, turn.stream_id, final_text, finish=True)
+        token = _emission_chat.set(chat)
+        try:
+            await self._send_stream_reply(turn.req_id, turn.stream_id, final_text, finish=True)
+        finally:
+            _emission_chat.reset(token)
         turn.finalized = True
         self._stream_turns.pop(f"{chat}:{turn_id or turn.req_id}", None)
         return True

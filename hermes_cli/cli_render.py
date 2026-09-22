@@ -499,13 +499,13 @@ def _record_output_history(text: str) -> None:
 
 def _pt_print_ansi(text: str) -> None:
     """``_pt_print(ANSI(text))``, falling back to ``print`` when stdout is not a real console."""
-    from cli import _PT_ANSI, _pt_print
+    from hermes_cli.cli_emission import print_ansi, print_fallback
     try:
-        _pt_print(_PT_ANSI(text))
+        print_ansi(text)
     except Exception:
         # NoConsoleScreenBufferError (Windows) / OSError when stdout is e.g. a worker log file.
         with suppress(Exception):
-            print(text)
+            print_fallback(text)
 
 
 def _cprint(text: str):
@@ -514,13 +514,14 @@ def _cprint(text: str):
     From a background thread while an Application runs, a direct print races the input
     redraw and gets buried, so those go through ``run_in_terminal`` via ``call_soon_threadsafe``.
     """
-    from cli import _PT_ANSI, _pt_print, _pt_print_ansi, _record_output_history
+    from cli import _pt_print_ansi, _record_output_history
     _record_output_history(text)
+    from hermes_cli.cli_emission import print_ansi
 
     try:
         from prompt_toolkit.application import get_app_or_none, run_in_terminal
     except Exception:
-        _pt_print(_PT_ANSI(text))
+        print_ansi(text)
         return
 
     try:
@@ -547,7 +548,7 @@ def _cprint(text: str):
     except Exception:
         current_loop = None
     if loop is None or (current_loop is loop and loop.is_running()):
-        _pt_print(_PT_ANSI(text))
+        print_ansi(text)
         return
 
     def _schedule():
@@ -556,7 +557,7 @@ def _cprint(text: str):
         # Never fall back to a bare print on error: the sync path already printed.
         with suppress(Exception):
             import inspect as _inspect
-            coro = run_in_terminal(lambda: _pt_print(_PT_ANSI(text)))
+            coro = run_in_terminal(lambda: print_ansi(text))
             if coro is not None and (_inspect.isawaitable(coro) or _inspect.iscoroutine(coro)):
                 _asyncio.ensure_future(coro)
 

@@ -49,7 +49,13 @@ class ChatSendQueueMixin:
         queue = queues[key]
         logger.debug("[%s] Enqueuing send for chat %s (lane=%s, qsize=%d)", self.name, key, lane, queue.qsize())
         future = asyncio.get_running_loop().create_future()
-        await queue.put((coro_factory, future))
+        from agent.native_emission import capture_context, capture_guards, restore_context, guard_emissions
+        scope, guards = capture_context(), capture_guards()
+        original_factory = coro_factory
+        async def scoped_factory():
+            with restore_context(scope, guards=guards), guard_emissions(lambda: not future.cancelled()):
+                return await original_factory()
+        await queue.put((scoped_factory, future))
         return await future
 
     async def _send_worker(self, chat_key: str, is_control: bool) -> None:
