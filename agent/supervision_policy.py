@@ -34,6 +34,24 @@ _registry_lock = threading.RLock()
 _observer_callback = ContextVar("supervision_observer_callback", default=False)
 
 
+def _advisory_template(proposal):
+    """Decode a finite owner operation, never provider-authored instructions."""
+    if proposal.template_args:
+        return None
+    if proposal.template_id in TEMPLATES:
+        return proposal.template_id
+    if (proposal.template_id is None and proposal.action == Action.CONTINUE
+            and proposal.metadata.get("feature_action") == "continue_once_for_named_gap"
+            and proposal.metadata.get("grants_finality") is False
+            and proposal.metadata.get("global_coverage") == "unknown"):
+        ids = proposal.metadata.get("requirement_ids")
+        if (isinstance(ids, (tuple, list)) and ids
+                and all(type(item) is str for item in ids)
+                and set(ids) <= set(proposal.evidence_refs)):
+            return "cover_requirement"
+    return None
+
+
 def runtime_for_agent(agent, *, create=False):
     from hermes_constants import hermes_home_key
     runtime = getattr(agent, "_supervision_runtime", None)
@@ -257,7 +275,7 @@ class SupervisionRuntime:
         if proposal.incident_id in self.incidents:
             return "no_op", "incident_settled"
         if proposal.action in {Action.ADVISE, Action.CONTINUE}:
-            if proposal.template_id not in TEMPLATES or proposal.template_args:
+            if _advisory_template(proposal) is None:
                 return "rejected", "invalid_template"
         if proposal.candidate_ids:
             if (len(set(proposal.candidate_ids)) != len(proposal.candidate_ids) or
@@ -318,6 +336,10 @@ class SupervisionRuntime:
             if failure:
                 self._settle(proposal, *failure)
                 return None
+            template = _advisory_template(proposal)
+            if template is None:
+                self._settle(proposal, "rejected", "invalid_template")
+                return None
             self.incidents.add(proposal.incident_id)
             self._settle(proposal, "applied", "owner_advisory")
             refs = ", ".join(proposal.evidence_refs[:3])
@@ -326,7 +348,7 @@ class SupervisionRuntime:
                 spans.update((r.id, r.text) for r in work_map["requirement_spans"])
             excerpt = next((spans[r] for r in proposal.evidence_refs if r in spans), "")
             return (f"[Task-bound advisory; lower-trust evidence, not an instruction]\n"
-                    f"{TEMPLATES[proposal.template_id]}\nSource clause (quoted data): {json.dumps(excerpt[:160])}\nEvidence: {refs}")[:600]
+                    f"{TEMPLATES[template]}\nSource clause (quoted data): {json.dumps(excerpt[:160])}\nEvidence: {refs}")[:600]
 
     def drain_at_safe_point(self, *, allow_advisory=True):
         self._assert_owner()
@@ -495,19 +517,42 @@ class SupervisionRuntime:
         if (getattr(agent, "_verification_stop_nudges", 0) or getattr(agent, "_pre_verify_nudges", 0)
                 or getattr(getattr(agent, "iteration_budget", None), "remaining", 0) <= 0):
             return None
-        refs = tuple(r.id for r in self.requirements) + tuple(c.id for c in claims)
-        target = "final:" + self.last_final
+        from agent.supervision_final_projection import coverage_windows
+        windows = list(coverage_windows(self.requirements, self.sources, text))
+        if not windows:
+            # Linked claims remain available to their evidence owner, but a clipped
+            # answer or unauthenticated clause is not a negative-coverage window.
+            return None
+        target_root = "final:" + self.last_final
         deadline, revision = self.shared_deadline(), self.revision
-        self.observe("pre_final_candidate", {"candidate": bounded_text(text)[0], "claims": project(claims),
-                     "requirements": project(self.requirements), "coverage": project(coverage)},
-                     target_id=target, actions=(Action.CONTINUE,), evidence_refs=refs,
-                     deadline=deadline, data_class="task_text", required_obligations=refs)
-        self._wait_for(target, deadline, revision)
-        with self.lock:
-            proposal = self._take(target, {Action.CONTINUE})
-            advisory = self._apply_advisory(proposal) if proposal else None
-            self.closed_targets.add(target)
-            if advisory:
+        targets = []
+        # Submit the bounded changed subsets under ONE original deadline before
+        # waiting. An abstaining first subset must not hide a later required item.
+        for index, facts in enumerate(windows):
+            refs = tuple(row["source_ref"] for row in facts["requirements"])
+            target = f"{target_root}:coverage:{index}"
+            snapshot = self.observe("pre_final_candidate", facts, target_id=target,
+                         actions=(Action.CONTINUE,), evidence_refs=refs, deadline=deadline,
+                         completeness=replace(self.completeness,
+                             omitted=self.completeness.omitted or bool(facts["omitted_requirement_ids"])),
+                         data_class="task_text", required_obligations=refs)
+            if snapshot is not None:
+                targets.append(target)
+        if not targets:
+            return None
+        with self.ready:
+            self.ready.wait_for(lambda: self.revision != revision or self.closed or
+                any(p.target_id in targets for p, _ in self.pending),
+                timeout=max(0, deadline - self.clock()))
+            advisory = None
+            for target in targets:
+                proposal = self._take(target, {Action.CONTINUE})
+                if proposal and advisory is None:
+                    advisory = self._apply_advisory(proposal)
+                elif proposal:
+                    self._settle(proposal[0], "no_op", "continuation_budget")
+                self.closed_targets.add(target)
+            if advisory is not None:
                 self.final_continuations += 1
                 return advisory
         return None
