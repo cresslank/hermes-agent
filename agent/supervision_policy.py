@@ -209,6 +209,10 @@ class SupervisionRuntime:
             self.completeness = replace(complete, omitted=complete.omitted or omitted)
             self.designated_refs.update(refs_in_text(bounded))
             self._remember()
+            # Publish durable work before callbacks can enqueue receipt writers.
+            # Both writes use the runtime fence and zero-wait SQLite admission.
+            from agent.supervision_receipts import record_work
+            record_work(self)
             self.ready.notify_all()  # stale a waiting action without granting a fresh budget
         from agent.supervision_view_binding import reset_views
         reset_views(self)
@@ -218,8 +222,6 @@ class SupervisionRuntime:
         children = getattr(self, 'children', None)
         if children is not None:
             children.changed('task_revision')
-        from agent.supervision_receipts import record_work
-        record_work(self)
         if not getattr(self.agent(), "_interrupt_requested", False):
             self.dependencies.instruction_changed(origin, spans)
         self.observe("authenticated_instruction_admitted", {"requirements": project(spans), "source_message_id": origin.message_id,

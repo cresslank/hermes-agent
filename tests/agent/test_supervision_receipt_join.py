@@ -11,6 +11,7 @@ import pytest
 
 from agent import supervision_receipts
 from tests.agent.test_supervision_evidence_owners import vertical, seed, recall  # noqa: F401
+from tests.agent.supervision_test_support import rig, accept, proposal  # noqa: F401
 
 
 def receipt_rows(v):
@@ -86,3 +87,32 @@ def test_actual_lcm_ack_chain_and_storage_failures(vertical, monkeypatch, failur
         assert len(set(proposal_ids)) == 1
         assert supervision_receipts.lookup(v.runtime, proposal_ids[0])[:2] == row[:2]
         assert receipt_rows(v) == [row]
+
+
+def test_instruction_work_is_durable_before_child_observer_receipt(rig, monkeypatch):
+    import json
+    from types import SimpleNamespace
+    from agent.supervision_types import Action, project
+
+    runtime = accept(rig.agent, "- Initial requirement.")
+    observed = []
+
+    def changed(event):
+        assert event == "task_revision"
+        with sqlite3.connect(rig.agent._session_db.db_path) as conn:
+            row = conn.execute(
+                "SELECT revision_json FROM supervision_work WHERE work_id=?",
+                (runtime.revision.work_id,),
+            ).fetchone()
+        # A callback may submit immediately; no later work-metadata writer may
+        # race its zero-busy-timeout receipt connection for this instruction.
+        assert row and json.loads(row[0]) == project(runtime.revision)
+        runtime.observe("incident", {}, target_id="child-result",
+                        evidence_refs=("exact:child",), actions=(Action.ADVISE,))
+        receipt = rig.facade.submit(proposal(rig, rig.events[-1], refs=["exact:child"]))
+        assert receipt["status"] == "accepted"
+        observed.append(receipt)
+
+    monkeypatch.setattr(runtime, "children", SimpleNamespace(changed=changed))
+    accept(rig.agent, "- Updated requirement.", continuation=True)
+    assert len(observed) == 1
