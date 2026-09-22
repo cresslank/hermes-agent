@@ -106,6 +106,8 @@ class SupervisionRuntime:
         self.pending_artifact_bytes = 0
         self.pending = deque(maxlen=32)
         self.receipts = OrderedDict()
+        self.owner_selections = {}
+        self.history_visibility = None
         self.incidents = set()
         self.opportunities = OrderedDict()
         self.action_edges = {}
@@ -133,6 +135,8 @@ class SupervisionRuntime:
 
     def bind_turn(self):
         with self.lock:
+            self._abandon_owner_selections()
+            self.history_visibility = None
             self.revision = replace(self.revision, run_generation=self.revision.run_generation + 1)
             self.round_deadline = None
             self.round_deadline_issued_at = None
@@ -265,7 +269,7 @@ class SupervisionRuntime:
             self.receipts.popitem(last=False)
         return receipt
 
-    def _validate(self, proposal, registration):
+    def _validate(self, proposal, registration, *, acknowledging=False):
         if self.closed or not registration.active or proposal.plugin_generation != registration.generation:
             return "rejected", "revoked"
         if proposal.expected != self.revision:
@@ -274,7 +278,7 @@ class SupervisionRuntime:
             return "expired", "deadline"
         if _ACTION_GRANTS[proposal.action] not in registration.grants:
             return "rejected", "grant_missing"
-        if proposal.target_id in self.closed_targets:
+        if proposal.target_id in self.closed_targets and not acknowledging:
             return "stale", "target_closed"
         opportunity = self.opportunities.get(proposal.target_id)
         if opportunity is None or opportunity["revision"] != self.revision:
@@ -627,6 +631,16 @@ class SupervisionRuntime:
                 return baseline
             selected_ids = proposal.candidate_ids or (baseline.candidate_ids if action == Action.EVALUATE_RELATION else ())
             selected = [c for c in request.candidates if c["id"] in selected_ids]
+            if action == Action.EXPAND_ONE_OWNED_REF and (
+                    request.owner != "lcm" or not request.requires_ack or len(selected_ids) != 1 or
+                    proposal.metadata.get("feature_action") != "expand_one_owned_ref" or
+                    type(proposal.metadata.get("max_expansions")) is not int or
+                    proposal.metadata.get("max_expansions") != 1 or
+                    proposal.metadata.get("candidate_id") != selected_ids[0] or
+                    proposal.metadata.get("ref") != selected[0].get("ref") or
+                    proposal.metadata.get("scope") != request.facts.get("scope")):
+                self._settle(proposal, "rejected", "expansion_contract")
+                return baseline
             if any(not any(span in c.get("excerpt", "") for c in selected) for span in request.critical_spans):
                 self._settle(proposal, "rejected", "critical_span_omitted")
                 return baseline
@@ -636,12 +650,49 @@ class SupervisionRuntime:
             if action == Action.EVALUATE_RELATION and proposal.relation not in request.relations:
                 self._settle(proposal, "rejected", "missing_relation")
                 return baseline
-            self.incidents.add(proposal.incident_id)
-            receipt = self._settle(proposal, "applied", "owner_selection")
             ids = proposal.candidate_ids or baseline.candidate_ids
             if action == Action.RANK_CANDIDATES:
                 ids = (*ids, *(i for i in baseline.candidate_ids if i not in ids))
+            if request.requires_ack:
+                if len(self.owner_selections) >= 32:
+                    self._settle(proposal, "rejected", "owner_ack_capacity")
+                    return baseline
+                receipt = self._settle(proposal, "accepted", "owner_selected")
+                self.owner_selections[receipt.receipt_id] = (proposal, registration, tuple(ids))
+                return OwnerDecisionV1(ids, proposal.relation, False, receipt.receipt_id,
+                                       proposal.metadata, selected=True)
+            self.incidents.add(proposal.incident_id)
+            receipt = self._settle(proposal, "applied", "owner_selection")
             return OwnerDecisionV1(ids, proposal.relation, True, receipt.receipt_id, proposal.metadata)
+
+    def _abandon_owner_selections(self):
+        for proposal, _, _ in self.owner_selections.values():
+            self._settle(proposal, "rejected", "owner_unacknowledged")
+        self.owner_selections.clear()
+
+    def acknowledge_owner(self, target_id, receipt_id, candidate_ids, effect_digest):
+        """Owner postvalidation, not the judge, acknowledges an exact consumed view.
+
+        A null digest is an explicit adapter veto. This uses the common settlement
+        seam; it is neither a second receipt database nor an external-effect claim.
+        """
+        self._assert_owner(tool_worker=True)
+        with self.lock:
+            entry = self.owner_selections.get(receipt_id)
+            if entry is None or entry[0].target_id != target_id:
+                return None
+            proposal, registration, ids = entry
+            if tuple(candidate_ids) != ids:
+                return None
+            self.owner_selections.pop(receipt_id)
+            with registration.fence:
+                failure = self._validate(proposal, registration, acknowledging=True)
+                if failure:
+                    return self._settle(proposal, *failure)
+                if effect_digest is None:
+                    return self._settle(proposal, "rejected", "owner_postvalidation")
+                self.incidents.add(proposal.incident_id)
+                return self._settle(proposal, "applied", "owner_consumed:" + effect_digest)
 
     def consume_owner_action(self, target_id, action, apply):
         """HOST OWNER ONLY, at its existing execution/safe-point boundary.
@@ -676,6 +727,8 @@ class SupervisionRuntime:
         reset_views(self)
         with self.ready:
             self.closed = True
+            self._abandon_owner_selections()
+            self.history_visibility = None
             self.ready.notify_all()
 
     def revoke(self):
@@ -690,6 +743,8 @@ class SupervisionRuntime:
             for proposal, _ in self.pending:
                 self._settle(proposal, "rejected", "revoked")
             self.pending.clear()
+            self._abandon_owner_selections()
+            self.history_visibility = None
             self.sources.clear()
             self.requirements = ()
             self.artifacts.clear()

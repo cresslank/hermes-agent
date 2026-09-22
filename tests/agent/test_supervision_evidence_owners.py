@@ -51,19 +51,22 @@ def vertical(tmp_path, monkeypatch):
     keys = ("query candidates scope required_ids baseline_ids needs_triage exact_answer_complete "
             "target_id question missing_slot visible_refs recovery_budget already_visible explicit_ref_available "
             "windows oversized structured source_immutable source_ref critical_fields_complete mandatory_ids "
-            "omitted_count full_output_ref budget").split()
+            "omitted_count full_output_ref budget temporal_contract").split()
     policy = {"id": "synthetic-owner", "profile": str(home), "fixture": True,
               "fields": {k: "synthetic" for k in keys}, "sources": {}}
     (home / "config.yaml").write_text(json.dumps({"supervision": {"enabled": True, "plugins": {
-        "jev-supervisor": {"grants": ["observe", "rank_candidates", "select_windows", "evaluate_relation"],
-                           "data_policy": ["history_excerpt", "public_source"], "egress_policy": policy}}}}))
+        "jev-supervisor": {"grants": ["observe", "rank_candidates", "select_windows", "evaluate_relation", "expand_one_owned_ref"],
+                           "data_policy": ["history_excerpt", "public_source", "project_excerpt"], "egress_policy": policy,
+                           "mcp_sources": [{"server": "synthetic-sloom", "url": "https://switchloom.invalid/mcp", "tool": "search_context",
+                                            "accounts": ["a"], "sources": ["mail"], "modes": ["stored"],
+                                            "remote_processing": True, "allow_live_fetch": False}]}}}}))
     manager = PluginManager(scope_key=str(home))
     def facade(name):
         return PluginContext(PluginManifest(name=name), manager).supervision
     config = Config(str(home), enabled=True, policy_id="synthetic-owner", fixture_policy=True,
                     allowed_classes=frozenset({"synthetic"}))
     calls = []
-    effects = SimpleNamespace(before_response=None, invalid=False, delay=0)
+    effects = SimpleNamespace(before_response=None, invalid=False, delay=0, winner_fit=True)
 
     async def http(request):
         assert request.url == "https://api.typesafe.ai/v1/systemone"
@@ -85,6 +88,8 @@ def vertical(tmp_path, monkeypatch):
                                 "probabilities": {k: 1.0 if k == chosen else 0.0 for k in options}}
             else:
                 score = .99 if key.endswith(chosen) else .01
+                if "fit:" in key and not effects.winner_fit:
+                    score = .01 if key.endswith(chosen) else .99
                 answers[key] = {"type": "noul", "noul": score}
         if effects.invalid:
             answers["invented"] = {"type": "noul", "noul": .99}
@@ -276,6 +281,37 @@ def test_f14_source_change_after_response_vetoes_native_owner_view(vertical, mon
                                       scope={"session_scope": "all"})
     assert len(v.calls) == 1
     assert actual is incoming and status == "disabled"
+    assert not any(r.status == "applied" for r in v.runtime.receipts.values())
+    assert any(r.reason == "owner_postvalidation" for r in v.runtime.receipts.values())
+
+
+@pytest.mark.parametrize("veto", ["expired", "unloaded", "bad_token", "foreign_owner", "budget"])
+def test_consumption_not_selection_receipts(vertical, monkeypatch, veto):
+    from web.muxyard.provider import MuxyardWebSearchProvider
+    v = vertical
+    if veto == "budget":
+        result = MuxyardWebSearchProvider(ExtractClient(), supervision=v.mux).extract(
+            ["https://example.invalid/synthetic"], max_chars=1)
+        assert not result[0]["metadata"].get("selected_spans")
+    else:
+        acknowledge = v.mux.acknowledge_owner
+        def final_check(ack):
+            assert not any(r.status == "applied" for r in v.runtime.receipts.values())
+            if veto == "expired":
+                v.runtime.clock = lambda: v.runtime.round_deadline + 1
+            elif veto == "unloaded":
+                v.native.unregister()
+            elif veto == "bad_token":
+                ack = {**ack, "receipt_id": "wrong-token"}
+            else:
+                return v.facade("hermes-lcm").acknowledge_owner(ack)
+            return acknowledge(ack)
+        monkeypatch.setattr(v.mux, "acknowledge_owner", final_check)
+        result = MuxyardWebSearchProvider(ExtractClient(), supervision=v.mux).extract(
+            ["https://example.invalid/synthetic"], max_chars=100)
+        assert not result[0]["metadata"].get("selected_spans")
+    assert v.calls
+    assert not any(r.status == "applied" for r in v.runtime.receipts.values())
 
 
 def history_slot(v, *, known=True):
@@ -294,17 +330,190 @@ def test_f15_unknown_currency_does_not_invent_current_source(vertical):
     assert not v.calls
 
 
-def test_f15_real_bridge_codec_or_explicit_unavailable(vertical):
+def test_f15_real_bridge_exact_expansion_codec(vertical):
     from hermes_lcm.decision_adapter import recover_missing_history
-    from jev_supervisor.host_adapter import _ACTION
     v = vertical
     slot = history_slot(v)
     result = recover_missing_history(v.engine, slot, deadline=v.runtime.clock() + .15)
     assert len(v.calls) == 1, v.bridge.supervisor.inspect()
-    if "expand_one_owned_ref" not in _ACTION:
-        assert result is None
-        assert not any(r.status == "applied" for r in v.runtime.receipts.values())
-        pytest.xfail("Jev NativeHostBridge has no expand_one_owned_ref action codec; no effect claimed")
     assert result and result["content"] == slot["hits"][0]["excerpt"]
     assert result["role"] == "user" and result["session_id"] == "current"
     assert any(r.status == "applied" for r in v.runtime.receipts.values())
+
+
+@pytest.mark.parametrize("mode", ["positive", "visible", "unknown_visibility", "no_grant", "wrong_fit", "foreign", "supersession_unknown"])
+def test_f15_ordinary_request_and_grep_recovery(vertical, mode, monkeypatch):
+    from tests.agent.test_tool_call_incremental_persistence import _make_agent
+    from tests.agent.test_supervision_views import assemble
+    from agent.turn_context import _reset_per_turn_agent_state
+    from hermes_lcm.tools import lcm_grep
+    from hermes_lcm import tools as history_tools
+    expansions = []
+    expand = history_tools.lcm_expand
+    def read_exact(args, **kwargs):
+        expansions.append(dict(args))
+        return expand(args, **kwargs)
+    monkeypatch.setattr(history_tools, "lcm_expand", read_exact)
+    v = vertical
+    agent = _make_agent()
+    _reset_per_turn_agent_state(agent)
+    runtime = runtime_for_agent(agent, create=True)
+    text = "Archive policy: use the local archive, not remote search."
+    v.engine._store.append("foreign" if mode == "foreign" else "current", {"role": "user", "content": text})
+    v.engine._store.append("current", {"role": "assistant", "content": "Archive topic mention, not a decision."})
+    if mode != "unknown_visibility":
+        assemble(agent, [{"role": "user", "content": text if mode == "visible" else "Recover the archive policy decision."}])
+    if mode == "no_grant":
+        v.native._registration.grants -= {"expand_one_owned_ref"}
+    if mode == "wrong_fit":
+        v.effects.winner_fit = False
+    with bind_subagent_parent(agent):
+        result = json.loads(lcm_grep({"query": "Archive", "missing_decision": "What archive policy was decided?", **({"role": "user"} if mode in {"visible", "foreign"} else {})}, engine=v.engine))
+    if mode in {"positive", "supersession_unknown"}:
+        assert len(expansions) == 1 and expansions[0]["content_offset"] == 0
+        assert result["recovered_history"]["content"] == text
+        assert result["recovered_history"]["role"] == "user"
+        assert len(v.calls) == 1
+        assert "supersession unknown" in result["recovery_scope"]
+        assert any(r.reason.startswith("owner_consumed:") for r in runtime.receipts.values())
+    else:
+        assert "recovered_history" not in result
+        assert not expansions
+        assert not any(r.status == "applied" for r in runtime.receipts.values())
+
+
+@pytest.mark.parametrize("damage", ["content", "role", "session_id", "exact_ref", "content_offset", "scope"])
+def test_f15_actual_expansion_postvalidation_veto(vertical, monkeypatch, damage):
+    from hermes_lcm import tools
+    from hermes_lcm.decision_adapter import recover_missing_history
+    v = vertical
+    slot = history_slot(v)
+    original = tools.lcm_expand
+    calls = []
+    def altered(args, **kwargs):
+        calls.append(args)
+        result = json.loads(original(args, **kwargs))
+        if damage == "scope":
+            v.engine.current_session_id = "different-session"
+        else:
+            result[damage] = 99 if damage == "content_offset" else "changed"
+        return json.dumps(result)
+    monkeypatch.setattr(tools, "lcm_expand", altered)
+    result = recover_missing_history(v.engine, slot, deadline=v.runtime.clock() + .15)
+    assert result is None
+    assert len(calls) == 1
+    assert not any(r.status == "applied" for r in v.runtime.receipts.values())
+    assert any(r.reason == "owner_postvalidation" for r in v.runtime.receipts.values())
+
+
+def test_f15_known_exact_ref_uses_existing_reader_without_judgment(vertical):
+    from hermes_lcm.tools import lcm_expand
+    v = vertical
+    slot = history_slot(v)
+    result = json.loads(lcm_expand({"store_id": 1, "content_offset": 0, "max_tokens": 600,
+                                   "include_exact_ref": True}, engine=v.engine))
+    assert result["exact_ref"] == slot["hits"][0]["exact_ref"]
+    assert not v.calls and not v.runtime.receipts
+
+
+class LinkedExtractClient(ExtractClient):
+    def search(self, query, limit, **kwargs):
+        return {"outcome": "success", "trace_id": "tr_search", "results": [
+            {"rank": i, "representative": {"url": f"https://example.invalid/{i}", "title": "Source", "snippet": "Unknown clipped snippet"}}
+            for i in range(1, 11)], "result_ids": [
+            {"rank": i, "candidate_id": f"c{i}", "impression_id": f"i{i}"} for i in range(1, 11)]}
+    def extract(self, urls, **kwargs):
+        return {"outcomes": [{"index": i, "trace_id": f"tr_extract{i}", "outcome": "success",
+            "item": {"url": url, "provider": "fixture", "content": f"Complete returned source {i}; limitation preserved.", "truncated": self.truncated}}
+            for i, url in enumerate(urls)]}
+
+
+@pytest.mark.parametrize("truncated", [False, True, None])
+@pytest.mark.parametrize("async_path", [False, True])
+def test_f14_muxyard_real_search_linked_extracts(vertical, monkeypatch, truncated, async_path):
+    from web.muxyard.provider import MuxyardWebSearchProvider
+    v = vertical
+    monkeypatch.setenv("HERMES_SESSION_ID", "synthetic-session")
+    client = LinkedExtractClient()
+    client.truncated = truncated
+    provider = MuxyardWebSearchProvider(client, supervision=v.mux)
+    provider.search("Which complete source states the limitation?", limit=10)
+    assert not v.calls  # ordinary snippets still cannot certify qualifiers
+    assert provider._triage_queries, provider._origin_sidecar
+    urls = ["https://example.invalid/1", "https://example.invalid/2"]
+    result = asyncio.run(provider.extract_async(urls)) if async_path else provider.extract(urls)
+    assert len(result) == 2
+    if truncated is False:
+        assert len(v.calls) == 1, (v.bridge.supervisor.inspect(), provider._triage_queries, result, list(v.runtime.opportunities.items()))
+        assert result[0]["url"] == urls[1]
+        assert result[0]["metadata"]["input_index"] == 1
+        assert any(r.reason.startswith("owner_consumed:") for r in v.runtime.receipts.values())
+    else:
+        assert not v.calls and result[0]["url"] == urls[0]
+
+
+def switchloom_payload():
+    counts = ("provider_error_count", "source_read_error_count", "cache_error_count", "auth_error_count", "rate_limit_count", "timeout_error_count")
+    items = [{"chunk_ref_id": f"chunk{i}", "ref_id": f"mail:a:{i}", "source": "mail", "account_id": "a",
+              "title": "Source", "text": f"Source fact {i}", "returned_chars": 13, "original_chars": 13, "truncated": False,
+              **{k: None for k in ("timestamp", "retrieved_at", "url", "citation", "heading")}} for i in range(2)]
+    return {"run_id": "run", "items": items, "completeness": {"complete": True, "results_incomplete": False, **dict.fromkeys(counts, 0)},
+            "provider_errors": [], "omissions": {"count": 1, "by_reason": {"candidate_budget": 1}}, "truncated": True,
+            "returned_chars": 26, "original_selected_chars": 26}
+
+
+@pytest.mark.parametrize("mode", ["positive", "stdio", "foreign_account", "route_mismatch", "unowned_transport", "no_structure", "small", "session_replaced", "live", "revoked"])
+def test_f14_real_typed_mcp_transport_binding(vertical, monkeypatch, mode):
+    from tools import mcp_tool as core
+    from tools import mcp_tool_handlers as handlers
+    from mcp.types import CallToolResult, TextContent
+    v = vertical
+    payload = switchloom_payload()
+    if mode == "foreign_account":
+        payload["items"][0]["account_id"] = "foreign"
+    if mode == "small":
+        payload["omissions"] = {"count": 0, "by_reason": {}}
+        payload["truncated"] = False
+    typed = CallToolResult(content=[TextContent(type="text", text="Display prose is not evidence")],
+                           structuredContent=None if mode == "no_structure" else payload)
+    class Session:
+        async def call_tool(self, name, arguments, **kwargs):
+            assert name == "search_context"
+            if mode == "session_replaced":
+                server.session = Session()
+            return typed
+    server = SimpleNamespace(session=Session(), _rpc_lock=asyncio.Lock(), _pending_call_context=None,
+                             _config={"url": "https://wrong.invalid/mcp" if mode == "route_mismatch" else "https://switchloom.invalid/mcp"})
+    if mode == "stdio":
+        from agent.supervision_mcp import source_grants
+        policy = dict(v.native._registration.mcp_sources[0])
+        policy.pop("url")
+        policy.update(command="/synthetic/sloom", args=["mcp", "--api-url", "http://localhost:9999"])
+        for key in ("accounts", "sources", "modes"):
+            policy[key] = list(policy[key])
+        v.native._registration.mcp_sources = source_grants([policy])
+        server._config = {"command": policy["command"], "args": policy["args"]}
+    scope = v.runtime.revision.profile
+    monkeypatch.setattr(core, "_servers", {"synthetic-sloom": server} if mode != "unowned_transport" else {})
+    monkeypatch.setattr(core, "_server_tool_scopes", {"synthetic-sloom": {scope}})
+    monkeypatch.setattr(core, "_mcp_registry_scope", lambda: None)
+    monkeypatch.setattr(handlers, "_trust_gate_check", lambda *a: None)
+    monkeypatch.setattr(handlers, "_check_circuit_breaker", lambda *a: None)
+    monkeypatch.setattr(handlers, "_acquire_call_server", lambda *a: (server, None))
+    monkeypatch.setattr(handlers, "_tool_is_read_only", lambda *a: True)
+    monkeypatch.setattr(handlers._loop, "_run_on_mcp_loop", lambda call, **kw: asyncio.run(call()))
+    monkeypatch.setattr(handlers, "_record_call_outcome", lambda name, result: result)
+    if mode == "revoked":
+        v.effects.before_response = v.native.unregister
+    result = json.loads(handlers._make_tool_handler("synthetic-sloom", "search_context", 1)(
+        {"query": "Which source states the fact?", "mode": "live" if mode == "live" else "stored"}))
+    if mode in {"positive", "stdio"}:
+        assert len(v.calls) == 1, v.bridge.supervisor.inspect()
+        assert result["structuredContent"]["items"][0]["chunk_ref_id"] == "chunk1"
+        assert result["structuredContent"]["completeness"] == payload["completeness"]
+        assert result["result"] == "Display prose is not evidence"
+        assert any(r.reason.startswith("owner_consumed:") for r in v.runtime.receipts.values())
+    else:
+        assert not any(r.status == "applied" for r in v.runtime.receipts.values())
+        if mode != "revoked":
+            assert not v.calls

@@ -16,7 +16,7 @@ OWNERS = {"hermes-lcm": "lcm", "web-muxyard": "muxyard"}
 EVENTS = {
     Action.RANK_CANDIDATES: "retrieval_candidates",
     Action.SELECT_WINDOWS: "oversized_structured_result",
-    Action.EVALUATE_RELATION: "missing_history_slot",
+    Action.EXPAND_ONE_OWNED_REF: "missing_history_slot",
 }
 LOCAL_CLASSES = {"lcm": "history_excerpt", "muxyard": "public_source"}
 
@@ -63,7 +63,7 @@ def decode_request(action, value, *, plugin_id, runtime):
             or value["protocol"] != "supervision.v1"
             or value["owner"] != OWNERS.get(plugin_id)
             or value["event"] != EVENTS.get(action)
-            or (action == Action.EVALUATE_RELATION and value["owner"] != "lcm")
+            or (action == Action.EXPAND_ONE_OWNED_REF and value["owner"] != "lcm")
             or (action == Action.SELECT_WINDOWS and value["owner"] != "muxyard")):
         raise ValueError("owner_protocol")
     request_id = value["request_id"]
@@ -98,19 +98,20 @@ def decode_request(action, value, *, plugin_id, runtime):
         runtime.shared_deadline(deadline), required_ids=tuple(required),
         completeness=Completeness(complete=complete, omitted=not complete),
         data_policy=(LOCAL_CLASSES[value["owner"]],),
-        relations=("states_missing_decision",) if action == Action.EVALUATE_RELATION else (),
-        event=value["event"], facts=facts, evidence_refs=tuple(dict.fromkeys(refs)),
+        relations=("states_missing_decision",) if action == Action.EXPAND_ONE_OWNED_REF else (),
+        event=value["event"], requires_ack=True, facts=facts, evidence_refs=tuple(dict.fromkeys(refs)),
     )
 
 
 def encode_decision(action, request_id, request, decision):
-    if not decision.applied:
+    if not decision.selected or not decision.receipt_id:
         return None
     ids = list(decision.candidate_ids)
     offered = {c["id"] for c in request.candidates}
     if len(ids) != len(set(ids)) or not set(ids) <= offered:
         return None
-    result = {"request_id": request_id}
+    result = {"request_id": request_id, "receipt_id": decision.receipt_id,
+              "candidate_ids": ids, "consumption": "supervision.owner-consumption.v1"}
     if action == Action.RANK_CANDIDATES:
         if set(ids) != offered:
             return None
@@ -125,7 +126,8 @@ def encode_decision(action, request_id, request, decision):
             return None
         result["window_ids"] = ids
     else:
-        if len(ids) != 1 or decision.relation != "states_missing_decision":
+        if (len(ids) != 1 or type(decision.metadata.get("max_expansions")) is not int or
+                decision.metadata.get("max_expansions") != 1):
             return None
-        result.update(candidate_id=ids[0], relation=decision.relation)
+        result.update(candidate_id=ids[0], relation="states_missing_decision")
     return result

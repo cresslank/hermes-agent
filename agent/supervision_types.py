@@ -257,6 +257,7 @@ class Action(str, Enum):
     CLARIFY_ASK = "clarify_ask"
     REUSE_RECEIPT = "reuse_receipt"
     REUSE_CANDIDATE = "reuse_candidate"
+    EXPAND_ONE_OWNED_REF = "expand_one_owned_ref"
 
 
 @dataclass(frozen=True)
@@ -330,6 +331,7 @@ class OwnerRequestV1:
     event: str = ""
     facts: Mapping[str, Any] = field(default_factory=dict)
     evidence_refs: tuple[str, ...] = ()
+    requires_ack: bool = False
 
     def __post_init__(self):
         if not isinstance(self.facts, Mapping):
@@ -364,6 +366,7 @@ class OwnerDecisionV1:
     applied: bool = False
     receipt_id: str | None = None
     metadata: Mapping[str, Any] = field(default_factory=dict)
+    selected: bool = False
 
     def __post_init__(self):
         object.__setattr__(self, "candidate_ids", tuple(self.candidate_ids))

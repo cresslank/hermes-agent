@@ -29,6 +29,8 @@ class _Registration:
     grants: frozenset
     data_policy: frozenset
     egress_policy: dict = field(default_factory=dict)
+    mcp_sources: tuple = ()
+    mcp_adapter: object = None
     active: bool = True
     failures: int = 0
     fence: threading.RLock = field(default_factory=threading.RLock, repr=False)
@@ -70,6 +72,9 @@ class SupervisionFacade:
                                          "retrieve": "clarify_retrieve", "ask_material": "clarify_ask"},
                         "owner_capabilities": self._owner_capabilities() if version == VERSION else [],
                         "owner_deadline": True,
+                        "exact_expansion": "supervision.exact-expansion.v1",
+                        "owner_consumption": "supervision.owner-consumption.v1",
+                        "mcp_results": "supervision.mcp-results.v1",
                         "grants": sorted(self._registration.grants) if self._registration and self._registration.active else [],
                         "data_policy": sorted(self._registration.data_policy) if self._registration and self._registration.active else []}
         if version == VERSION:
@@ -92,13 +97,13 @@ class SupervisionFacade:
         runtime = self._active_runtime()
         if runtime is None or runtime.closed or runtime.revision.profile != scope:
             return []
-        methods = {"rank_candidates", "evaluate_relation" if owner == "lcm" else "select_windows"}
+        methods = {"rank_candidates", "expand_one_owned_ref" if owner == "lcm" else "select_windows"}
         return sorted({method for reg in registrations_for_scope(scope)
                        if "observe" in reg.grants and LOCAL_CLASSES[owner] in reg.data_policy
                        and reg.egress_policy
                        for method in methods if method in reg.grants})
 
-    def register(self, *, version=VERSION, consumer, requested_grants=(), proposal_provider=None):
+    def register(self, *, version=VERSION, consumer, requested_grants=(), proposal_provider=None, mcp_adapter=None):
         """Register one scheduling-only callback. Worker completion calls submit().
 
         proposal_provider is reserved for registration parity: proposals are never polled
@@ -137,6 +142,9 @@ class SupervisionFacade:
             egress = field_data_policy({}, profile=scope)
         reg = _Registration(context.plugin_id, scope, uuid.uuid4().hex, consumer,
                             grants, frozenset(data_policy), egress_policy=egress)
+        from agent.supervision_mcp import source_grants
+        reg.mcp_sources = source_grants(policy.get("mcp_sources") if isinstance(policy, dict) else None)
+        reg.mcp_adapter = mcp_adapter if callable(mcp_adapter) else None
         with _lock:
             previous = _registry.get((scope, context.plugin_id))
             if previous:
@@ -247,7 +255,10 @@ class SupervisionFacade:
                 runtime._assert_owner(tool_worker=True)
                 typed = decode_request(action, request, plugin_id=self._context.plugin_id, runtime=runtime)
                 decision = runtime.owner_decision(action, typed)
-                return encode_decision(action, request["request_id"], typed, decision)
+                encoded = encode_decision(action, request["request_id"], typed, decision)
+                if encoded is None and decision.selected:
+                    runtime.acknowledge_owner(typed.target_id, decision.receipt_id, decision.candidate_ids, None)
+                return encoded
             except (ValueError, TypeError, KeyError, RuntimeError):
                 return None
         if not isinstance(request, OwnerRequestV1):
@@ -258,6 +269,40 @@ class SupervisionFacade:
         if runtime is None or request.revision.profile != self._context._manager.scope_key:
             return OwnerDecisionV1(tuple(c["id"] for c in request.candidates))
         return runtime.owner_decision(action, request)
+
+    def acknowledge_owner(self, acknowledgment):
+        from agent.supervision_owner_protocol import OWNERS
+        import re
+        owner = OWNERS.get(self._context.plugin_id)
+        runtime = self._active_runtime()
+        if owner is None or runtime is None or runtime.revision.profile != self._context._manager.scope_key:
+            return None
+        if (not isinstance(acknowledgment, Mapping) or set(acknowledgment) !=
+                {"request_id", "receipt_id", "candidate_ids", "effect_digest"}):
+            return None
+        digest = acknowledgment["effect_digest"]
+        if digest is not None and (type(digest) is not str or re.fullmatch(r"[0-9a-f]{64}", digest) is None):
+            return None
+        if (type(acknowledgment["request_id"]) is not str or
+                type(acknowledgment["receipt_id"]) is not str or
+                not isinstance(acknowledgment["candidate_ids"], (list, tuple))):
+            return None
+        receipt = runtime.acknowledge_owner(owner + ":" + acknowledgment["request_id"],
+            acknowledgment["receipt_id"], acknowledgment["candidate_ids"], digest)
+        return project(receipt) if receipt else None
+
+    def history_source_absent(self, ref, excerpt):
+        if self._context.plugin_id != "hermes-lcm":
+            return None
+        runtime = self._active_runtime()
+        if runtime is None or runtime.revision.profile != self._context._manager.scope_key:
+            return None
+        runtime._assert_owner(tool_worker=True)
+        from agent.supervision_history import source_absent
+        return source_absent(runtime, ref, excerpt)
+
+    def expand_one_owned_ref(self, request):
+        return self._owner(Action.EXPAND_ONE_OWNED_REF, request)
 
     def rank_candidates(self, request: OwnerRequestV1 | Mapping) -> OwnerDecisionV1 | dict | None:
         return self._owner(Action.RANK_CANDIDATES, request)

@@ -57,8 +57,9 @@ def test_mapping_never_supplies_authority_or_unbounded_input(rig, changes):
 
 def test_response_requires_exact_permutation_and_echoes_literal_id(rig):
     _, req = request(rig)
-    assert encode_decision(Action.RANK_CANDIDATES, "exact-id", req, OwnerDecisionV1(("b", "a"), applied=True)) == {
-        "request_id": "exact-id", "candidate_ids": ["b", "a"], "conflict_ids": [], "isolated_ids": []}
+    assert encode_decision(Action.RANK_CANDIDATES, "exact-id", req, OwnerDecisionV1(("b", "a"), selected=True, receipt_id="receipt")) == {
+        "request_id": "exact-id", "candidate_ids": ["b", "a"],
+        "consumption": "supervision.owner-consumption.v1", "receipt_id": "receipt", "conflict_ids": [], "isolated_ids": []}
     for ids in [("a",), ("a", "a"), ("foreign", "a")]:
         assert encode_decision(Action.RANK_CANDIDATES, "exact-id", req, OwnerDecisionV1(ids, applied=True)) is None
     assert encode_decision(Action.RANK_CANDIDATES, "exact-id", req,

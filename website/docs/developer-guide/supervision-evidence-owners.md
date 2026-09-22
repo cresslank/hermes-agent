@@ -29,7 +29,7 @@ Exactly these keys are accepted:
 - `protocol`: `supervision.v1`.
 - `owner`: authenticated owner binding above.
 - `event`: `retrieval_candidates` for `rank_candidates`,
-  `missing_history_slot` for LCM `evaluate_relation`, or
+  `missing_history_slot` for LCM `expand_one_owned_ref`, or
   `oversized_structured_result` for Muxyard `select_windows`.
 - `request_id`: nonempty invocation-local string, at most 128 characters.
 - `deadline`: finite absolute monotonic timestamp. Host clamps this to the
@@ -45,7 +45,7 @@ binds the target to `owner:request_id`. Feature-specific facts such as
 `constraints_match`, `qualifiers_complete`, currency and supersession are not
 invented by the codec. Unknown owner facts remain unknown and features abstain.
 
-Applied responses echo the literal `request_id` and contain an exact head
+Selected (not yet applied) responses echo the literal `request_id` and contain an exact head
 permutation (`candidate_ids`), a validated mandatory-preserving subset
 (`window_ids`), or one `candidate_id` plus `relation="states_missing_decision"`.
 No-op, malformed, stale, expired, unauthorized or unavailable decisions return
@@ -68,9 +68,48 @@ explicit `JEV_SUPERVISOR_SOURCE`, `LCM_SUPERVISION_SOURCE`, and
 `MUXYARD_SUPERVISION_SOURCE` isolated source checkouts. It uses real LCM SQLite
 recall and Muxyard provider consumers, the native facade, actual Jev registry and
 strict fake HTTP transport. No live provider, credential or database is required.
-If the provider bridge lacks the history action codec, the F15 test records an
-explicit unavailable xfail rather than fabricating an expansion.
+F15's ordinary positive starts with native request assembly and an explicit
+`lcm_grep(missing_decision=...)` request, not a fixture-injected missing slot.
+The paired bridge must negotiate `exact_expansion=supervision.exact-expansion.v1`
+and `owner_consumption=supervision.owner-consumption.v1` before requesting the
+literal `expand_one_owned_ref` grant. It is not a ranking/relation/advice alias.
 
-Native-owner receipts describe admission of a view preference. The evidence
-owner can still veto after a final source-byte comparison; such a receipt is not
-proof of an expansion, upstream success, complete answer, or source truth.
+## Consumption acknowledgment
+
+Mapping requests produce `accepted/owner_selected`, never an applied effect.
+Their response includes a `receipt_id`, exact `candidate_ids`, and
+`consumption=supervision.owner-consumption.v1`. After constructing and validating
+the actual view, the same bound owner calls `acknowledge_owner` with exactly
+`request_id`, `receipt_id`, `candidate_ids`, and `effect_digest`. The digest is
+SHA-256 of the actual JSON effect; null explicitly vetoes it. Revision, deadline,
+plugin generation, grant, stop and scope are checked again. Only a successful
+acknowledgment allows returning the optional view. Receipt reasons distinguish
+`owner_postvalidation`, stale/expired rejection and `owner_consumed:<digest>`.
+Unacknowledged selections are rejected at lifecycle close. The existing runtime
+settlement seam remains the sole receipt sink; no second durable store is added.
+
+Native consumption is not upstream success, source truth or whole-corpus coverage.
+LCM downstream fusion/diversity/coverage/computation validators remain authoritative.
+
+## Configured typed MCP results
+
+`supervision.mcp-results.v1` registers a pure plugin-side typed result projection.
+The actual native MCP handler invokes it on the execution owner after transport
+return, outside the MCP RPC lock. It never reparses display prose. Source grants
+come from the supervisor's host-policy `mcp_sources` list; each row pins `server`,
+`tool`, either `url` or exact `command` and `args`, `accounts`, `sources`, `modes`,
+`remote_processing` and `allow_live_fetch`. This policy does not connect a server
+or authorize a new call. The acquired server instance must still be in the native
+profile-visible connection registry at admission and consumption. Tool/account/
+source/mode and route mismatches abstain. Existing per-field egress policy and
+`project_excerpt` local observation permission are additionally required.
+
+The Switchloom plugin projection consumes `search_context` structuredContent,
+requires the server's explicit `candidate_budget` omission before triage,
+preserves every item, citation, error/completeness field and allowed transport
+metadata, and reorders only the typed item list. Full bounded returned item text
+can establish local qualifier integrity, never whole-document/archive coverage.
+Missing mode, clipped items and unsupported filters abstain. No automatic
+`get_object`, live-mode expansion, provider fetch, server mutation or new visible
+tool is introduced. Explicit object reads remain the existing MCP owner's action.
+HTTP and stdio route bindings are exercised with synthetic transports only.
