@@ -336,8 +336,11 @@ class OwnerRequestV1:
     facts: Mapping[str, Any] = field(default_factory=dict)
     evidence_refs: tuple[str, ...] = ()
     requires_ack: bool = False
+    output_contract: str | None = None
 
     def __post_init__(self):
+        if self.output_contract not in (None, "supervision.retrieval-presentation.v1"):
+            raise ValueError("invalid_output_contract")
         if not isinstance(self.facts, Mapping):
             raise ValueError("invalid_owner_facts")
         object.__setattr__(self, "facts", freeze(self.facts))

@@ -338,6 +338,9 @@ class SupervisionRuntime:
             return "expired", "opportunity_deadline"
         if proposal.owner != opportunity["owner"] or proposal.action not in opportunity["actions"]:
             return "rejected", "owner_action_mismatch"
+        if (proposal.action == Action.RANK_CANDIDATES and
+                not opportunity["data_classes"] <= registration.data_policy):
+            return "rejected", "source_grant_revoked"
         if opportunity["owner"] == "mcp":
             from agent.supervision_mcp import recipient_authorized
             if not recipient_authorized(opportunity["mcp_recipients"], registration,

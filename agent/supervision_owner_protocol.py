@@ -59,13 +59,17 @@ def bounded_facts(value):
 
 
 def decode_request(action, value, *, plugin_id, runtime):
-    if (set(value) != {"protocol", "owner", "event", "request_id", "deadline", "facts", "completeness"}
+    if (set(value) - {"output_contract"} != {"protocol", "owner", "event", "request_id", "deadline", "facts", "completeness"}
             or value["protocol"] != "supervision.v1"
             or value["owner"] != OWNERS.get(plugin_id)
             or value["event"] != EVENTS.get(action)
             or (action == Action.EXPAND_ONE_OWNED_REF and value["owner"] != "lcm")
             or (action == Action.SELECT_WINDOWS and value["owner"] != "muxyard")):
         raise ValueError("owner_protocol")
+    from agent.supervision_retrieval_presentation import VERSION
+    output_contract = value.get("output_contract")
+    if output_contract is not None and (action != Action.RANK_CANDIDATES or output_contract != VERSION):
+        raise ValueError("owner_output_contract")
     request_id = value["request_id"]
     if type(request_id) is not str or not 0 < len(request_id) <= 128:
         raise ValueError("owner_request_id")
@@ -100,6 +104,7 @@ def decode_request(action, value, *, plugin_id, runtime):
         data_policy=(LOCAL_CLASSES[value["owner"]],),
         relations=("states_missing_decision",) if action == Action.EXPAND_ONE_OWNED_REF else (),
         event=value["event"], requires_ack=True, facts=facts, evidence_refs=tuple(dict.fromkeys(refs)),
+        output_contract=output_contract,
     )
 
 
@@ -116,11 +121,15 @@ def encode_decision(action, request_id, request, decision):
         if set(ids) != offered:
             return None
         result["candidate_ids"] = ids
-        for key in ("conflict_ids", "isolated_ids"):
-            values = decision.metadata.get(key, ())
-            if not isinstance(values, (list, tuple)) or any(type(x) is not str or x not in offered for x in values):
-                return None
+        from agent.supervision_retrieval_presentation import VERSION, validate
+        try:
+            blocks = validate(decision.metadata, offered)
+        except ValueError:
+            return None
+        for key, values in zip(("conflict_ids", "isolated_ids"), blocks):
             result[key] = list(values)
+        if request.output_contract == VERSION:
+            result["output_contract"] = VERSION
     elif action == Action.SELECT_WINDOWS:
         if not ids or not set(request.required_ids) <= set(ids):
             return None

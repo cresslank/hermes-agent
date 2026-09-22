@@ -94,3 +94,20 @@ def test_typed_optional_fields_remain_backward_compatible(rig):
     legacy = replace(req, event="", facts={}, evidence_refs=())
     assert not legacy.facts and not legacy.event
     assert threading.get_ident() == rig.agent._execution_thread_id
+
+
+def test_rank_output_contract_is_explicit_and_validates_both_blocks(rig):
+    from agent.supervision_retrieval_presentation import VERSION
+    rt, _ = request(rig)
+    req = decode_request(Action.RANK_CANDIDATES, envelope(output_contract=VERSION),
+                         plugin_id="hermes-lcm", runtime=rt)
+    assert req.output_contract == VERSION and "output_contract" not in req.facts
+    for metadata in ({"isolated_ids": ["a"]}, {"conflict_ids": ["b"]}):
+        decision = OwnerDecisionV1(("a", "b"), selected=True, receipt_id="receipt", metadata=metadata)
+        assert encode_decision(Action.RANK_CANDIDATES, "exact-id", req, decision)["output_contract"] == VERSION
+    for key in ("conflict_ids", "isolated_ids"):
+        for invalid in (["foreign"], ["a", "a"], [None], "a"):
+            decision = OwnerDecisionV1(("a", "b"), selected=True, receipt_id="receipt", metadata={key: invalid})
+            assert encode_decision(Action.RANK_CANDIDATES, "exact-id", req, decision) is None
+    with pytest.raises(ValueError):
+        decode_request(Action.RANK_CANDIDATES, envelope(output_contract="future"), plugin_id="hermes-lcm", runtime=rt)

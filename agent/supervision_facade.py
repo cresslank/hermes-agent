@@ -82,6 +82,7 @@ class SupervisionFacade:
                         "exact_expansion": "supervision.exact-expansion.v1",
                         "history_read_fence": "supervision.history-read.v1",
                         "owner_consumption": "supervision.owner-consumption.v1",
+                        "retrieval_presentation": "supervision.retrieval-presentation.v1",
                         "mcp_results": "supervision.mcp-results.v1",
                         "grants": sorted(self._registration.grants) if self._registration and self._registration.active else [],
                         "data_policy": sorted(self._registration.data_policy) if self._registration and self._registration.active else []}

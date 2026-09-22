@@ -112,7 +112,8 @@ def test_native_dispatch_uses_live_one_use_authority(tmp_path, monkeypatch, boun
 
 
 @pytest.mark.parametrize("effect", ["directive", "conflict", "identity", "reorder"])
-def test_mcp_only_consumes_an_actual_supported_view(tmp_path, monkeypatch, effect):
+@pytest.mark.parametrize("presentation_supported", [False, True])
+def test_mcp_only_consumes_an_actual_supported_view(tmp_path, monkeypatch, effect, presentation_supported, record_property):
     payload = mcp.switchloom_payload()
     if effect == "directive":
         row = payload["items"][1]
@@ -122,6 +123,11 @@ def test_mcp_only_consumes_an_actual_supported_view(tmp_path, monkeypatch, effec
     monkeypatch.setattr(mcp, "switchloom_payload", lambda: copy.deepcopy(payload))
     with mcp.providers(tmp_path / "profile", monkeypatch) as v:
         reg = v.natives[0]._registration
+        if not presentation_supported:
+            native_adapter = reg.mcp_adapter
+            def old_adapter(boundary):
+                return native_adapter({k: value for k, value in boundary.items() if k != "output_contract"})
+            monkeypatch.setattr(reg, "mcp_adapter", old_adapter)
         # MCP's default source adapter has no premise field. Exercise the generic
         # native owner with an explicitly source-owned premise projection.
         if effect == "conflict":
@@ -154,8 +160,14 @@ def test_mcp_only_consumes_an_actual_supported_view(tmp_path, monkeypatch, effec
         assert len(v.calls[0]) == 1
         expected = copy.deepcopy(payload)
         records = mcp.stored(v)
-        if effect == "reorder":
-            expected["items"].reverse()
+        if effect == "reorder" or (presentation_supported and effect in {"directive", "conflict"}):
+            if effect == "reorder":
+                expected["items"].reverse()
+            else:
+                block = json.loads(raw)["retrieval_presentation"]["lower_trust_isolation" if effect == "directive" else "conflicts"]
+                assert block["sources"] == [{"source_pointer": "#/structuredContent/items/1", "ref": payload["items"][1]["chunk_ref_id"]}]
+                record_property("returned_utf8", raw)
+                record_property("returned_sha256", hashlib.sha256(raw.encode()).hexdigest())
             assert any(s == "consumed" and r == "owner_consumed:" + hashlib.sha256(raw.encode()).hexdigest()
                        for s, r, _ in records)
         else:

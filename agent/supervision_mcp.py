@@ -99,6 +99,7 @@ def consumption_fence(opportunity):
 def _project_recipients(scope, key, server_name, server, session, tool, args, raw):
     from agent.supervision_facade import registrations_for_scope
     from agent.supervision_owner_protocol import bounded_facts
+    from agent.supervision_retrieval_presentation import VERSION
     recipients = []
     projection = None
     for registration in registrations_for_scope(scope):
@@ -115,9 +116,11 @@ def _project_recipients(scope, key, server_name, server, session, tool, args, ra
             if not binding.current(registration):
                 continue
             spec = registration.mcp_adapter({"tool": tool, "arguments": dict(args),
+                "output_contract": VERSION,
                 "result": {"structuredContent": json.loads(raw), "isError": False},
                 "grant": project({k: grant[k] for k in ("accounts", "sources", "modes", "remote_processing", "allow_live_fetch")})})
-            if not isinstance(spec, Mapping) or set(spec) != {"facts", "completeness", "rows_key", "id_key"}:
+            if (not isinstance(spec, Mapping) or set(spec) - {"output_contract"} != {"facts", "completeness", "rows_key", "id_key"}
+                    or spec.get("output_contract") not in (None, VERSION)):
                 continue
             facts = bounded_facts(spec["facts"])
             rows_key, id_key = spec["rows_key"], spec["id_key"]
@@ -128,7 +131,8 @@ def _project_recipients(scope, key, server_name, server, session, tool, args, ra
             if (any(type(i) is not str for i in ids) or len(set(ids)) != len(ids) or
                     tuple(c["id"] for c in facts.get("candidates", [])) != ids):
                 continue
-            admitted = freeze({"facts": facts, "rows_key": rows_key, "id_key": id_key})
+            admitted = freeze({"facts": facts, "rows_key": rows_key, "id_key": id_key,
+                               "output_contract": spec.get("output_contract")})
             # A shared opportunity is only meaningful for identical immutable
             # projections. Each recipient must independently admit it under its
             # OWN source/account/mode grant; the first parser grants no authority.
@@ -148,6 +152,7 @@ def admit_result(server_name, server, tool, args, typed_result, invoked_session,
     runtime = runtime_for_agent(get_active_subagent_parent())
     if runtime is None:
         return baseline
+    decision = None
     try:
         runtime._assert_owner(tool_worker=True)
         scope = runtime.revision.profile
@@ -185,10 +190,12 @@ def admit_result(server_name, server, tool, args, typed_result, invoked_session,
         decision = runtime.owner_decision(Action.RANK_CANDIDATES, request, mcp_recipients=recipients)
         if not decision.selected:
             return baseline
-        # This owner supports source-preserving order, not isolation/conflict
-        # annotations. An identical view cannot consume a metadata-only effect;
-        # JSON framing/key order is not an evidence change.
-        if set(decision.candidate_ids) != set(ids) or tuple(decision.candidate_ids) == ids:
+        from agent.supervision_retrieval_presentation import VERSION, annotate, validate
+        conflicts, isolated = validate(decision.metadata, ids)
+        presentation = projection.get("output_contract") == VERSION and bool(conflicts or isolated)
+        # Unsupported adapters remain order-only, including annotation-only no-op.
+        if (len(decision.candidate_ids) != len(ids) or set(decision.candidate_ids) != set(ids)
+                or (tuple(decision.candidate_ids) == ids and not presentation)):
             runtime.acknowledge_owner(target, decision.receipt_id, decision.candidate_ids, None)
             return baseline
         by_id = dict(zip(ids, rows))
@@ -199,11 +206,23 @@ def admit_result(server_name, server, tool, args, typed_result, invoked_session,
         if not isinstance(envelope, dict) or "error" in envelope:
             runtime.acknowledge_owner(target, decision.receipt_id, decision.candidate_ids, None)
             return baseline
-        envelope["result" if isinstance(envelope.get("result"), dict) else "structuredContent"] = result
-        rendered = json.dumps(envelope, ensure_ascii=False)
+        result_key = "result" if isinstance(envelope.get("result"), dict) else "structuredContent"
+        envelope[result_key] = result
+        if presentation:
+            locations = {identity: (f"#/{result_key}/{rows_key}/{index}", identity)
+                         for index, identity in enumerate(decision.candidate_ids)}
+            envelope = annotate(envelope, decision.metadata, locations)
+        rendered = json.dumps(envelope, ensure_ascii=False, allow_nan=False)
+        if (len(rendered.encode()) > 262144 or
+                json.dumps(mcp_field(typed_result, "structured_content", "structuredContent"),
+                           ensure_ascii=False, allow_nan=False, sort_keys=True) != raw):
+            runtime.acknowledge_owner(target, decision.receipt_id, decision.candidate_ids, None)
+            return baseline
         digest = hashlib.sha256(rendered.encode()).hexdigest()
         receipt = runtime.acknowledge_owner(target, decision.receipt_id, decision.candidate_ids, digest)
         return rendered if receipt and receipt.status == "applied" else baseline
     except (ValueError, TypeError, KeyError, AttributeError, RuntimeError):
+        if decision is not None and decision.selected:
+            runtime.acknowledge_owner(target, decision.receipt_id, decision.candidate_ids, None)
         return baseline
     return baseline

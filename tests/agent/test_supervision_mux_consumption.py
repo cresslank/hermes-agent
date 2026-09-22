@@ -67,12 +67,15 @@ def test_actual_entrypoint_consumes_final_canonical_view(mux, monkeypatch, entry
         transitions.extend(conn.execute("SELECT status,reason FROM supervision_receipts").fetchall())
     monkeypatch.setattr(supervision_receipts, "persist", persist)
     if entrypoint == "generic":
-        result = generic(URLS)
+        from tools.web_tools import web_extract_tool
+        encoded = asyncio.run(web_extract_tool(URLS))
+        result = json.loads(encoded)
         assert threads == [threads[0]] and threads[0] != threading.get_ident()
         effect = result
     else:
-        result = json.loads(asyncio.run(muxyard_extract_json({"urls": URLS}, provider=provider)))
-        effect = result["results"]
+        encoded = asyncio.run(muxyard_extract_json({"urls": URLS}, provider=provider))
+        result = json.loads(encoded)
+        effect = result
     assert len(v.calls) == 1, (result, v.bridge.supervisor.inspect())
     assert [r["url"] for r in result["results"]] == URLS[::-1]
     for index, row in enumerate(result["results"]):
@@ -91,6 +94,8 @@ def test_actual_entrypoint_consumes_final_canonical_view(mux, monkeypatch, entry
     assert ("accepted", "owner_selected") in transitions
     digest = hashlib.sha256(json.dumps(effect, sort_keys=True, ensure_ascii=False,
                                      separators=(",", ":"), allow_nan=False).encode()).hexdigest()
+    # Both native tool renderers consume exact post-shaped UTF-8.
+    digest = hashlib.sha256(encoded.encode()).hexdigest()
     receipt, = receipt_rows(v)
     assert receipt["status"] == "consumed"
     assert receipt["reason"] == "owner_consumed:" + digest

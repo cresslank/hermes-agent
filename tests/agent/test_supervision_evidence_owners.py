@@ -90,6 +90,8 @@ def vertical(tmp_path, monkeypatch):
                 score = .99 if key.endswith(chosen) else .01
                 if "fit:" in key and not effects.winner_fit:
                     score = .01 if key.endswith(chosen) else .99
+                if callable(getattr(effects, "score", None)):
+                    score = effects.score(key, question, rows)
                 answers[key] = {"type": "noul", "noul": score}
         if effects.invalid:
             answers["invented"] = {"type": "noul", "noul": .99}
