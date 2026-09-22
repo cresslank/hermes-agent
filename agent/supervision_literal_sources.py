@@ -8,6 +8,7 @@ are trusted in-process code; this is not a sandbox against arbitrary Python acce
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 import threading
@@ -49,6 +50,19 @@ class LiteralSourceProviderV1(ABC):
     def owns_engine(self, engine) -> bool:
         pass
 
+    def literal_source_binding(self, engine):
+        """Opaque native lifecycle identity, or None when unavailable.
+
+        Older adapters abstain until they implement the coordinated fence.
+        Neither method may read source rows or acquire host graph locks.
+        """
+        return None
+
+    @contextmanager
+    def literal_source_binding_fence(self, engine, binding):
+        """Hold lifecycle invalidation out through the host's final acceptance."""
+        yield False
+
     @abstractmethod
     def resolve_literal_source(self, engine, invocation_id: str, source_ref: str) -> LiteralSourceRecordV1 | None:
         """Revalidate a retained immutable record against its exact native row only."""
@@ -64,6 +78,7 @@ class LiteralSourceInvocationV1:
     revision: Revision
     deadline: float
     engine: object
+    binding: object
 
 
 class LiteralSourceRegistration:
@@ -111,18 +126,23 @@ class LiteralSourceRegistration:
             deadline = runtime.shared_deadline()
             if deadline <= runtime.clock():
                 return None
-            invocation = LiteralSourceInvocationV1(uuid.uuid4().hex, runtime.revision, deadline, engine)
+            binding = self.provider.literal_source_binding(engine)
+            if binding is None:
+                return None
+            invocation = LiteralSourceInvocationV1(uuid.uuid4().hex, runtime.revision, deadline, engine, binding)
             self.pending[invocation.id] = invocation
             return invocation
 
     def _prune(self, runtime):
         removed = set()
-        for ref, (record, _) in tuple(self.records.items()):
-            if record.revision != runtime.revision or record.deadline <= runtime.clock():
+        for ref, (record, (engine, _, binding)) in tuple(self.records.items()):
+            if (record.revision != runtime.revision or record.deadline <= runtime.clock()
+                    or self.provider.literal_source_binding(engine) != binding):
                 removed.add(record.invocation_id)
                 del self.records[ref]
         for key, invocation in tuple(self.pending.items()):
-            if invocation.revision != runtime.revision or invocation.deadline <= runtime.clock():
+            if (invocation.revision != runtime.revision or invocation.deadline <= runtime.clock()
+                    or self.provider.literal_source_binding(invocation.engine) != invocation.binding):
                 removed.add(key)
                 del self.pending[key]
         for key in removed:
@@ -153,8 +173,9 @@ class LiteralSourceRegistration:
                     return ()
                 records.append(record)
             # Source reads happen before the final native revision/deadline fence.
-            with runtime.lock, self.lock:
-                if (not self.current(runtime) or runtime.revision != invocation.revision
+            with runtime.lock, self.lock, self.provider.literal_source_binding_fence(
+                    invocation.engine, invocation.binding) as binding_current:
+                if (not binding_current or not self.current(runtime) or runtime.revision != invocation.revision
                         or runtime.clock() >= invocation.deadline
                         or getattr(runtime.agent(), "context_compressor", None) is not invocation.engine
                         or not self.provider.owns_engine(invocation.engine)
@@ -165,7 +186,7 @@ class LiteralSourceRegistration:
                     ref = "literal:" + uuid.uuid4().hex
                     proposition = SourcePropositionV1(ref, "hermes-lcm", self.generation,
                         invocation.id, invocation.revision, invocation.deadline, record)
-                    self.records[ref] = (proposition, (invocation.engine, source_ref))
+                    self.records[ref] = (proposition, (invocation.engine, source_ref, invocation.binding))
                     published.append(ref)
                 return tuple(published)
         finally:
@@ -187,12 +208,13 @@ class LiteralSourceRegistration:
             item = self.records.get(ref) if type(ref) is str else None
             if item is None:
                 return None
-            proposition, (engine, source_ref) = item
+            proposition, (engine, source_ref, binding) = item
             if getattr(runtime.agent(), "context_compressor", None) is not engine or not self.provider.owns_engine(engine):
                 return None
         record = self.provider.resolve_literal_source(engine, proposition.invocation_id, source_ref)
-        with runtime.lock, self.lock, recipient.fence:
-            if (self.records.get(ref) is not item or record != proposition.record or not self.current(runtime)
+        with runtime.lock, self.lock, recipient.fence, self.provider.literal_source_binding_fence(
+                engine, binding) as binding_current:
+            if (not binding_current or self.records.get(ref) is not item or record != proposition.record or not self.current(runtime)
                     or runtime.revision != proposition.revision or runtime.clock() >= proposition.deadline
                     or getattr(runtime.agent(), "context_compressor", None) is not engine
                     or not self.provider.owns_engine(engine)

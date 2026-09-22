@@ -99,7 +99,8 @@ Facade calls:
 - `literal_source(version=..., ref=str) -> SourcePropositionV1 | None`
 
 The invocation is an identity-checked native object with ID, exact revision,
-original shared deadline and active engine. Publication consumes it **once** and
+original shared deadline, active engine and opaque native lifecycle binding.
+Publication consumes it **once** and
 resolves opaque source handles through the registered provider; it accepts no
 record payload. A copied dataclass cannot publish or cancel it. The unchanged
 public tool argument schemas receive no new keys; successful tool output may
@@ -121,7 +122,15 @@ all immutable record fields, then rechecks native authority before returning.
 A plugin consumer uses its own facade's `literal_source`, which supplies its own
 registration. Call lookup outside the graph/registration locks: native source
 point reads precede the final fence, whose lock order is runtime then source
-registration then recipient. Registry membership is checked before taking the
+registration then recipient then the provider's short lifecycle fence. The
+provider exposes `literal_source_binding(engine)` and
+`literal_source_binding_fence(engine, binding)`; these must not read source rows
+or acquire host graph locks. The same fence invalidates the generation before
+session start/end/reset/shutdown mutations. Capture remains unavailable during
+lifecycle transitions, and A→B→A never revives a prior generation. Only a new
+invocation after a successful start can publish again. Older adapters default
+to unavailable, preserving ordinary output rather than publishing unfenced pins.
+Registry membership is checked before taking the
 recipient fence; registry replacement irreversibly closes the old registration.
 Foreign provider/profile, grant loss, unload/replacement, source
 mutation, role change, session rebinding, revision change and expiry all abstain.
@@ -150,7 +159,11 @@ complete original user/tool rows qualify; assistant re-encoding and V4
 assertion/selection/model sidecars cannot manufacture coordinates. Ordinary
 prose, omitted qualifiers, unsupported units/times and partial records abstain.
 Identities and intervals are exact literals. No alias/unit/time conversion or
-semantic overlap comparison occurs here.
+semantic overlap comparison occurs here. Numeric record and condition values
+are bounded using their original tokens, before float conversion. They qualify
+only if the existing canonical JSON encoder preserves the original numerical
+meaning; underflow/rounded tokens abstain. Original bytes, hashes and spans are
+unchanged, and ordinary representable numbers, booleans and Unicode stay distinct.
 
 Still open: main-agent adoption of an exact reversible whole-record rendering;
 canonical claim persistence and dependency graph joins; exact-coordinate pair
@@ -166,5 +179,7 @@ as `hermes_lcm`, isolated HOME/HERMES_HOME/TMPDIR/SQLite, and network/DNS denied
 The suite starts at the real plugin entrypoint and real context-engine clone,
 uses ordinary tool dispatch and real SQLite rows, and forbids network/provider
 scheduling and additional retrieval. Missing LCM is an explicit skip, not proof.
-Also run LCM's literal-record, evidence-pack/compiler and evidence-contract tests.
+Also run `test_supervision_literal_source_fences.py` and
+`test_supervision_literal_source_integrity.py`, plus LCM's literal-number,
+literal-record, evidence-pack/compiler and evidence-contract tests.
 Never substitute handwritten `SourcePropositionV1` fixtures for producer proof.
