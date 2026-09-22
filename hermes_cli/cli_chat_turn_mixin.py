@@ -242,6 +242,9 @@ class CLIChatTurnMixin:
                                                              "notification_category": message.notification_category})
             agent._pending_cli_user_message = staged_user_message
             self.conversation_history.append(staged_user_message)
+        from agent.supervision_context import accept_pending_input
+        # Only a scope bound by the real submission owner grants authentic origin.
+        accept_pending_input(agent)
 
     def _chat_setup_turn_audio(self, turn, message, voice_input):
         """Arm the full-duplex listener and the streaming-TTS pipeline for this turn (voice mode only)."""

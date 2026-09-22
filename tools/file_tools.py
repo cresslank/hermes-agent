@@ -907,6 +907,8 @@ def write_file_tool(path: str, content: str, task_id: str = "default",
                     # Own write = current whole-file content: consecutive
                     # same-task writes stay unblocked. patch never does this.
                     _mark_full_write_baseline(_resolved, task_id, getattr(result, "_content_sha256", None))
+                    from agent.supervision_context import record_file_owner_commit
+                    record_file_owner_commit("write_file", _resolved, task_id=task_id, source_ref=path)
                 _note_edited(task_id, [path], path_to_resolved, session_id)
         return json.dumps(result_dict, ensure_ascii=False)
     except Exception as e:
@@ -1003,6 +1005,10 @@ def patch_tool(mode: str = "replace", path: str = None, old_string: str = None,
                 if len(_resolved_modified) == 1:
                     result_dict["resolved_path"] = _resolved_modified[0]
                 _note_edited(task_id, _paths_to_check, _path_to_resolved, session_id)
+                from agent.supervision_context import record_file_owner_commit
+                for _original_path, _committed_path in list(_path_to_resolved.items())[:8]:
+                    if _committed_path:
+                        record_file_owner_commit("patch", _committed_path, task_id=task_id, source_ref=_original_path)
                 # Clear failure counters so a future miss starts a fresh count.
                 _reset_patch_failures(task_id, [_r for _r in _path_to_resolved.values() if _r])
         # old_string-not-found hint. Failure escalation is tracked for replace

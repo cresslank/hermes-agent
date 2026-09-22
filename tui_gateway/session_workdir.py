@@ -371,6 +371,9 @@ def _persist_submit_user_row(session: dict, text: Any, display_kind: str | None)
             return
     staged[_DB_PERSISTED_MARKER] = True
     session["_submit_user_row"] = staged
+    from agent.supervision_context import accepted_input_origin
+    session["_submit_supervision_origin"] = (
+        accepted_input_origin(text, kind="tui", message_id=str(staged["_row_id"])) if not display_kind else None)
 
 
 def _adopt_submit_user_row(session: dict, agent, persist_user_message: Any, text: Any) -> None:
@@ -381,6 +384,7 @@ def _adopt_submit_user_row(session: dict, agent, persist_user_message: Any, text
     ``text`` is THIS turn's raw submit: a staged row from an earlier send (its turn ended before the agent
     ran) is discarded untouched, so the DB row stays the user's message and never a synthesized turn's text."""
     staged = session.pop("_submit_user_row", None)
+    origin = session.pop("_submit_supervision_origin", None)
     if not isinstance(staged, dict) or agent is None or staged.get("content") != text:
         return
     if staged["content"] != persist_user_message:
@@ -398,6 +402,10 @@ def _adopt_submit_user_row(session: dict, agent, persist_user_message: Any, text
     from agent.session_persistence import _persist_lock
     with _persist_lock(agent):
         agent._pending_cli_user_message = staged
+        agent._pending_supervision_origin = origin
+    from agent.supervision_context import accept_pending_input
+    if origin is not None:
+        accept_pending_input(agent, origin)
 
 
 # Yielded by _workdir_owner_db when the profile db failed to OPEN (vs "no store in this context"); row creation fails loud.

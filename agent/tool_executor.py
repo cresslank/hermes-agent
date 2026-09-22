@@ -712,6 +712,16 @@ def _dispatch_authorized_once(
     elif ref.name == "skill_manage":
         agent._iters_since_skill = 0
 
+    from agent.supervision_policy import runtime_for_agent
+    supervision = runtime_for_agent(agent)
+    if supervision is not None:
+        advisory = supervision.prepare_action(ref.name, ref.args, ref.call_id)
+        if advisory:
+            _advance_start_order()
+            state.blocked = True
+            return json.dumps({"error": advisory, "type": "supervision_advisory", "executed": False})
+        supervision.mark_dispatched(ref.call_id)
+
     from agent.terminal_approval_batch import prepare_current_terminal
     from agent.owned_delegation import dispatch_fence, ControlDenied
     started = False
@@ -1118,6 +1128,12 @@ def _commit_tool_result(
     # Multimodal dicts become an OpenAI-style content list; text-only servers get a
     # string-safe fallback so a rejected image result never poisons history.
     _tool_content = agent._tool_result_content_for_active_model(function_name, persisted_result)
+    from agent.supervision_policy import runtime_for_agent
+    supervision = runtime_for_agent(agent)
+    if supervision is not None and isinstance(_tool_content, str):
+        advisory = supervision.drain_at_safe_point()
+        if advisory:
+            _tool_content += "\n\n" + advisory[0]
     tool_message = make_tool_result_message(function_name, _tool_content, tool_call_id, effect_disposition=effect_disposition)
     messages.append(tool_message)
     if not _flush_session_db_after_tool_progress(agent, messages, stage=f"tool result {function_name}"):
@@ -1168,6 +1184,10 @@ def _finalize_tool_batch(agent, messages: list, effective_task_id: str, num_tool
     steer marker is never truncated/discarded when enforcement replaces a result."""
     if num_tools <= 0:
         return
+    from agent.supervision_policy import runtime_for_agent
+    supervision = runtime_for_agent(agent)
+    if supervision is not None:
+        supervision.committed_batch(messages)
     enforce_turn_budget(messages[-num_tools:], env=get_active_env(effective_task_id), config=budget)
     agent._apply_pending_steer_to_tool_results(messages, num_tools)
 

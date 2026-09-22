@@ -540,6 +540,10 @@ def _bind_turn_identity(
     agent._relay_pending_turn_id = None
     agent._current_turn_id = turn_id
     agent._current_api_request_id = ""
+    from agent.supervision_policy import runtime_for_agent
+    supervision = runtime_for_agent(agent)
+    if supervision is not None:
+        supervision.bind_turn()
     # Tripwire: warn when this turn starts before the previous turn-end persist
     # (concurrent turns interleave transcript writes). Cleared in _persist_session.
     from agent.agent_runtime_helpers import note_turn_start
@@ -646,6 +650,10 @@ def _stage_turn_user_message(
     # recovery dedups via ``has_platform_message_id`` against this row.
     if persist_user_platform_id is not None:
         user_msg["platform_message_id"] = persist_user_platform_id
+    from agent.supervision_context import accept_pending_input
+    origin = getattr(agent, "_pending_supervision_origin", None)
+    agent._pending_supervision_origin = None
+    accept_pending_input(agent, origin)
     return user_msg, pending_cli_message
 
 

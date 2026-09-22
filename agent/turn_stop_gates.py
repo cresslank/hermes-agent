@@ -168,6 +168,18 @@ def apply_stop_gates(
             "(kanban_complete/kanban_request_review/kanban_block) — nudging to finish"
         )
         return verdict
+    from agent.supervision_policy import runtime_for_agent
+    supervision = runtime_for_agent(agent)
+    nudge = supervision.prepare_final(final_response) if supervision is not None else None
+    if nudge:
+        # Share the existing verifier continuation/fallback accounting, without publishing
+        # the incomplete candidate as commentary. Already-streamed bytes cannot be recalled.
+        agent._pre_verify_nudges = getattr(agent, "_pre_verify_nudges", 0) + 1
+        append_message(messages, {
+            "role": "assistant", "display_kind": "hidden", "_pre_verify_synthetic": True,
+            "content": "An optional task-bound review requested reconsideration of this candidate.",
+        })
+        return _continue(nudge, "_pre_verify_synthetic")
     return StopGateVerdict(
         continue_turn=False, final_response=final_response,
         pending_verification_response=pending_verification_response,
