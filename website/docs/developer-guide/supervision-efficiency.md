@@ -58,7 +58,7 @@ The current ordinary-path inventory is deliberately incomplete:
 | F04 | Authorized local read and content-bearing result | No ordinary caller of `admit_read_intent`; without explicit independence metadata no semantic duplicate question is issued. No optional-operation suppression owner. |
 | F05 | Constructed, owned child before scheduling | No ordinary caller of `admit_delegation`; planner acceptance, independence, overhead and parallelism remain unknown. |
 | F06 / F11 | Actual post-call failure | No ordinary caller of `admit_attempt_policy` or failure-route registration; unclassified failures keep native handling. |
-| F07 | Optional explicit binding in `record_verify_run`, plus `propose_verification_reuse` | No ordinary verification runner supplies `supervision_check` or calls reuse. No automatic fingerprint/claim derivation; standalone plugin codec join is separate. |
+| F07 | Optional explicit binding in `record_verify_run`, plus `propose_verification_reuse` | No ordinary verification runner supplies `supervision_check` or calls reuse. No automatic fingerprint/claim derivation; the negotiated plugin codec is integrated, but ordinary contract supply remains open. |
 | F08 | Explicit evidence-owner API | No ordinary caller commits complete `ResearchPass` ledgers or proposes an optional expansion. Raw retrieval yields are not classified into accepted evidence. |
 | F10 | Native frozen-child heartbeat branch | Requires an existing supervision runtime and owned-child binding; a real local status route is supplied when available. It cannot diagnose arbitrary unowned operations. |
 
@@ -98,8 +98,9 @@ nonwaiting SQLite writer reservation as well as the process lock, preventing a
 second WAL connection from invalidating the receipt during admission. It creates
 no database or verification row and returns baseline when the ledger is busy,
 missing, edited, superseded or not a successful zero-exit verification. Owner
-fingerprint lookup failure also returns baseline. The host capability is supplied;
-the standalone plugin mapping/conditional grant request remains a separate join.
+fingerprint lookup failure also returns baseline. The compatible standalone plugin
+negotiates this capability and requests the exact optional grant. Hosts without
+the capability preserve baseline registration and execution.
 
 `reuse_candidate` and `retain_plan` remain unmapped: this owner does not pretend
 to implement optional-operation suppression or a plan-disposition receipt. The
@@ -119,7 +120,9 @@ feature registry is used for those plugin tests.
 The separate receipt-admission tests use a local provider to prove the new native
 `reuse_receipt` effect contract, including changed fingerprints, newly mandatory
 checks, forged receipts and refusal to treat `advise` as reuse. They are explicitly
-**not** a claim of plugin codec qualification. The real-plugin receipt round-trip
-is a strict expected failure while that codec remains absent, and automatically
-becomes a required positive test once the mapping exists. Synthetic judgments are
-not measurements of remote accuracy, latency savings or production activation.
+**not** a claim of plugin codec qualification by themselves. The installed-plugin
+receipt round-trip is a required positive test, asserting negotiated support and
+return of the original native receipt without waiving mandatory checks. The
+standalone installed-entry suite also covers missing grants and older hosts.
+Ordinary fingerprint/claim producers remain a distinct integration requirement;
+synthetic judgments do not measure remote accuracy, savings or activation.

@@ -264,10 +264,10 @@ Actions with host grants and effect owners, never aliases for generic advice or
 selection. The standalone plugin must negotiate these mappings and request their
 grants before using them.
 
-Until those three standalone codecs are integrated, the explicitly labeled
-`NegotiatedViewCodecBridge` contract tests add only the wire translation; they keep
-the real full-registry features, strict fake HTTP, arbiter, proposal contents,
-native facade and native owners. That demonstrates host effects, **not** that an
-older installed plugin supports those codecs. Other integration tests use the
-unaltered standalone `NativeHostBridge`. Missing codecs still retain the original
-UI, rather than manufacturing a successful owner receipt.
+The native integration tests use the unaltered standalone `NativeHostBridge`,
+including negotiated material presentation and clarification retrieve/ask actions.
+No translation subclass supplies missing behavior. Explicit older-host capability
+controls retain the original UI, rather than manufacturing a successful owner
+receipt. The standalone installed-entry suite separately qualifies all four
+optional view/receipt codecs with real native consumers and mock HTTP. These
+proofs do not establish general clarification coverage or live-provider quality.

@@ -1,7 +1,8 @@
 """Native owner paths through the actual optional Jev adapter and strict HTTP codec.
 
 Run with the standalone plugin src on pythonpath. No live transport, credentials,
-model generation, installed plugin or hand-built supervision event is used.
+model generation or hand-built supervision event is used. The installed plugin
+entry point is loaded with synthetic credentials and strict mock HTTP.
 """
 import json
 import importlib.metadata
@@ -422,10 +423,10 @@ def test_f07_main_check_receives_hint_not_a_replacement_receipt(native, tmp_path
     assert not native.owner.guards  # completed checks do not leak guard closures
 
 
-@pytest.mark.xfail("reuse_exact_receipt" not in JEV_NATIVE_ACTIONS, strict=True,
-                   reason="Jev codec must join dedicated native reuse_receipt admission (never advise)")
 def test_f07_optional_real_receipt_round_trip(native, tmp_path, monkeypatch):
     from agent.verification_evidence import propose_verification_reuse
+    assert native.rig.facade.negotiate()["receipt_reuse"] == "supervision.receipt-reuse.v1"
+    assert native.bridge.inspect()["optional_action_codecs"]["reuse_exact_receipt"] == "reuse_receipt"
     receipt = record_native_check(native, tmp_path, monkeypatch)
     pending = check(plugin_owned=True)
     with bind_subagent_parent(native.rig.agent):

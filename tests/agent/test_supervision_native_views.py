@@ -27,9 +27,8 @@ if not SOURCE:
     pytest.skip('JEV_SUPERVISOR_SOURCE required for standalone plugin contract', allow_module_level=True)
 sys.path.insert(0, str(Path(SOURCE) / 'src'))
 from jev_supervisor.config import Config
-from jev_supervisor.host_adapter import NativeHostBridge, NativeRegistration, GRANTS
+from jev_supervisor.host_adapter import NativeHostBridge
 from jev_supervisor.transport import Transport
-from jev_supervisor.policies import POLICIES
 
 from agent.supervision_context import accepted_input_origin
 from agent.supervision_policy import runtime_for_agent
@@ -40,43 +39,6 @@ from hermes_cli.plugins import PluginContext, PluginManager
 from hermes_cli.plugins_manifest import PluginManifest
 from tests.agent.test_supervision_views import assemble
 from tests.agent.test_tool_call_incremental_persistence import _make_agent, _make_tool_defs, _mock_tool_call
-
-
-class NegotiatedViewCodecBridge(NativeHostBridge):
-    """Contract-only codec extension while the standalone adapter is unmerged.
-
-    Real full-registry features, transport, arbiter and proposals remain unchanged.
-    This is NOT qualification of the installed plugin's three missing codecs; it
-    proves the newly advertised exact actions reach real native owners, so the
-    standalone integrator can add these mappings without inventing host effects.
-    """
-    CODECS = {'present_material_once': 'present_status', 'retrieve': 'clarify_retrieve',
-              'ask_material': 'clarify_ask'}
-
-    def register_provider(self, version, supervisor):
-        negotiated = self.native.negotiate(version)
-        assert negotiated['view_actions_version'] == 'supervision.view-actions.v1'
-        assert negotiated['view_actions'] == self.CODECS
-        value = self.native.register(version=version, consumer=self.observe,
-                                     requested_grants=(*GRANTS, *self.CODECS.values()))
-        self._registration = NativeRegistration(self, value)
-        return self._registration
-
-    def submit(self, proposal):
-        if proposal['action'] not in self.CODECS:
-            return super().submit(proposal)
-        assert not self._closed and not self._revoked
-        owner = self._owner_for(proposal['expected'], proposal['target_id'])
-        assert owner is not None
-        metadata = proposal['metadata']
-        result = {k: proposal[k] for k in ('proposal_id', 'plugin_generation', 'feature_id', 'incident_id',
-            'expected', 'target_id', 'evidence_refs', 'expires_at_monotonic', 'template_id')}
-        result.update(owner=owner, action=self.CODECS[proposal['action']],
-            authority_class=POLICIES[proposal['feature_id']].action_class,
-            template_args=list(proposal['template_args'].items()),
-            candidate_ids=metadata.get('selected_ids', metadata.get('candidate_ids', [])),
-            relation=metadata.get('relation'), metadata={'feature_action': proposal['action'], **metadata})
-        return self.native.submit(result)
 
 
 class FixtureCredential:
@@ -150,8 +112,15 @@ def native(tmp_path, monkeypatch, request):
         return httpx.Response(200, json={'model': body['model'], 'usage': {}, 'answers': answers})
     cfg = Config(str(home), True, policy_id='offline-fixture', allowed_classes={'synthetic'}, fixture_policy=True)
     transport = Transport(cfg, FixtureCredential(str(home)), http_transport=httpx.MockTransport(handle))
-    bridge_type = NegotiatedViewCodecBridge if getattr(request, 'param', None) == 'codecs' else NativeHostBridge
-    bridge = bridge_type(facade, cfg, None, transport=transport)
+    if getattr(request, 'param', None) == 'legacy_codecs':
+        negotiate = facade.negotiate
+        def older_host(version):
+            capabilities = negotiate(version)
+            capabilities.pop('view_actions_version', None)
+            capabilities.pop('view_actions', None)
+            return capabilities
+        monkeypatch.setattr(facade, 'negotiate', older_host)
+    bridge = NativeHostBridge(facade, cfg, None, transport=transport)
     assert bridge.start()
     agent = _make_agent()
     agent._execution_thread_id = threading.get_ident()
@@ -610,9 +579,16 @@ def test_unknown_and_material_optional_update_reaches_original_ui_once(native, r
     a._emit_wait_notice(OptionalProgressText('Working.', revision='one'))
     a._emit_wait_notice(OptionalProgressText('New progress.', revision='two'))
     native.drain()
+    while not callbacks.empty():
+        callbacks.get_nowait()()
     if relation == 'material_outcome':
-        assert replies == [{'status': 'rejected', 'reason': 'action_codec_unavailable'}]
-    assert not any(r.status == 'applied' for r in native.runtime.receipts.values())
+        assert len(replies) == 1 and replies[0]['status'] == 'accepted'
+        assert any(r.status == 'applied' and r.reason == 'native_view' for r in native.runtime.receipts.values())
+        assert [text for text, _ in rendered] == ['Working.', 'New progress.']
+    else:
+        assert not replies
+        assert not any(r.status == 'applied' for r in native.runtime.receipts.values())
+        assert [text for text, _ in rendered] == ['Working.']
     for timer in timers:
         timer()
     while not callbacks.empty():
@@ -645,7 +621,6 @@ def test_clarification_default_needs_exact_authority_and_nonmaterial_decision(na
     assert not any(r.status == 'applied' for r in native.runtime.receipts.values())
 
 
-@pytest.mark.parametrize('native', ['codecs'], indirect=True)
 def test_negotiated_material_contract_presents_once_before_timeout(native):
     native.accept('Wait for the result.')
     callbacks, timers, rendered = queue.Queue(), [], []
@@ -672,7 +647,6 @@ def test_negotiated_material_contract_presents_once_before_timeout(native):
     assert all(tid == threading.get_ident() for _, tid in rendered)
 
 
-@pytest.mark.parametrize('native', ['codecs'], indirect=True)
 @pytest.mark.parametrize('resolution', ['retrievable', 'user_only'])
 def test_negotiated_clarification_contract_uses_exact_source_or_original_ui(native, resolution):
     from agent.inline_tool_executors import INLINE_TOOL_EXECUTORS, InlineToolContext
@@ -700,7 +674,6 @@ def test_negotiated_clarification_contract_uses_exact_source_or_original_ui(nati
     assert len(native.calls) == 1
 
 
-@pytest.mark.parametrize('native', ['codecs'], indirect=True)
 @pytest.mark.parametrize('resolution', ['retrievable', 'user_only'])
 @pytest.mark.parametrize('guard', ['grant', 'metadata', 'unload'])
 def test_dedicated_clarification_actions_keep_original_ui_when_denied(native, monkeypatch, resolution, guard):
@@ -735,7 +708,6 @@ def test_dedicated_clarification_actions_keep_original_ui_when_denied(native, mo
     assert not any(r.status == 'applied' for r in native.runtime.receipts.values())
 
 
-@pytest.mark.parametrize('native', ['codecs'], indirect=True)
 @pytest.mark.parametrize('case', ['foreign_work', 'evicted', 'changed_during_decision', 'wrong_question'])
 def test_clarification_retrieval_never_broadens_pinned_source(native, monkeypatch, case):
     from agent.inline_tool_executors import INLINE_TOOL_EXECUTORS, InlineToolContext
@@ -761,8 +733,9 @@ def test_clarification_retrieval_never_broadens_pinned_source(native, monkeypatc
     assert len(native.calls) == (1 if case == 'changed_during_decision' else 0)
 
 
+@pytest.mark.parametrize('native', ['legacy_codecs'], indirect=True)
 @pytest.mark.parametrize('resolution', ['retrievable', 'user_only'])
-def test_unmodified_plugin_missing_clarification_codecs_remain_explicit(native, monkeypatch, resolution):
+def test_older_host_missing_clarification_capabilities_preserves_ui(native, monkeypatch, resolution):
     from agent.inline_tool_executors import INLINE_TOOL_EXECUTORS, InlineToolContext
     assert type(native.bridge) is NativeHostBridge
     native.mode.update(resolution=resolution, material=.99 if resolution == 'user_only' else .01)
