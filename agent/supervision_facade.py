@@ -61,6 +61,10 @@ class SupervisionFacade:
     def negotiate(self, version=VERSION):
         return {"version": VERSION, "supported": version == VERSION,
                 "proposal_metadata": METADATA_VERSION,
+                "skill_details": "supervision.skill-details.v1",
+                "view_actions_version": "supervision.view-actions.v1",
+                "view_actions": {"present_material_once": "present_status",
+                                 "retrieve": "clarify_retrieve", "ask_material": "clarify_ask"},
                 "grants": sorted(self._registration.grants) if self._registration else [],
                 "data_policy": sorted(self._registration.data_policy) if self._registration else []}
 
@@ -152,6 +156,22 @@ class SupervisionFacade:
         with runtime.lock:
             value = runtime.receipts.get(proposal_id)
             return project(value) if value else None
+
+    async def acquire_skill_details(self, request):
+        """Bound, selected local skill reads serviced on the execution owner."""
+        reg = self._registration
+        if reg is None or not reg.active or not isinstance(request, dict):
+            return None
+        try:
+            expected = Revision(**request['expected'])
+        except (KeyError, TypeError, ValueError):
+            return None
+        if expected.profile != reg.scope:
+            return None
+        from agent.supervision_policy import runtime_for_revision
+        runtime = runtime_for_revision(expected)
+        binding = getattr(runtime.agent(), '_supervision_view_binding', None) if runtime else None
+        return await binding.acquire_skill_details(request, reg) if binding else None
 
     def _active_runtime(self):
         from agent.subagent_lifecycle import get_active_subagent_parent

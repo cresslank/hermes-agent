@@ -112,6 +112,10 @@ class SupervisionViews:
 
     def clarify(self, question: str, choices, *, multi_select=False):
         default = self.defaults.get(question)
+        if default is None:
+            handler = getattr(self.facade, "clarify_slot", None)
+            if callable(handler):
+                return handler(question, choices, multi_select=multi_select)
         if (not isinstance(default, AuthorizedDefault) or default.scope != self.scope
                 or not default.authorized or not default.low_stakes or default.secret or default.approval
                 or not default.evidence_ref or multi_select

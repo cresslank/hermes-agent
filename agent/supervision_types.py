@@ -251,7 +251,10 @@ class Action(str, Enum):
     RETAIN_RESULT = "retain_result"
     DELIVER_FINDING = "deliver_finding"
     SUPPRESS_STATUS = "suppress_status"
+    PRESENT_STATUS = "present_status"
     CLARIFY_DEFAULT = "clarify_default"
+    CLARIFY_RETRIEVE = "clarify_retrieve"
+    CLARIFY_ASK = "clarify_ask"
 
 
 @dataclass(frozen=True)

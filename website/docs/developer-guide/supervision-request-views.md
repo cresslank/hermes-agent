@@ -92,8 +92,18 @@ Native assembly uses bounded lexical overlap only as an ambiguity prefilter, not
 as a semantic decision. Explicit tool names and active required-tool pins bypass
 optional shortlisting. Skill candidates come from the native scoped list; a
 metadata shortlist must pass a second full-content detail decision under the same
-deadline before producing a hint. Native reads disable preprocessing; missing,
-pruned, oversized or ambiguous bodies stay baseline. Catalogs without separate
+deadline before producing a hint. The facade negotiates
+`skill_details="supervision.skill-details.v1"` and provides async
+`acquire_skill_details(request)`. It queues at most one <=3-selected-ID acquisition
+back to the already-waiting execution owner, compares the exact event, task,
+revision, source policy and original issued deadline, and echoes that binding with
+authorized complete content. The plugin performs its dependent decision; only
+`phase="ready"` over content served to that registration by this owner can become
+a hint. Native reads reuse the local skill resolver's collision, quarantine,
+platform and disabled-skill gates without invoking `skill_view`, preprocessing,
+credential readiness/capture, or credential passthrough registration. Missing,
+pruned, oversized or ambiguous bodies stay baseline. Plugin-qualified skills
+remain unsupported by this local-only detail reader. Catalogs without separate
 exclusion metadata are explicitly labeled unknown, not assigned invented exclusions.
 
 ## Result and retrieval owners
@@ -189,8 +199,15 @@ never an action/approval/secret default:
 `markdown`, `plain_text`, and `json` are the finite values for the literal question
 `Output format?`. The admitted source ID, exact source text, scope and reversible
 presentation alternatives accompany the semantic decision. Other questions retain
-the original clarification UI. Broader retrieval/user-only resolution is not
-inferred from model-authored question text.
+the original clarification UI. `{"output_format":"ask"}` explicitly leaves the
+choice with the user; a supported `ask_material` action admits only that original
+question/UI. `{"output_format_ref":"<accepted-message-id>"}` names exactly one
+already accepted, same-work source containing the format contract. The retrieval
+owner pins and rechecks its bytes and resolves only the finite format value. It
+cannot search files, query history, access another work's source, or authorize a
+generated source reference. Source eviction/change or uncertainty keeps the UI.
+These contracts must occupy the entire authenticated message; tool arguments and
+quoted examples cannot authorize either route.
 
 ## Verification boundary
 
@@ -214,6 +231,17 @@ cross-repository suite is skipped, not counted as integration proof. No runtime
 owner is monkeypatched to manufacture a successful proposal.
 
 The native adapter intentionally leaves unsupported domains and uncertain evidence
-at baseline. The plugin revision used for qualification must include the matching
-feature/action codecs; a missing material-notification codec still preserves the
-original UI through the bounded baseline timeout, not a fabricated decision.
+at baseline. The facade advertises `view_actions_version="supervision.view-actions.v1"`
+and exact mappings `present_material_once -> present_status`, `retrieve ->
+clarify_retrieve`, and `ask_material -> clarify_ask`. These are dedicated native
+Actions with host grants and effect owners, never aliases for generic advice or
+selection. The standalone plugin must negotiate these mappings and request their
+grants before using them.
+
+Until those three standalone codecs are integrated, the explicitly labeled
+`NegotiatedViewCodecBridge` contract tests add only the wire translation; they keep
+the real full-registry features, strict fake HTTP, arbiter, proposal contents,
+native facade and native owners. That demonstrates host effects, **not** that an
+older installed plugin supports those codecs. Other integration tests use the
+unaltered standalone `NativeHostBridge`. Missing codecs still retain the original
+UI, rather than manufacturing a successful owner receipt.
