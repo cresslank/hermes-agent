@@ -20,16 +20,36 @@ class ControlDeadlineExpired(ValueError):
 
 
 class SQLiteControlStore:
-    def __init__(self, connect: Callable | None = None):
+    def __init__(self, connect: Callable | None = None, *, authorize: Callable | None = None,
+                 wait_for_writer: bool = True):
         if connect is None:
             from tools.async_delegation import _connect
             connect = _connect
         self._connect = connect
+        self._authorize = authorize
+        self._wait_for_writer = wait_for_writer
+
+    def _budget(self, conn, deadline):
+        if deadline is not None:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise ControlDeadlineExpired('Delegation action deadline expired')
+            # SQLite's busy timeout counts requested sleeps, not elapsed wall
+            # time. A synchronous owner holding outer fences cannot wait here:
+            # contention must abstain, not monopolize instruction/revoke locks.
+            millis = max(0, min(10000, int(remaining * 1000))) if self._wait_for_writer else 0
+            conn.execute(f"PRAGMA busy_timeout={millis}")
+
+    def _authority(self, conn, deadline=None):
+        if self._authorize is not None and not self._authorize(deadline=deadline, connection=conn):
+            raise ControlConflict('Delegation authority unavailable')
 
     def create(self, snapshot: dict) -> None:
         conn = self._connect()
         try:
             with conn:
+                conn.execute('BEGIN IMMEDIATE')
+                self._authority(conn)
                 conn.execute(
                     "INSERT INTO delegation_controls "
                     "(child_id,parent_session_id,generation,control_revision,snapshot_json,updated_at) "
@@ -46,14 +66,14 @@ class SQLiteControlStore:
         conn = self._connect()
         try:
             with conn:
-                if deadline is not None:
-                    remaining = deadline - time.monotonic()
-                    if remaining <= 0:
-                        raise ControlDeadlineExpired('Delegation action deadline expired')
-                    conn.execute(f"PRAGMA busy_timeout={max(1, min(10000, int(remaining * 1000)))}")
+                self._budget(conn, deadline)
                 conn.execute('BEGIN IMMEDIATE')
-                if deadline is not None and time.monotonic() >= deadline:
-                    raise ControlDeadlineExpired('Delegation action deadline expired')
+                self._budget(conn, deadline)
+                if deadline is not None:
+                    # Recheck session membership after contention, in the very
+                    # transaction that will publish the semantic control effect.
+                    self._authority(conn, deadline)
+                    self._budget(conn, deadline)
                 result = conn.execute(
                     "UPDATE delegation_controls SET control_revision=?,snapshot_json=?,updated_at=? "
                     "WHERE child_id=? AND parent_session_id=? AND generation=? AND control_revision=?",
@@ -62,8 +82,11 @@ class SQLiteControlStore:
                 )
                 if result.rowcount != 1:
                     raise ControlConflict('Stale delegation control revision')
-                if deadline is not None and time.monotonic() >= deadline:
-                    raise ControlDeadlineExpired('Delegation action deadline expired')
+                if deadline is not None:
+                    self._authority(conn, deadline)
+                # Commit may itself wait in rollback-journal mode. It gets only
+                # what remains, never the earlier BEGIN's full busy timeout.
+                self._budget(conn, deadline)
         finally:
             conn.close()
 

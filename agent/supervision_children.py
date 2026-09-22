@@ -11,7 +11,7 @@ import math
 import sqlite3
 
 from agent.supervision_types import Action, Completeness, project
-from agent.owned_delegation import ControlDenied, SemanticEvidence
+from agent.owned_delegation import ControlDenied, SemanticEvidence, control_fence
 
 VERSION = "supervision.child-relevance.v1"
 RELATIONS = {"current", "reusable_only", "superseded", "no_remaining_consumer", "insufficient"}
@@ -176,7 +176,8 @@ class ChildRelevanceOwner:
                 return "rejected"
             # Registration grants are checked by the runtime; also bind the installed
             # control grant to this plugin, not any observer in the same profile.
-            regs = runtime._registrations()
+            from agent.supervision_facade import registrations_for_scope
+            regs = registrations_for_scope(runtime.revision.profile, blocking=False)
             if not any(r.plugin_id == handle.plugin_id and r.generation == proposal.plugin_generation for r in regs):
                 return "rejected"
             rows = observation["answers"]
@@ -200,12 +201,12 @@ class ChildRelevanceOwner:
                     or priority not in {'retain', 'deprioritize', 'unchanged'}
                     or (proposal.action == Action.REPRIORITIZE_CHILD and priority != expected_priority)):
                 return "rejected"
-            with owner._lock:
+            with control_fence(owner._lock, proposal.expires_at_monotonic):
                 live = owner._get(handle)
                 s = live.snapshot
                 if s["control_revision"] != expected or _scope(runtime.revision) != scope or _guard(s) != guard:
                     return "stale"
-                if not owner.semantic_authorized(handle) or s["cancel_requested"] or s["settled"] or s["inflight"]:
+                if not owner.semantic_authorized(handle, deadline=proposal.expires_at_monotonic) or s["cancel_requested"] or s["settled"] or s["inflight"]:
                     return "no_op"
                 # A priority proposal without this independently validated observation
                 # can never prime cancellation. Nor can a claimed prior receipt.

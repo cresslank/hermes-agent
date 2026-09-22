@@ -771,6 +771,46 @@ class SessionSessionsMixin:
         """Persisted YOLO flag; False on any parse failure (resume must never enable the bypass)."""
         return bool(_parse_model_config((session_meta or {}).get("model_config")).get("yolo_mode"))
 
+    def control_session_generation(self, session_id: str, *, deadline=None, connection=None):
+        """Current active membership for optional controls, never an accounting read.
+
+        Do not use the pooled reader's writer-lock fallback or reopen a closed DB.
+        A zero-wait connection bounds contention even for deadline-free producers;
+        a supplied control transaction observes revocation after writer admission.
+        No schema, repairs, token flushes or second authority store belong here.
+        """
+        from hermes_cli.sqlite_safe_read import _live_lock
+        from hermes_state_common import stat_db_file_identity
+        def available():
+            return ((deadline is None or time.monotonic() < deadline)
+                    and self.read_only is False and self._conn is not None
+                    and not self._read_conns_closed and not self._db_replaced
+                    and not self._db_wal_generation_lost and self._db_file_identity is not None
+                    and stat_db_file_identity(self.db_path) == self._db_file_identity)
+        # The ordinary tracked opener/closer holds this registry mutex. Take it
+        # without waiting and retain it through close so cleanup cannot outwait
+        # the action. Inspect application_id through SQL, not the raw-header
+        # probe (which has its own unrelated mutex).
+        if not _live_lock.acquire(blocking=False):
+            return None
+        try:
+            if not available():
+                return None
+            conn = connection if connection is not None else self._connect_read_only(timeout=0)
+            try:
+                application_id = conn.execute("PRAGMA application_id").fetchone()[0]
+                if self._db_file_application_id and application_id != self._db_file_application_id:
+                    return None
+                row = conn.execute(
+                    "SELECT started_at FROM sessions WHERE id=? AND ended_at IS NULL "
+                    "AND COALESCE(expiry_finalized, 0)=0", (session_id,)).fetchone()
+                return (application_id, row[0]) if row is not None and available() else None
+            finally:
+                if connection is None:
+                    conn.close()
+        finally:
+            _live_lock.release()
+
     def get_session(self, session_id: str) -> Optional[Dict[str, Any]]:
         """Get a session by ID (drains queued token deltas first so cost readers see exact totals)."""
         self.flush_token_counts()

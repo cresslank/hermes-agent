@@ -841,12 +841,20 @@ class SupervisionRuntime:
         if (_observer_callback.get() or target_id not in wait_targets
                 or action not in {Action.REPRIORITIZE_CHILD, Action.CANCEL_CHILD}):
             self._assert_owner(tool_worker=True)
-        with self.lock:
+        # Child-control safe points may defer a contended runtime, but may not
+        # start a new wait budget before finding their original proposal.
+        control = action in {Action.REPRIORITIZE_CHILD, Action.CANCEL_CHILD}
+        if not self.lock.acquire(blocking=not control):
+            return None
+        try:
             entry = self._take(target_id, {action})
             if entry is None:
                 return None
             proposal, registration = entry
-            with registration.fence:
+            remaining = max(0, proposal.expires_at_monotonic - self.clock())
+            if not registration.fence.acquire(timeout=remaining):
+                return self._settle(proposal, "expired", "deadline")
+            try:
                 failure = self._validate(proposal, registration)
                 if failure:
                     return self._settle(proposal, *failure)
@@ -856,6 +864,10 @@ class SupervisionRuntime:
                 if status == "applied":
                     self.incidents.add(proposal.incident_id)
                 return self._settle(proposal, status, "owner_settlement")
+            finally:
+                registration.fence.release()
+        finally:
+            self.lock.release()
 
     def finish_turn(self):
         optional_reads = getattr(self, "optional_reads", None)

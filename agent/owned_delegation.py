@@ -29,6 +29,22 @@ class ControlDenied(ValueError):
     pass
 
 
+@contextmanager
+def control_fence(lock, deadline):
+    """One original action budget for every lock, with no fresh timeout."""
+    if type(deadline) not in (int, float) or not math.isfinite(deadline):
+        raise ControlDenied('A finite propagated monotonic deadline is required')
+    remaining = max(0, deadline - time.monotonic())
+    if not lock.acquire(timeout=remaining):
+        raise ControlDenied('Delegation action deadline expired')
+    try:
+        # The consumer still checks expiry before effects; an uncontended expired
+        # request may return its historical receipt without acquiring a new budget.
+        yield
+    finally:
+        lock.release()
+
+
 @dataclasses.dataclass(frozen=True)
 class OwnerGrant:
     profile: str
@@ -530,13 +546,13 @@ class OwnedDelegationOwner:
                 self._commit(live, lambda s: s.update(cancel_requested=True, candidate=None))
             return self._receipt(live.snapshot, not live.snapshot['settled'], 'explicit_stop')
 
-    def semantic_authorized(self, handle):
+    def semantic_authorized(self, handle, *, deadline=None) -> bool:
         """Configured owners recheck live profile and authenticated consumer authority."""
         return True
 
     def request_semantic_cancel(self, handle, *, expected_revision, evidence: SemanticEvidence,
                                 idempotency_key: str, deadline: float, feature_id='F01', _defer_signal=False):
-        with self._lock:
+        with control_fence(self._lock, deadline):
             live = self._get(handle)
             s = live.snapshot
             if (feature_id not in ('F01', 'F04') or type(expected_revision) is not int or expected_revision < 1 or
@@ -559,7 +575,7 @@ class OwnedDelegationOwner:
                 return self._receipt(s, False, 'deadline_expired')
             if s['control_revision'] != expected_revision:
                 return self._receipt(s, False, 'stale_control_revision')
-            if (not self.semantic_authorized(handle) or s['cancel_requested'] or s['settled'] or s['obligation'] != 'optional' or
+            if (not self.semantic_authorized(handle, deadline=deadline) or s['cancel_requested'] or s['settled'] or s['obligation'] != 'optional' or
                     not s['consumer_set_closed'] or not s['consumers'] or s['effect_class'] != 'read_only' or
                     s['handoffs'] or s['cleanup_pending'] or not self._grant.allow_optional_readonly or
                     any(c['obligation'] != 'optional' or c['requires_result'] or c['requires_effects'] or c['requires_cleanup'] or c.get('requires_corroboration', True) for c in s['consumers'])):

@@ -14,7 +14,7 @@ import sqlite3
 
 from agent.owned_delegation import (
     CapabilityContract, Consumer, ControlDenied, OwnedDelegationOwner, OwnerGrant,
-    ReadOnlyPolicy, binding_of, scoped_file_policy, validate_request,
+    ReadOnlyPolicy, binding_of, control_fence, scoped_file_policy, validate_request,
 )
 
 VERSION = "supervision.owned-delegation.v1"
@@ -77,12 +77,12 @@ def accept_consumer_contracts(runtime, origin):
         return  # malformed/partial input grants nothing
 
 
-def _policy(runtime, registration):
-    from hermes_cli.config import load_config_readonly
+def _policy(runtime, registration, *, deadline=None):
+    from hermes_cli.config_cached import current_config_readonly
     from hermes_constants import hermes_home_key
     if runtime.closed or hermes_home_key() != runtime.revision.profile or not registration.active:
         return None
-    config = load_config_readonly()
+    config = current_config_readonly(deadline=deadline)
     supervision = config.get("supervision") if isinstance(config, dict) else None
     if not isinstance(supervision, dict) or supervision.get("enabled") is not True:
         return None
@@ -119,41 +119,51 @@ class ConfiguredDelegationOwner(OwnedDelegationOwner):
     # applied scheduling effect on a running worker. Cancellation is separate.
     priority_effects_supported = False
 
-    def __init__(self, runtime, registration, policy_pin, db):
+    def __init__(self, runtime, registration, policy_pin, db, session_generation):
         from tools.delegation_control_store import SQLiteControlStore
         self.runtime, self.registration, self.policy_pin, self.db = runtime, registration, policy_pin, db
+        self.session_generation = session_generation
+        self.registration_generation = registration.generation
         self.launch_contracts = {}
         self.resolving = {}
         path = Path(db.db_path).resolve()
         # Bind to the supplied canonical SessionDB, never ambient async state or
         # a new DB. mode=rw cannot recreate a deleted profile/session database.
         def connect():
-            conn = sqlite3.connect(path.as_uri() + "?mode=rw", uri=True)
+            from hermes_state_common import stat_db_file_identity
+            if stat_db_file_identity(path) != db._db_file_identity:
+                raise ControlDenied("Configured owner database generation changed")
+            # Optional controls run under the instruction/revocation fences.
+            # Every write must fail closed on contention, never start a 5s wait.
+            conn = sqlite3.connect(path.as_uri() + "?mode=rw", uri=True, timeout=0)
             conn.execute("PRAGMA foreign_keys=ON")
             return conn
         file_policy = scoped_file_policy(tuple(json.loads(policy_pin)["read_roots"]))
         policy = ReadOnlyPolicy("host.owned-parent-read.v1", (*file_policy.contracts,
             CapabilityContract("todo_list", "child-plan.v1", _plan_args)))
-        super().__init__(parent_session_id=str(runtime.agent().session_id), store=SQLiteControlStore(connect),
+        super().__init__(parent_session_id=str(runtime.agent().session_id), store=SQLiteControlStore(connect, authorize=self.current, wait_for_writer=False),
             grant=OwnerGrant(runtime.revision.profile, registration.plugin_id, True, True),
             consumer_resolver=self.resolving.get, policy=policy,
             revision_provider=lambda: (runtime.revision.instruction_event, runtime.revision.requirements, runtime.revision.evidence))
 
-    def current(self):
+    def current(self, *, deadline=None, connection=None):
         agent = self.runtime.agent()
         try:
             return (agent is not None and str(agent.session_id) == self.parent_session_id
                 and getattr(agent, "_session_db", None) is self.db and self.db.read_only is False
                 and getattr(agent, "_supervision_runtime", None) is self.runtime
-                and _policy(self.runtime, self.registration) == self.policy_pin
-                and self.registration in self.runtime._registrations()
-                and self.db.get_session(self.parent_session_id) is not None)
+                and self.registration.generation == self.registration_generation
+                and _policy(self.runtime, self.registration, deadline=deadline) == self.policy_pin
+                and self.db.control_session_generation(self.parent_session_id,
+                    deadline=deadline, connection=connection) == self.session_generation)
         except (OSError, TypeError, ValueError, sqlite3.Error):
             return False
 
-    def semantic_authorized(self, handle):
+    def semantic_authorized(self, handle, *, deadline=None):
         record = self.launch_contracts.get(handle.child_id)
-        return (self.current() and record is not None
+        live = self._live.get(handle.child_id)
+        return (live is not None and live.handle == handle
+            and self.current(deadline=deadline) and record is not None
             and self.runtime.revision.work_id == record.work_id
             and self.runtime.revision.instruction_event == record.instruction_event
             and getattr(self.runtime, "owned_consumer_contracts", {}).get(record.ref) == record)
@@ -161,7 +171,8 @@ class ConfiguredDelegationOwner(OwnedDelegationOwner):
     def request_semantic_cancel(self, handle, **kwargs):
         # Raw native callers use the same instruction/registration/control lock
         # order as the bridge; authenticated steering cannot race this commit.
-        with self.runtime.lock, self.registration.fence:
+        deadline = kwargs['deadline']
+        with control_fence(self.runtime.lock, deadline), control_fence(self.registration.fence, deadline):
             return super().request_semantic_cancel(handle, **kwargs)
 
     def launch(self, parent, child, request=None, *, goal=""):
@@ -205,8 +216,10 @@ def configured_owner(parent):
     if runtime is None or binding_of(parent) is not None or not isinstance(db, SessionDB):
         return None
     try:
-        if (db.read_only is not False or Path(db.db_path).resolve() != Path(runtime.revision.profile) / "state.db"
-                or db.get_session(str(parent.session_id)) is None):
+        if db.read_only is not False or Path(db.db_path).resolve() != Path(runtime.revision.profile) / "state.db":
+            return None
+        session_generation = db.control_session_generation(str(parent.session_id))
+        if session_generation is None:
             return None
         with runtime.lock:
             existing = getattr(parent, "_owned_delegation_owner", None)
@@ -217,7 +230,7 @@ def configured_owner(parent):
             if len(candidates) != 1:
                 return None  # never choose among competing owner policies
             registration, pin = candidates[0]
-            owner = ConfiguredDelegationOwner(runtime, registration, pin, db)
+            owner = ConfiguredDelegationOwner(runtime, registration, pin, db, session_generation)
             parent._owned_delegation_owner = owner
             return owner
     except (OSError, TypeError, ValueError, sqlite3.Error):

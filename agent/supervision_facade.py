@@ -51,9 +51,15 @@ class _Registration:
         clear_optional_reads(self.scope, self.plugin_id)
 
 
-def registrations_for_scope(scope):
-    with _lock:
+def registrations_for_scope(scope, *, blocking=True):
+    # Effect-edge readers already hold runtime/registration fences. Never wait
+    # there for a registry replacement that may itself need a registration fence.
+    if not _lock.acquire(blocking=blocking):
+        return ()
+    try:
         return tuple(r for (s, _), r in _registry.items() if s == scope and r.active)
+    finally:
+        _lock.release()
 
 
 class SupervisionFacade:
