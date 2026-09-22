@@ -49,12 +49,17 @@ class Consumer:
     requires_result: bool = False
     requires_effects: bool = False
     requires_cleanup: bool = False
+    requirement_ids: tuple[str, ...] = ()
 
     def __post_init__(self):
         if not isinstance(self.ref, str) or not 1 <= len(self.ref) <= 256 or self.obligation not in {'required', 'optional', 'unknown'}:
             raise ControlDenied('Invalid consumer')
         if any(type(v) is not bool for v in (self.requires_result, self.requires_effects, self.requires_cleanup)):
             raise ControlDenied('Invalid consumer obligations')
+        if (not isinstance(self.requirement_ids, tuple) or len(self.requirement_ids) > 4
+                or len(set(self.requirement_ids)) != len(self.requirement_ids)
+                or any(not isinstance(r, str) or not 0 < len(r) <= 256 for r in self.requirement_ids)):
+            raise ControlDenied('Invalid consumer requirement links')
 
 
 @dataclasses.dataclass(frozen=True)
@@ -185,6 +190,7 @@ class _Live:
     child: object
     snapshot: dict
     parent_child_id: str | None = None
+    milestone_pending: bool = False
 
 
 class OwnedDelegationOwner:
@@ -203,6 +209,8 @@ class OwnedDelegationOwner:
         old = live.snapshot
         new = copy.deepcopy(old)
         change(new)
+        if new.get('candidate') is None:
+            new['semantic_observation'] = None
         new['control_revision'] = old['control_revision'] + 1
         if deadline is None:
             self._store.compare_and_swap(new, old['control_revision'])
@@ -255,7 +263,7 @@ class OwnedDelegationOwner:
                 consumer = self._resolve(ref)
                 if not isinstance(consumer, Consumer) or consumer.ref != ref:
                     consumer = Consumer(ref)
-                consumers.append(dataclasses.asdict(consumer))
+                consumers.append({**dataclasses.asdict(consumer), 'requirement_ids': list(consumer.requirement_ids)})
             closed = bool(request and request['consumer_refs'] and request['consumer_set_closed'] and
                           self._grant.controls_all_consumers and all(c['obligation'] != 'unknown' for c in consumers))
             obligation = request['obligation'] if request else 'unknown'
@@ -280,7 +288,8 @@ class OwnedDelegationOwner:
                         effect_class='read_only' if restricted else 'unknown', cancel_requested=False,
                         settled=False, worker_finished=False, processes_stopped=False, effects_reconciled=False,
                         inflight=0, handoffs=[], cleanup_pending=False, candidate=None, receipts={},
-                        objective=str(goal)[:16000], latest_milestone='')
+                        objective=str(goal)[:16000], latest_milestone='',
+                        semantic_observation=None, priority=0)
             if ancestor:
                 self._commit(ancestor, lambda s: (s['handoffs'].append(child_id), s.update(candidate=None)))
             try:
@@ -322,7 +331,17 @@ class OwnedDelegationOwner:
         with self._lock:
             live = self._get(handle)
             self._open(live.snapshot)
-            return self._commit(live, lambda s: s.update(latest_milestone=milestone[:1000]))
+            bounded = milestone[:1000]
+            if bounded == live.snapshot['latest_milestone']:
+                return copy.deepcopy(live.snapshot)
+            state = self._commit(live, lambda s: s.update(latest_milestone=bounded))
+            if state['inflight']:
+                live.milestone_pending = True
+                return state
+        bridge = getattr(self, '_relevance_bridge', None)
+        if bridge is not None:
+            bridge.changed('child_milestone', handle)
+        return state
 
     def enroll_consumer(self, handle, ref, *, expected_revision):
         """Owner calls before binding any result/finding handle to another consumer."""
@@ -338,7 +357,7 @@ class OwnedDelegationOwner:
             if not isinstance(consumer, Consumer) or consumer.ref != ref:
                 consumer = Consumer(ref)
             def change(s):
-                s['consumers'] = [c for c in s['consumers'] if c['ref'] != ref] + [dataclasses.asdict(consumer)]
+                s['consumers'] = [c for c in s['consumers'] if c['ref'] != ref] + [{**dataclasses.asdict(consumer), 'requirement_ids': list(consumer.requirement_ids)}]
                 s['candidate'] = None
                 if consumer.obligation == 'unknown':
                     s.update(consumer_set_closed=False, obligation='unknown')
@@ -387,7 +406,7 @@ class OwnedDelegationOwner:
                     raise ControlDenied('Tool/parameters are outside the versioned read-only policy')
             def begin(s):
                 s['inflight'] += 1
-                s['latest_milestone'] = ('dispatch:' + name)[:1000]
+                s['latest_dispatch'] = name[:1000]
                 if name == 'delegate_task':
                     s['handoffs'].append('dispatch:nested')
                     s['candidate'] = None
@@ -402,6 +421,12 @@ class OwnedDelegationOwner:
                         s['handoffs'].remove('dispatch:nested')
                     self._settle(s)
                 self._commit(live, end)
+                notify = live.milestone_pending and live.snapshot['inflight'] == 0
+                if notify:
+                    live.milestone_pending = False
+            bridge = getattr(self, '_relevance_bridge', None)
+            if notify and bridge is not None:
+                bridge.changed('child_milestone', handle)
 
     @staticmethod
     def _settle(s):
@@ -473,7 +498,7 @@ class OwnedDelegationOwner:
             return self._receipt(live.snapshot, not live.snapshot['settled'], 'explicit_stop')
 
     def request_semantic_cancel(self, handle, *, expected_revision, evidence: SemanticEvidence,
-                                idempotency_key: str, deadline: float, feature_id='F01'):
+                                idempotency_key: str, deadline: float, feature_id='F01', _defer_signal=False):
         with self._lock:
             live = self._get(handle)
             s = live.snapshot
@@ -537,13 +562,21 @@ class OwnedDelegationOwner:
                 return self._receipt(live.snapshot, False, 'deadline_expired')
             child = live.child if accepted else None
             receipt = self._receipt(s, accepted, reason)
+        if child is not None and not _defer_signal:
+            self.signal_semantic_cancel(handle)
+        return receipt
+
+    def signal_semantic_cancel(self, handle):
+        # Only signal already-sealed work, outside the control lock. Native joins
+        # can defer this until their enclosing compare/commit critical section ends.
+        with self._lock:
+            live = self._get(handle)
+            child = live.child if live.snapshot['cancel_requested'] else None
         if child is not None:
-            # Cancellation committed first; failures signaling do not unseal dispatch.
             try:
                 request_hard_interrupt(child, 'Optional work no longer contributes', tool_reason='owned semantic cancellation')
             except Exception:
                 pass
-        return receipt
 
 
 def install_owner(parent, *, store, grant, consumer_resolver, policy, revision_provider):
@@ -573,7 +606,10 @@ def register_launch(parent, child, request=None, *, goal=""):
         if request is not None:
             raise ControlDenied('Supervised launch requires a configured host owner grant')
         return None
-    return owner.launch(parent, child, request, goal=goal)
+    handle = owner.launch(parent, child, request, goal=goal)
+    from agent.supervision_children import attach
+    attach(parent, owner, handle)
+    return handle
 
 
 @contextmanager

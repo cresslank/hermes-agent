@@ -192,6 +192,9 @@ class SupervisionRuntime:
         binding = getattr(self.agent(), "_supervision_view_binding", None)
         if binding is not None:
             binding.accept_defaults(origin)
+        children = getattr(self, 'children', None)
+        if children is not None:
+            children.changed('task_revision')
         self.observe("authenticated_instruction_admitted", {"requirements": project(spans), "source_message_id": origin.message_id,
                      "text": bounded, "continuation": origin.continuation},
                      completeness=self.completeness, origin_kind=origin.kind, data_class="task_text",
@@ -368,6 +371,9 @@ class SupervisionRuntime:
             if not allow_advisory:
                 self._take("", set())  # only settle invalidated/expired proposals
                 return ()
+            children = getattr(self, 'children', None)
+            if children is not None:
+                children.drain()
             efficiency = getattr(self, "efficiency", None)
             if efficiency is not None:
                 advisory = efficiency.drain()

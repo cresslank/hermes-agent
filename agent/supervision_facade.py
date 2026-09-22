@@ -76,6 +76,8 @@ class SupervisionFacade:
             # facade's profile policy with the separately requested action grant.
             from agent.supervision_efficiency import EfficiencyOwner
             capabilities["receipt_reuse"] = EfficiencyOwner.receipt_reuse_version
+            from agent.supervision_children import VERSION as CHILD_RELEVANCE_VERSION
+            capabilities['child_relevance'] = CHILD_RELEVANCE_VERSION
         return capabilities
 
     def _owner_capabilities(self):

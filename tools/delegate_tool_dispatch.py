@@ -147,7 +147,12 @@ def _run_children_parallel(batch: _Batch, results: list, *, honor_parent_interru
     # waiting on the interrupt path instead (same shape as moa_loop).
     interrupted = False
     try:
-        futures = {executor.submit(contextvars.copy_context().run, batch.run_child, i, t, child): i for i, t, child in batch.children}
+        from agent.supervision_children import scheduling_priority
+        # A reversible two-rank submission order, not preemption or an extra
+        # wait. Unowned/required children have the original rank. Running work,
+        # worker limits, future ownership and normal result delivery are unchanged.
+        ordered = sorted(batch.children, key=lambda row: scheduling_priority(row[2]))
+        futures = {executor.submit(contextvars.copy_context().run, batch.run_child, i, t, child): i for i, t, child in ordered}
         pending = set(futures)
         while pending:
             if honor_parent_interrupt and getattr(parent_agent, "_interrupt_requested", False) is True:
