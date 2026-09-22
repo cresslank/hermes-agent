@@ -128,7 +128,12 @@ class SupervisionFacade:
         refs = registration.publish(invocation, source_refs) if version == VERSION and registration else ()
         runtime = self._active_runtime()
         if refs and runtime is not None:
-            runtime.dependencies.claim_uses.published(registration, refs)
+            try:
+                runtime.dependencies.claim_uses.published(registration, refs)
+            except Exception:
+                # An optional contest failure cannot invalidate this completed
+                # source read. Do not retry or infer whether an effect committed.
+                return refs
         return refs
 
     def cancel_literal_sources(self, *, version, invocation):
