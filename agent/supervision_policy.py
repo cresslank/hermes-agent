@@ -577,12 +577,15 @@ class SupervisionRuntime:
                 or not request.data_policy):
             return baseline
         deadline = self.shared_deadline(request.deadline)
-        refs = tuple(c["id"] for c in request.candidates)
-        snapshot = self.observe(action.value, {"candidates": project(request.candidates),
+        ids = tuple(c["id"] for c in request.candidates)
+        refs = request.evidence_refs or ids
+        facts = project(request.facts) if request.event else {"candidates": project(request.candidates),
             "required_ids": request.required_ids, "critical_spans": request.critical_spans,
-            "relations": request.relations}, target_id=request.target_id, actions=(action,),
+            "relations": request.relations}
+        snapshot = self.observe(request.event or action.value, facts,
+            target_id=request.target_id, actions=(action,),
             evidence_refs=refs, deadline=deadline, completeness=request.completeness,
-            owner=request.owner, candidates=refs, required_ids=request.required_ids,
+            owner=request.owner, candidates=ids, required_ids=request.required_ids,
             relations=request.relations, data_class=request.data_policy[0],
             required_data_classes=request.data_policy, required_obligations=request.required_ids)
         if snapshot is None:
@@ -617,7 +620,7 @@ class SupervisionRuntime:
             ids = proposal.candidate_ids or baseline.candidate_ids
             if action == Action.RANK_CANDIDATES:
                 ids = (*ids, *(i for i in baseline.candidate_ids if i not in ids))
-            return OwnerDecisionV1(ids, proposal.relation, True, receipt.receipt_id)
+            return OwnerDecisionV1(ids, proposal.relation, True, receipt.receipt_id, proposal.metadata)
 
     def consume_owner_action(self, target_id, action, apply):
         """HOST OWNER ONLY, at its existing execution/safe-point boundary.

@@ -325,8 +325,19 @@ class OwnerRequestV1:
     completeness: Completeness = Completeness()
     data_policy: tuple[str, ...] = ()
     relations: tuple[str, ...] = ()
+    event: str = ""
+    facts: Mapping[str, Any] = field(default_factory=dict)
+    evidence_refs: tuple[str, ...] = ()
 
     def __post_init__(self):
+        if not isinstance(self.facts, Mapping):
+            raise ValueError("invalid_owner_facts")
+        object.__setattr__(self, "facts", freeze(self.facts))
+        object.__setattr__(self, "evidence_refs", tuple(self.evidence_refs))
+        if type(self.event) is not str or len(self.event) > 128:
+            raise ValueError("invalid_owner_event")
+        if len(self.evidence_refs) > 64 or any(type(x) is not str or not 0 < len(x) <= 256 for x in self.evidence_refs):
+            raise ValueError("invalid_owner_refs")
         object.__setattr__(self, "candidates", freeze(self.candidates))
         for name in ("required_ids", "critical_spans", "data_policy", "relations"):
             object.__setattr__(self, name, tuple(getattr(self, name)))
@@ -350,3 +361,8 @@ class OwnerDecisionV1:
     relation: str | None = None
     applied: bool = False
     receipt_id: str | None = None
+    metadata: Mapping[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self):
+        object.__setattr__(self, "candidate_ids", tuple(self.candidate_ids))
+        object.__setattr__(self, "metadata", bounded_metadata(self.metadata))

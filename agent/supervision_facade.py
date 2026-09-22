@@ -5,6 +5,7 @@ request payload. Registration gives no agent, DB handle or cancellation capabili
 """
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 import threading
@@ -65,8 +66,25 @@ class SupervisionFacade:
                 "view_actions_version": "supervision.view-actions.v1",
                 "view_actions": {"present_material_once": "present_status",
                                  "retrieve": "clarify_retrieve", "ask_material": "clarify_ask"},
+                "owner_capabilities": self._owner_capabilities() if version == VERSION else [],
+                "owner_deadline": True,
                 "grants": sorted(self._registration.grants) if self._registration else [],
                 "data_policy": sorted(self._registration.data_policy) if self._registration else []}
+
+    def _owner_capabilities(self):
+        from agent.supervision_owner_protocol import OWNERS, LOCAL_CLASSES
+        owner = OWNERS.get(self._context.plugin_id)
+        if owner is None:
+            return []
+        scope = self._context._manager.scope_key
+        runtime = self._active_runtime()
+        if runtime is None or runtime.closed or runtime.revision.profile != scope:
+            return []
+        methods = {"rank_candidates", "evaluate_relation" if owner == "lcm" else "select_windows"}
+        return sorted({method for reg in registrations_for_scope(scope)
+                       if "observe" in reg.grants and LOCAL_CLASSES[owner] in reg.data_policy
+                       and reg.egress_policy
+                       for method in methods if method in reg.grants})
 
     def register(self, *, version=VERSION, consumer, requested_grants=(), proposal_provider=None):
         """Register one scheduling-only callback. Worker completion calls submit().
@@ -196,6 +214,20 @@ class SupervisionFacade:
         return runtime.prepare_final(candidate) if runtime else None
 
     def _owner(self, action, request):
+        if isinstance(request, Mapping):
+            from agent.supervision_owner_protocol import decode_request, encode_decision
+            if action.value not in self._owner_capabilities():
+                return None
+            runtime = self._active_runtime()
+            if runtime is None:
+                return None
+            try:
+                runtime._assert_owner(tool_worker=True)
+                typed = decode_request(action, request, plugin_id=self._context.plugin_id, runtime=runtime)
+                decision = runtime.owner_decision(action, typed)
+                return encode_decision(action, request["request_id"], typed, decision)
+            except (ValueError, TypeError, KeyError, RuntimeError):
+                return None
         if not isinstance(request, OwnerRequestV1):
             raise TypeError("owner_request_type")
         from agent.supervision_policy import runtime_for_revision
@@ -205,11 +237,11 @@ class SupervisionFacade:
             return OwnerDecisionV1(tuple(c["id"] for c in request.candidates))
         return runtime.owner_decision(action, request)
 
-    def rank_candidates(self, request: OwnerRequestV1) -> OwnerDecisionV1:
+    def rank_candidates(self, request: OwnerRequestV1 | Mapping) -> OwnerDecisionV1 | dict | None:
         return self._owner(Action.RANK_CANDIDATES, request)
 
-    def select_windows(self, request: OwnerRequestV1) -> OwnerDecisionV1:
+    def select_windows(self, request: OwnerRequestV1 | Mapping) -> OwnerDecisionV1 | dict | None:
         return self._owner(Action.SELECT_WINDOWS, request)
 
-    def evaluate_relation(self, request: OwnerRequestV1) -> OwnerDecisionV1:
+    def evaluate_relation(self, request: OwnerRequestV1 | Mapping) -> OwnerDecisionV1 | dict | None:
         return self._owner(Action.EVALUATE_RELATION, request)
