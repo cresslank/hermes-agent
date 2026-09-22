@@ -31,12 +31,21 @@ class TestSpecialFileKind:
         os.mkfifo(fifo)
         assert "FIFO" in (_special_file_kind(fifo) or "")
 
-    def test_socket(self, tmp_path):
+    def test_socket(self, tmp_path, monkeypatch):
         sock_path = tmp_path / "s.sock"
         s = socket.socket(socket.AF_UNIX)
         try:
-            s.bind(str(sock_path))
-            assert "socket" in (_special_file_kind(sock_path) or "")
+            # AF_UNIX limits the bind address, not the absolute filesystem path.
+            # Keep the socket in pytest's owned directory even under long temp roots.
+            with monkeypatch.context() as binding:
+                binding.chdir(tmp_path)
+                s.bind(sock_path.name)
+                assert os.path.samefile(s.getsockname(), sock_path)
+            assert _special_file_kind(sock_path) == "a socket"
+            result = json.loads(read_file_tool(str(sock_path)))
+            assert result["success"] is False
+            assert "socket" in result["note"]
+            assert "no read was attempted" in result["note"]
         finally:
             s.close()
 
