@@ -13,7 +13,7 @@ import pytest
 
 from hermes_cli.plugins_loader import _plugin_home_scope
 from tools.delegate_tool import _run_single_child as native_run
-from tests.agent.test_owned_delegation_policy import factory  # noqa: F401
+from tests.agent.test_owned_delegation_policy import factory as factory
 
 
 @pytest.mark.parametrize('collision', ['dispatch', 'finish', 'both'])
