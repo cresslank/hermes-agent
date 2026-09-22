@@ -174,9 +174,16 @@ async def persist_delegation_delivery(adapter: Any, *, text: str, session_id: st
                 session_id = str(resolved)
         except Exception:
             logger.debug("delegation delivery continuation resolve failed for %s", session_id, exc_info=True)
-    await asyncio.to_thread(
-        db.append_delegation_delivery, session_id, text, _delegation_display_metadata(evt or {}),
-    )
+    event = evt or {}
+    metadata = _delegation_display_metadata(event)
+    if event.get("supervision_delivery_id"):
+        from agent.completion_admission import accept_event, delivery_metadata, consume_metadata
+        if not await asyncio.to_thread(accept_event, event):
+            raise WakeNotAccepted("durable delivery already reserved")
+        metadata.update(delivery_metadata(event))
+        await asyncio.to_thread(consume_metadata, db, session_id, text, metadata)
+    else:
+        await asyncio.to_thread(db.append_delegation_delivery, session_id, text, metadata)
     logger.info(
         "async delegation completion persisted as delivery row for api_server session %s (no wake turn)", session_id
     )

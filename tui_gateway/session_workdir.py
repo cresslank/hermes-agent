@@ -345,7 +345,7 @@ def _persist_branch_seed(session: dict) -> None:
             _workdir_reraise_disk_full(exc, "branch seed persist failed")
 
 
-def _persist_submit_user_row(session: dict, text: Any, display_kind: str | None) -> None:
+def _persist_submit_user_row(session: dict, text: Any, display_kind: str | None, display_metadata: dict | None = None) -> None:
     """Write the submitted user turn at send time, before the agent build and turn: the agent's own
     crash persist only runs once the build finished, so quitting a frozen app during a slow first build
     left a session row with no message (#111868). The dict is staged on the session already stamped
@@ -364,10 +364,17 @@ def _persist_submit_user_row(session: dict, text: Any, display_kind: str | None)
         if db is None:
             return
         try:
-            staged["_row_id"] = db.append_message(
-                key, "user", content=text, display_kind=display_kind, timestamp=staged["timestamp"])
+            if display_metadata and (display_metadata.get("supervision_delivery_id") or display_metadata.get("supervision_deliveries")):
+                from agent.completion_admission import consume_metadata
+                staged["_row_id"] = consume_metadata(db, key, text, display_metadata)
+                staged["display_metadata"] = display_metadata
+            else:
+                staged["_row_id"] = db.append_message(
+                    key, "user", content=text, display_kind=display_kind, timestamp=staged["timestamp"])
         except Exception as exc:
             _workdir_reraise_disk_full(exc, "submit-time user row persist failed")
+            if display_metadata and (display_metadata.get("supervision_delivery_id") or display_metadata.get("supervision_deliveries")):
+                raise
             return
     staged[_DB_PERSISTED_MARKER] = True
     session["_submit_user_row"] = staged

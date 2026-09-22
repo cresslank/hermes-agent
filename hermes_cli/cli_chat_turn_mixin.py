@@ -239,7 +239,8 @@ class CLIChatTurnMixin:
             if isinstance(message, TimelineNotification):
                 staged_user_message.update(content=str(message), display_kind=message.display_kind,
                                            display_metadata={"display_text": message.display_text,
-                                                             "notification_category": message.notification_category})
+                                                             "notification_category": message.notification_category,
+                                                             **getattr(message, "supervision_metadata", {})})
             agent._pending_cli_user_message = staged_user_message
             self.conversation_history.append(staged_user_message)
         from agent.supervision_context import accept_pending_input

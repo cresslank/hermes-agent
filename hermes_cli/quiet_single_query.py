@@ -215,6 +215,11 @@ def continue_quiet_notify_completions(
     deadline = time.monotonic() + max(float(linger_budget), 0.0)
     for _ in range(max_rounds):
         wait = process_registry.wait_for_pending_completions(None, timeout=max(deadline - time.monotonic(), 0.0))
+        from agent.completion_admission import requeue_due
+        try:
+            requeue_due(process_registry.completion_queue, key)
+        except Exception:
+            pass
         drained = []
         for event, text in process_registry.drain_notifications(session_key=key, owns_event=owns_event):
             # Durable async_delegation events carry a delivery ledger: without the
@@ -224,15 +229,38 @@ def continue_quiet_notify_completions(
             claim = claim_event_delivery(event, "cli-quiet")
             if claim is None:
                 continue
-            complete_event_delivery(event, claim)
-            drained.append((event, text))
+            from agent.completion_admission import prepare_event, accept_event
+            from tools.async_delegation import defer_completion_delivery
+            try:
+                if not prepare_event(event, claim, key).present:
+                    continue
+                if not accept_event(event):
+                    if claim:
+                        defer_completion_delivery(event["delegation_id"], claim)
+                    continue
+            except Exception:
+                process_registry.completion_queue.put(event)
+                if claim:
+                    defer_completion_delivery(event["delegation_id"], claim)
+                continue
+            if not event.get("supervision_delivery_id"):
+                complete_event_delivery(event, claim)
+            from agent.completion_admission import presentation_text
+            drained.append((event, presentation_text(event, text)))
         # Every drained event type carries formatted text (completions, watch matches,
         # async_delegation results): drain_notifications POPS owned events off the queue,
         # so filtering by type here would consume-and-silently-drop owned
         # async_delegation results. Keep everything that rendered.
         texts = [text for _event, text in drained if text]
         if texts:
-            follow = run_turn("\n\n".join(texts))
+            from tools.process_registry_notifications import TimelineNotification
+            from agent.completion_admission import delivery_metadata
+            follow_text = "\n\n".join(texts)
+            ids = [delivery_metadata(event) for event, text in drained if text and event.get("supervision_delivery_id")]
+            if ids:
+                follow_text = TimelineNotification(follow_text, "Background results", "async_delegation_complete")
+                follow_text.supervision_metadata = {"supervision_deliveries": ids}
+            follow = run_turn(follow_text)
             # Same admission rule as the interactive CLI turn: a wake made ONLY of automatic
             # diagnostics (early failure / watch notices) still runs, but under suppression its
             # reply never displaces the requested one-shot answer on stdout.

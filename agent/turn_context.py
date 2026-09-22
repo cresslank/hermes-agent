@@ -646,6 +646,19 @@ def _stage_turn_user_message(
         user_msg["display_kind"] = persist_user_display_kind
     if persist_user_display_metadata:
         user_msg["display_metadata"] = persist_user_display_metadata
+    # Durable internal completions adopt the exact reserved row under this turn's
+    # ordinary lease. A queue hint alone must never be marked persisted.
+    delivery_meta = user_msg.get("display_metadata") or getattr(user_message, "supervision_metadata", {})
+    if delivery_meta.get("supervision_delivery_id") or delivery_meta.get("supervision_deliveries"):
+        from agent.completion_admission import consume_metadata
+        from agent.context_compressor import _DB_PERSISTED_MARKER
+        db = getattr(agent, "_session_db", None)
+        if db is None:
+            raise RuntimeError("completion admission requires the session store")
+        user_msg["display_metadata"] = delivery_meta
+        user_msg["_row_id"] = consume_metadata(db, agent.session_id, str(expected_persist_content), delivery_meta,
+            turn_lease_holder=getattr(agent, "_active_session_turn_lease_holder", None))
+        user_msg[_DB_PERSISTED_MARKER] = True
     # The platform message id survives the turn-start flush; restart drain-window
     # recovery dedups via ``has_platform_message_id`` against this row.
     if persist_user_platform_id is not None:

@@ -90,6 +90,10 @@ class GatewayBusySessionMixin:
         pending_slot = getattr(adapter, "_pending_messages", None) if adapter is not None else None
         if pending_slot is None:
             return
+        if queued_event.internal:
+            from agent.completion_admission import accept_metadata
+            if not accept_metadata(queued_event.metadata or {}, capacity=self._BUSY_QUEUE_MAX_PENDING):
+                return
         if session_key in pending_slot:
             self._session_state(session_key).conversation.queued_events.append(queued_event)
         else:
@@ -105,6 +109,11 @@ class GatewayBusySessionMixin:
         staged into the slot for the NEXT recursion. Returns the (possibly updated) pending_event.
         """
         overflow = self._overflow_queue(session_key)
+        if not overflow:
+            return pending_event
+        from agent.completion_admission import valid_hint
+        while overflow and overflow[0].internal and not valid_hint(overflow[0].metadata or {}):
+            overflow.pop(0)  # revoked/obsolete hint, not deletion of the retained source
         if not overflow:
             return pending_event
         if pending_event is None:

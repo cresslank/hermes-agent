@@ -1560,11 +1560,17 @@ class SessionSessionsMixin:
         """Delete *session_id* only if it has no messages, no title and no children; check and delete
         share one transaction so a concurrent flush can't be lost."""
         def _do(conn):
+            from agent.supervision_store import UNSETTLED_CONTROL_SQL
             cursor = conn.execute(
-                """
+                f"""
                 DELETE FROM sessions
                 WHERE id = ?
                   AND title IS NULL
+                  AND NOT EXISTS (SELECT 1 FROM delegation_controls c WHERE c.parent_session_id=sessions.id
+                      AND ({UNSETTLED_CONTROL_SQL}))
+                  AND NOT EXISTS (SELECT 1 FROM delegation_result_objects o WHERE o.session_id=sessions.id
+                      AND (o.settled_at IS NULL OR o.effect_pending=1 OR o.object_id IN
+                           (SELECT object_id FROM supervision_admissions WHERE state!='consumed')))
                   AND NOT EXISTS (
                       SELECT 1 FROM messages WHERE messages.session_id = sessions.id
                   )

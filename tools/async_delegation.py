@@ -118,7 +118,7 @@ def _initialize_schema(conn: sqlite3.Connection) -> None:
 def _transaction():
     from hermes_cli.sqlite_util import transaction
 
-    return transaction(_connect())
+    return transaction(_connect(), immediate=True)
 
 
 def _capture_routing_origin() -> Dict[str, Any]:
@@ -148,7 +148,11 @@ def _persist_dispatch(record: Dict[str, Any]) -> None:
     except OSError:
         pass
     with _DB_LOCK, _transaction() as conn:
-        conn.execute("""INSERT OR REPLACE INTO async_delegations
+        from agent.supervision_store import AdmissionError
+        source_session = record.get("parent_session_id") or record.get("origin_session_id") or record.get("session_key", "")
+        if conn.execute("SELECT 1 FROM supervision_generations WHERE session_id=? AND revoked=1", (source_session,)).fetchone():
+            raise AdmissionError("launch session revoked")
+        conn.execute("""INSERT INTO async_delegations
                (delegation_id, origin_session, origin_ui_session_id,
                 parent_session_id, state, dispatched_at, updated_at,
                 delivery_state, delivery_attempts, owner_pid,
@@ -157,6 +161,8 @@ def _persist_dispatch(record: Dict[str, Any]) -> None:
             (record["delegation_id"], record.get("session_key", ""), record.get("origin_ui_session_id", ""),
              record.get("parent_session_id"), record["dispatched_at"], now, os.getpid(), owner_started_at,
              json.dumps(task_payload), record.get("origin_session_id", "")))
+        conn.execute("UPDATE async_delegations SET control_child_ids=? WHERE delegation_id=?",
+                     (json.dumps(record.get("control_child_ids", [])), record["delegation_id"]))
     _prune_durable_records()
 
 
@@ -164,23 +170,27 @@ def _prune_durable_records() -> None:
     """Bound terminal history, preferring delivered records for deletion."""
     cutoff = time.time() - _DURABLE_RETENTION_SECONDS
     with _DB_LOCK, _transaction() as conn:
+        from agent.supervision_store import prune_objects, UNSETTLED_CONTROL_SQL
+        prune_objects(conn)
+        control_guard = f"""NOT EXISTS (SELECT 1 FROM delegation_controls c
+            WHERE c.parent_session_id=async_delegations.parent_session_id AND ({UNSETTLED_CONTROL_SQL}))"""
         conn.execute(
-            "DELETE FROM async_delegations WHERE delivery_state='delivered' AND updated_at < ?", (cutoff,))
+            f"DELETE FROM async_delegations WHERE delivery_state='delivered' AND updated_at < ? AND {control_guard} AND NOT EXISTS (SELECT 1 FROM delegation_result_objects o WHERE o.launch_id=async_delegations.delegation_id AND (o.settled_at IS NULL OR o.effect_pending=1))", (cutoff,))
         terminal_count = conn.execute(
             "SELECT COUNT(*) FROM async_delegations WHERE state NOT IN ('running','finalizing')").fetchone()[0]
         if terminal_count > _MAX_RETAINED_COMPLETED:
-            conn.execute("""DELETE FROM async_delegations WHERE delegation_id IN (
+            conn.execute(f"""DELETE FROM async_delegations WHERE delegation_id IN (
                      SELECT delegation_id FROM async_delegations
-                     WHERE state NOT IN ('running','finalizing')
+                     WHERE state NOT IN ('running','finalizing','stalling') AND {control_guard} AND NOT EXISTS (SELECT 1 FROM delegation_result_objects o WHERE o.launch_id=async_delegations.delegation_id AND (o.settled_at IS NULL OR o.effect_pending=1))
                      ORDER BY CASE delivery_state WHEN 'delivered' THEN 0 ELSE 1 END,
                               updated_at ASC LIMIT ?
                    )""", (terminal_count - _MAX_RETAINED_COMPLETED,))
         pending_count = conn.execute("""SELECT COUNT(*) FROM async_delegations
                WHERE state NOT IN ('running','finalizing') AND delivery_state='pending'""").fetchone()[0]
         if pending_count > _MAX_DURABLE_PENDING:
-            conn.execute("""DELETE FROM async_delegations WHERE delegation_id IN (
+            conn.execute(f"""DELETE FROM async_delegations WHERE delegation_id IN (
                      SELECT delegation_id FROM async_delegations
-                     WHERE state NOT IN ('running','finalizing') AND delivery_state='pending'
+                     WHERE state NOT IN ('running','finalizing','stalling') AND delivery_state='pending' AND {control_guard} AND NOT EXISTS (SELECT 1 FROM delegation_result_objects o WHERE o.launch_id=async_delegations.delegation_id AND (o.settled_at IS NULL OR o.effect_pending=1))
                      ORDER BY updated_at ASC LIMIT ?
                    )""", (pending_count - _MAX_DURABLE_PENDING,))
 
@@ -188,11 +198,68 @@ def _prune_durable_records() -> None:
 def _persist_completion(event: Dict[str, Any], result: Dict[str, Any]) -> None:
     now = time.time()
     with _DB_LOCK, _transaction() as conn:
+        from agent.supervision_store import put_result_object
+        source = conn.execute("SELECT parent_session_id,origin_session_id,origin_session FROM async_delegations WHERE delegation_id=?", (event["delegation_id"],)).fetchone()
+        if source is None:
+            return  # deleted launch: late events cannot resurrect it
+        payload = json.dumps(result).encode("utf-8")
+        existing = conn.execute("SELECT result_json,event_json FROM async_delegations WHERE delegation_id=?", (event["delegation_id"],)).fetchone()
+        if existing[1] is not None:
+            from agent.supervision_store import AdmissionError
+            if existing[0] != payload.decode("utf-8"):
+                raise AdmissionError("final source already committed with different bytes")
+            saved = json.loads(existing[1])
+            if saved.get("source_object_id"):
+                event["source_object_id"] = saved["source_object_id"]
+            return
+        event["source_object_id"] = put_result_object(conn, launch_id=event["delegation_id"], source_id="final",
+            subtype="final", payload=payload, session_id=source[0] or source[1] or source[2])
         conn.execute("""UPDATE async_delegations SET state=?, completed_at=?, updated_at=?,
                event_json=?, result_json=?, delivery_state='pending'
                WHERE delegation_id=?""",
             (event.get("status", "completed"), event.get("completed_at", now), now,
              json.dumps(event), json.dumps(result), event["delegation_id"]))
+
+
+def get_launch_control(delegation_id: str) -> Dict[str, Any]:
+    from agent.supervision_store import get_launch_control as read
+    with _DB_LOCK, _transaction() as conn:
+        return read(conn, delegation_id)
+
+
+def commit_finding(delegation_id: str, *, finding_id: str, source_receipt: str,
+                   payload: bytes, verified: bool = False) -> Dict[str, Any]:
+    """Commit an exact owner finding independently of the eventual final batch.
+
+    Only explicit committed owner facts call this API. ``verified`` is receipt
+    validation by that owner, never inferred from child/model wording.
+    """
+    from agent.supervision_store import put_result_object, persist_admission, AdmissionError
+    if not finding_id or not source_receipt or not payload or len(payload) > 4 * 1024 * 1024:
+        raise ValueError("finding requires bounded exact source and receipt")
+    text = payload.decode("utf-8")
+    with _DB_LOCK, _transaction() as conn:
+        row = conn.execute("SELECT parent_session_id,origin_session,origin_ui_session_id,task_json FROM async_delegations WHERE delegation_id=?", (delegation_id,)).fetchone()
+        if row is None:
+            raise AdmissionError("finding launch missing")
+        parent, key, ui, task_json = row
+        previous = conn.execute("SELECT payload FROM delegation_result_objects WHERE launch_id=? AND source_id=? AND subtype='finding'", (delegation_id,finding_id)).fetchone()
+        if previous and bytes(previous[0]) != payload:
+            raise AdmissionError("finding identity already committed with different bytes")
+        object_id = put_result_object(conn, launch_id=delegation_id, source_id=finding_id, subtype="finding",
+                                      payload=payload, session_id=parent or key)
+        task = json.loads(task_json or "{}")
+        event = {"type": "async_delegation", "delegation_id": delegation_id, "finding_id": finding_id,
+                 "source_receipt": source_receipt, "source_object_id": object_id, "verified": verified is True,
+                 "parent_session_id": parent, "session_key": key, "origin_ui_session_id": ui,
+                 "summary": text, "status": "finding", **{k: task[k] for k in _ROUTING_KEYS if k in task}}
+        # A persisted receipt makes a crash before the queue hint recoverable.
+        receipt = persist_admission(conn, event=event, claim="", target_session_id=parent or key)
+        event["supervision_delivery_id"] = receipt["delivery_id"]
+    from tools.process_registry import process_registry
+    if receipt["state"] == "persisted":
+        process_registry.completion_queue.put(event)
+    return event
 
 
 def record_unit_child(delegation_id: str, entry: Dict[str, Any]) -> None:
@@ -206,6 +273,10 @@ def record_unit_child(delegation_id: str, entry: Dict[str, Any]) -> None:
                                (delegation_id,)).fetchone()
             if row is None:
                 return
+            from agent.supervision_store import put_result_object
+            owner = conn.execute("SELECT parent_session_id,origin_session FROM async_delegations WHERE delegation_id=?", (delegation_id,)).fetchone()
+            put_result_object(conn, launch_id=delegation_id, source_id=f"child:{entry.get('task_index')}",
+                subtype="child", payload=json.dumps(entry).encode("utf-8"), session_id=owner[0] or owner[1])
             partial = json.loads(row[0] or "{}") or {}
             results = [r for r in partial.get("results") or [] if r.get("task_index") != entry.get("task_index")]
             results.append(entry)
@@ -295,13 +366,22 @@ def restore_undelivered_completions(target_queue) -> int:
     recover_abandoned_delegations()
     now, restored = time.time(), 0
     with _DB_LOCK, _transaction() as conn:
+        from agent.completion_admission import recover_events
+        inbox_events = recover_events(conn)
+        inbox_launches = {evt["delegation_id"] for evt in inbox_events if not evt.get("finding_id")}
+        for evt in inbox_events:
+            target_queue.put(evt)
+            restored += 1
         rows = conn.execute("""SELECT delegation_id, event_json, completed_at, dispatched_at
                FROM async_delegations
                WHERE state != 'running' AND delivery_state='pending' AND event_json IS NOT NULL
                ORDER BY completed_at, delegation_id""").fetchall()
         for delegation_id, payload, completed_at, dispatched_at in rows:
+            if delegation_id in inbox_launches:
+                continue
+            protected = conn.execute("SELECT 1 FROM delegation_result_objects WHERE launch_id=? AND settled_at IS NULL", (delegation_id,)).fetchone()
             age_basis = completed_at or dispatched_at
-            if age_basis and (now - age_basis) > _MAX_COMPLETION_REPLAY_AGE_S:
+            if not protected and age_basis and (now - age_basis) > _MAX_COMPLETION_REPLAY_AGE_S:
                 conn.execute("""UPDATE async_delegations SET delivery_state='dropped',
                               delivery_claim=NULL, delivery_claimed_at=NULL,
                               updated_at=?
@@ -321,7 +401,13 @@ def restore_undelivered_completions(target_queue) -> int:
 def _update_delivery(sql: str, params: tuple) -> bool:
     """Run one UPDATE on the ledger; True iff exactly one row changed."""
     with _DB_LOCK, _transaction() as conn:
-        return conn.execute(sql, params).rowcount == 1
+        changed = conn.execute(sql, params).rowcount == 1
+        if changed:
+            conn.execute("""UPDATE delegation_result_objects SET settled_at=?
+                WHERE settled_at IS NULL AND effect_pending=0
+                AND launch_id IN (SELECT delegation_id FROM async_delegations WHERE delivery_state='delivered')
+                AND object_id NOT IN (SELECT object_id FROM supervision_admissions WHERE state!='consumed')""", (time.time(),))
+        return changed
 
 
 def mark_completion_delivered(delegation_id: str) -> bool:
@@ -352,16 +438,28 @@ def is_interim_delegation_event(evt: Dict[str, Any]) -> bool:
     """An early per-task notice for a batch that is still running. It shares the batch's
     ``delegation_id`` but is NOT the durable completion: it must never claim, acknowledge or
     dedup against the final result's row (independent review reproduced exactly that loss)."""
-    return evt.get("type") == "async_delegation" and bool(evt.get("task_failure_notice"))
+    return evt.get("type") == "async_delegation" and bool(evt.get("task_failure_notice") or evt.get("finding_id"))
 
 
 def claim_event_delivery(evt: Dict[str, Any], consumer: str) -> Optional[str]:
     """Claim a durable delegation event; non-durable events (and interim notices) need no token."""
+    if evt.get("_supervision_recovery") and evt.get("supervision_delivery_id"):
+        from agent.supervision_store import get_admission
+        with _DB_LOCK, _transaction() as conn:
+            row = get_admission(conn, evt["supervision_delivery_id"])
+            if row and row["state"] in {"persisted", "accepted"}:
+                current = conn.execute("SELECT delivery_claim FROM async_delegations WHERE delegation_id=?", (row["launch_id"],)).fetchone()
+                if row["subtype"] == "finding" or row["state"] == "accepted" or (current and current[0] == row["source_claim"]):
+                    return row["source_claim"]
     if is_interim_delegation_event(evt):
         return ""
     delegation_id = str(evt.get("delegation_id") or "") if evt.get("type") == "async_delegation" else ""
     if not delegation_id:
         return ""
+    if evt.get("source_object_id"):
+        with _DB_LOCK, _transaction() as conn:
+            if conn.execute("SELECT 1 FROM async_delegations WHERE delegation_id=?", (delegation_id,)).fetchone() is None:
+                return None  # pruned/deleted modern source is not a legacy event
     claim_id = f"{consumer}:{os.getpid()}:{uuid.uuid4().hex}"
     return claim_id if claim_completion_delivery(delegation_id, claim_id) else None
 
@@ -375,7 +473,8 @@ def release_completion_delivery(delegation_id: str, claim_id: str) -> bool:
         capped = conn.execute("""UPDATE async_delegations SET delivery_state='dropped',
                       delivery_claim=NULL, delivery_claimed_at=NULL, updated_at=?
                WHERE delegation_id=? AND delivery_state='pending'
-                 AND delivery_claim=? AND delivery_attempts>=?""",
+                 AND delivery_claim=? AND delivery_attempts>=?
+                 AND NOT EXISTS (SELECT 1 FROM delegation_result_objects o WHERE o.launch_id=async_delegations.delegation_id AND (o.settled_at IS NULL OR o.effect_pending=1))""",
             (now, delegation_id, claim_id, _MAX_DELIVERY_ATTEMPTS))
         if capped.rowcount == 1:
             logger.warning("Async delegation %s exhausted its %d delivery attempts; "
@@ -417,10 +516,12 @@ def complete_completion_delivery(delegation_id: str, claim_id: str) -> bool:
                   delivered_at=?, updated_at=?, delivery_claim=NULL,
                   delivery_claimed_at=NULL
            WHERE delegation_id=? AND delivery_state='pending'
-             AND delivery_claim=?""", (now, now, delegation_id, claim_id))
+             AND delivery_claim=? AND NOT EXISTS (SELECT 1 FROM supervision_admissions a WHERE a.launch_id=async_delegations.delegation_id AND a.subtype='final')""", (now, now, delegation_id, claim_id))
 
 
 def complete_event_delivery(evt: Dict[str, Any], claim_id: str) -> None:
+    if evt.get("supervision_delivery_id") or evt.get("finding_id"):
+        return  # SessionDB consumption, not queue admission, settles durable deliveries
     _event_delivery(complete_completion_delivery, evt, claim_id)
 
 
@@ -557,6 +658,7 @@ def _dispatch_admitted(
     progress_fn: Optional[Callable[[], tuple]], capacity_error: str, slot_key: Optional[str] = None,
     task_indexes: Optional[List[int]] = None,
     task_transcripts: Optional[Dict[str, str]] = None,
+    control_children: Optional[List[Any]] = None,
 ) -> Dict[str, Any]:
     """Shared dispatch core for single (``goals is None``) and batch units. Capacity check +
     record insert happen under ONE lock hold so concurrent dispatches can't both pass the check
@@ -578,6 +680,8 @@ def _dispatch_admitted(
         "status": "running", "dispatched_at": dispatched_at, "completed_at": None,
         "interrupt_fn": interrupt_fn, **({"is_batch": True} if is_batch else {}), "progress_fn": progress_fn,
         "slot_key": slot_key or delegation_id,
+        # Identity linkage only. Missing/partial legacy coverage stays unknown at admission.
+        "control_child_ids": [getattr(child, "_subagent_id", None) for child in (control_children or [])],
         **({"task_transcripts": dict(task_transcripts)} if task_transcripts else {}),
         # Which of the call's ``goals`` this unit runs (None = all of them).
         **({"task_indexes": list(task_indexes)} if task_indexes is not None else {}),
@@ -590,9 +694,17 @@ def _dispatch_admitted(
         active_slots = {r.get("slot_key") or r["delegation_id"] for r in _records.values() if r.get("status") in _ACTIVE_STATES}
         if record["slot_key"] not in active_slots and len(active_slots) >= max_async_children:
             return {"status": "rejected", "error": capacity_error}
+        if delegation_id in _records:
+            return {"status": "rejected", "error": "delegation identity already exists"}
         _records[delegation_id] = record
         live_units = sum(1 for r in _records.values() if r.get("status") in _LIVE_STATES)
-    _persist_dispatch(record)
+    try:
+        _persist_dispatch(record)
+    except Exception:
+        with _records_lock:
+            _records.pop(delegation_id, None)
+        logger.warning("Async delegation source admission failed", exc_info=True)
+        return {"status": "rejected", "error": "Failed to persist async delegation launch"}
     # Units of one call share a slot, so live units can exceed slots: size the pool by units or a
     # unit queues behind a full pool and the stale monitor kills it before its child ever starts.
     executor = _get_executor(max(max_async_children, live_units))
@@ -639,6 +751,7 @@ def dispatch_async_delegation(
     session_key: str, parent_session_id: Optional[str] = None, runner: Callable[[], Dict[str, Any]],
     origin_ui_session_id: str = "", origin_session_id: str = "", interrupt_fn: Optional[Callable[[], None]] = None,
     max_async_children: int = _DEFAULT_MAX_ASYNC_CHILDREN, progress_fn: Optional[Callable[[], tuple]] = None,
+    control_children: Optional[List[Any]] = None,
 ) -> Dict[str, Any]:
     """Spawn ``runner`` on the daemon executor and return a handle immediately.
     ``session_key``/``parent_session_id`` are captured on the parent thread (the worker carries
@@ -652,6 +765,7 @@ def dispatch_async_delegation(
         parent_session_id=parent_session_id, runner=runner,
         origin_ui_session_id=origin_ui_session_id, origin_session_id=origin_session_id,
         interrupt_fn=interrupt_fn, max_async_children=max_async_children, progress_fn=progress_fn,
+        control_children=control_children,
         capacity_error=(
             f"Async delegation capacity reached ({max_async_children} running). Wait for one to finish "
             "(its result will re-enter the chat), or run this task synchronously (background=false). "
@@ -670,6 +784,7 @@ def dispatch_async_delegation_batch(
     progress_fn: Optional[Callable[[], tuple]] = None, slot_key: Optional[str] = None,
     task_indexes: Optional[List[int]] = None,
     task_transcripts: Optional[Dict[str, str]] = None,
+    control_children: Optional[List[Any]] = None,
 ) -> Dict[str, Any]:
     """Dispatch a fan-out unit (a whole batch, or one ``group`` of a delegate_task call) as ONE
     background unit: ``runner`` runs its tasks and returns the combined ``{"results": [...],
@@ -686,7 +801,8 @@ def dispatch_async_delegation_batch(
         toolsets=toolsets, role=role, model=model, session_key=session_key,
         parent_session_id=parent_session_id, runner=runner,
         origin_ui_session_id=origin_ui_session_id, origin_session_id=origin_session_id,
-        interrupt_fn=interrupt_fn, max_async_children=max_async_children, progress_fn=progress_fn, slot_key=slot_key,
+        interrupt_fn=interrupt_fn, max_async_children=max_async_children, progress_fn=progress_fn,
+        control_children=control_children, slot_key=slot_key,
         task_indexes=task_indexes, task_transcripts=task_transcripts,
         capacity_error=(
             f"Async delegation capacity reached ({max_async_children} running). Wait for one to finish "

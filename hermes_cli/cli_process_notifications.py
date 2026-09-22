@@ -25,6 +25,11 @@ class CLIProcessNotificationsMixin:
         from tools.process_registry_notifications import (
             ProcessNotificationBatch, TimelineNotification, group_process_notifications)
 
+        from agent.completion_admission import requeue_due
+        try:
+            requeue_due(process_registry.completion_queue, getattr(self, "session_id", ""))
+        except Exception:
+            pass  # retry through the next existing idle pass
         claimed = []
         for event, text in process_registry.drain_notifications(
             session_key=getattr(self, "session_id", "") or "", owns_event=self._owns_process_notification,
@@ -32,8 +37,28 @@ class CLIProcessNotificationsMixin:
             claim = claim_event_delivery(event, consumer)
             if claim is None:
                 continue
+            from agent.completion_admission import prepare_event, accept_event
+            from tools.async_delegation import defer_completion_delivery
+            try:
+                prepared = prepare_event(event, claim, getattr(self, "session_id", ""))
+                if not prepared.present:
+                    continue
+                capacity = getattr(self._pending_input, 'maxsize', 0) or 256
+                if self._pending_input.qsize() >= capacity or not accept_event(event, capacity=capacity):
+                    if claim:
+                        defer_completion_delivery(event["delegation_id"], claim)
+                    process_registry.completion_queue.put(event)
+                    continue
+            except Exception:
+                process_registry.completion_queue.put(event)
+                if claim:
+                    defer_completion_delivery(event["delegation_id"], claim)
+                continue
+            from agent.completion_admission import presentation_text
+            text = presentation_text(event, text)
             claimed.append((event, text))
-            complete_event_delivery(event, claim)
+            if not event.get("supervision_delivery_id"):
+                complete_event_delivery(event, claim)
         for notifications in group_process_notifications(claimed):
             event, text = notifications[0]
             if event.get("type", "completion") == "completion":
@@ -43,7 +68,13 @@ class CLIProcessNotificationsMixin:
                 from agent.notification_presentation import diagnostic_process_event
                 if diagnostic_process_event(event) and not isinstance(pending, TimelineNotification):
                     pending = TimelineNotification(text, text, "internal_notification", "diagnostic")
-            self._pending_input.put(pending)
+            from queue import Full
+            try:
+                self._pending_input.put_nowait(pending)
+            except Full:
+                # Reservation survives a lost hint; idle/startup recovery retries it.
+                for queued_event, _queued_text in notifications:
+                    process_registry.completion_queue.put(queued_event)
 
     def _tui_unwrap_input(self, user_input):
         """Unwrap ``_VoiceInputMessage`` / ``_SeededQueryMessage`` -> ``(text_or_tuple, is_voice_input, is_seeded_query)``."""
@@ -55,6 +86,11 @@ class CLIProcessNotificationsMixin:
             rendered = user_input.render(process_registry)
             user_input = rendered and TimelineNotification(
                 rendered, user_input.display_text(process_registry), PROCESS_COMPLETE_DISPLAY_KIND)
+        metadata = getattr(user_input, "supervision_metadata", None)
+        if metadata:
+            from agent.completion_admission import valid_hint
+            if not valid_hint(metadata, getattr(self, "session_id", None)):
+                return None, False, False
         # Voice-transcribed messages arrive wrapped in a sentinel so only genuine STT output gets the voice
         # prefix (#65827).
         is_voice_input = isinstance(user_input, _VoiceInputMessage)

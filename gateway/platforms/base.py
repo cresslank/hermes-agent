@@ -3804,6 +3804,10 @@ class BasePlatformAdapter(ABC):
         """Spawn a background processing task under the session guard; True on success. If
         ``create_task`` is stubbed with a non-Task sentinel (tests), the guard is rolled back
         (False)."""
+        if event.internal:
+            from agent.completion_admission import valid_hint
+            if not valid_hint(event.metadata or {}):
+                return False
         guard = interrupt_event or asyncio.Event()
         self._active_sessions[session_key] = guard
         task = asyncio.create_task(self._process_message_background(event, session_key))
@@ -3926,6 +3930,11 @@ class BasePlatformAdapter(ABC):
         if session_key in self._active_sessions:
             await self._handle_message_while_active(event, session_key)
             return
+        # Reserve the durable inbox before an in-memory scheduling hint escapes.
+        if event.internal:
+            from agent.completion_admission import accept_metadata
+            if not accept_metadata(event.metadata or {}):
+                return
         # Guard installed synchronously BEFORE the task spawns so a second message can't race in.
         event._gateway_accepted = self._start_session_processing(event, session_key)
 
@@ -3985,6 +3994,10 @@ class BasePlatformAdapter(ABC):
         # (or collapse distinct wakes into one turn). Its caller can retry admission.
         if event.internal and session_key in self._pending_messages:
             return
+        if event.internal:
+            from agent.completion_admission import accept_metadata
+            if not accept_metadata(event.metadata or {}):
+                return
         # Photo bursts/albums: queue without interrupting; they run after the current task.
         if event.message_type == MessageType.PHOTO:
             logger.debug("[%s] Queuing photo follow-up for session %s without interrupt", self.name, session_key)

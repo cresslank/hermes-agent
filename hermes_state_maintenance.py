@@ -82,12 +82,18 @@ class SessionMaintenanceMixin:
         """Remove empty TUI ghost sessions (no messages, no title, >24hr old)."""
         cutoff = time.time() - 86400
         def _do(conn):
-            ids = [r[0] for r in conn.execute("""
+            from agent.supervision_store import UNSETTLED_CONTROL_SQL
+            ids = [r[0] for r in conn.execute(f"""
                 SELECT id FROM sessions
                 WHERE source = 'tui'
                   AND title IS NULL
                   AND ended_at IS NOT NULL
                   AND started_at < ?
+                  AND NOT EXISTS (SELECT 1 FROM delegation_controls c WHERE c.parent_session_id=sessions.id
+                      AND ({UNSETTLED_CONTROL_SQL}))
+                  AND NOT EXISTS (SELECT 1 FROM delegation_result_objects o WHERE o.session_id=sessions.id
+                      AND (o.settled_at IS NULL OR o.effect_pending=1 OR o.object_id IN
+                           (SELECT object_id FROM supervision_admissions WHERE state!='consumed')))
                   AND NOT EXISTS (
                       SELECT 1 FROM messages WHERE messages.session_id = sessions.id
                   )
@@ -284,6 +290,13 @@ class SessionMaintenanceMixin:
             cursor = conn.execute(f"SELECT s.id FROM sessions s WHERE {where}", where_params)
             session_ids = {row["id"] for row in cursor.fetchall()}
             if exclude_active_write_guards:
+                from agent.supervision_store import prune_objects, protected_control_sessions
+                prune_objects(conn)
+                protected = {r[0] for r in conn.execute("""SELECT session_id FROM delegation_result_objects
+                    WHERE settled_at IS NULL OR effect_pending=1 OR object_id IN
+                    (SELECT object_id FROM supervision_admissions WHERE state!='consumed')""")}
+                protected.update(r[0] for r in conn.execute("SELECT target_session_id FROM supervision_admissions WHERE state!='consumed'"))
+                session_ids -= protected | protected_control_sessions(conn)
                 session_ids -= {sid for sid in session_ids
                                 if self._write_guards_reject(conn, sid, allow_closed_compression_parent=True)}
             if not session_ids:
