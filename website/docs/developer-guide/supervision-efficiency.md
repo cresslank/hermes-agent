@@ -11,7 +11,7 @@ required verification, mark requirements complete, or execute a recovery route.
 | --- | --- | --- |
 | Overlapping file read | Authorized `tool_executor` pre-dispatch, followed by the real read-result observation | One bounded advisory; the main read still dispatches. Identical requested windows stay on the file owner's existing deterministic dedup path. |
 | Delegation recommendation | `_build_children`, **after** `register_launch` and **before** scheduling | Bounded pre-launch recommendation for an existing authorized route; no new launch or cancellation. |
-| Repeated failed approach | `AIAgent._append_guardrail_observation` over actual results | One distinct recurrence incident after at least three matching attempts in a 12-event window; existing hard guardrails are unchanged. |
+| Repeated failed approach | `AIAgent._append_guardrail_observation` over actual results | One shared failure/recurrence incident after at least three matching attempts in a 12-event window; existing hard guardrails are unchanged. |
 | Verification reuse | `record_verify_run(..., supervision_check=...)`, then `propose_verification_reuse(check, current=...)` | Dedicated `reuse_receipt` admission returns the **original** successful native receipt only for an optional plugin-owned check. Main checks receive at most a hint. |
 | Diminishing returns | Evidence owner calls `commit_research_pass`, then `propose_expansion` | One stop-optional-expansion advisory. No requirement or completion state changes. |
 | Frozen child heartbeat | `_Heartbeat.tick`'s native stale-activity threshold branch | One owner-status diagnostic recommendation. A current owned handle supplies a real local status route when no route is already registered. Native timeout/settlement behavior remains authoritative. |
@@ -55,18 +55,97 @@ The current ordinary-path inventory is deliberately incomplete:
 
 | Feature | Present ordinary hook | Missing production producer/contract |
 | --- | --- | --- |
-| F04 | Authorized local read and content-bearing result | No ordinary caller of `admit_read_intent`; without explicit independence metadata no semantic duplicate question is issued. No optional-operation suppression owner. |
+| F04 | Public `SupervisionFacade.read_optional_context` executes profile-authorized supplemental reads and retains exact original bytes | Optional duplicate suppression is implemented for this narrow owner. Main `read_file` calls still have no ordinary independence supplier and are never suppressed. |
 | F05 | Constructed, owned child before scheduling | No ordinary caller of `admit_delegation`; planner acceptance, independence, overhead and parallelism remain unknown. |
 | F06 / F11 | Actual post-call failure | No ordinary caller of `admit_attempt_policy` or failure-route registration; unclassified failures keep native handling. |
 | F07 | Optional explicit binding in `record_verify_run`, plus `propose_verification_reuse` | No ordinary verification runner supplies `supervision_check` or calls reuse. No automatic fingerprint/claim derivation; the negotiated plugin codec is integrated, but ordinary contract supply remains open. |
 | F08 | Explicit evidence-owner API | No ordinary caller commits complete `ResearchPass` ledgers or proposes an optional expansion. Raw retrieval yields are not classified into accepted evidence. |
 | F10 | Native frozen-child heartbeat branch | Requires an existing supervision runtime and owned-child binding; a real local status route is supplied when available. It cannot diagnose arbitrary unowned operations. |
 
-The contract-supplying calls for F04/F05/F06/F07/F08/F11 currently occur in
-qualification tests, not in ordinary planner/retrieval integrations. The hooks do
+Except for the public optional-read operation below, the contract-supplying
+calls for F04/F05/F06/F07/F08/F11 still occur in qualification tests, not in
+ordinary planner/retrieval integrations. The hooks do
 **not** infer absent independence, acceptance, environment identity or complete
 yield ledgers. These are bounded owner implementations, not full ordinary-path
-feature completion, and no savings or production accuracy has been established.
+feature completion, and no production savings or accuracy has been established.
+
+## Host-attested optional context reads (F04)
+
+`SupervisionFacade.read_optional_context(request)` is a public native **operation**,
+not an `admit_*` fact setter. A plugin calls it on the execution-owner thread, with
+an active agent binding. It reads one bounded local UTF-8 file window. It adds no
+model-visible tool, mandatory model request, automatic patrol or main-read veto.
+
+The host profile entry, **not plugin settings**, must explicitly contain:
+
+```yaml
+supervision:
+  enabled: true
+  plugins:
+    example-owner:
+      optional_reads:
+        version: supervision.optional-read.v1
+        purpose: supplemental_context
+        paths: [/absolute/project/source.txt]
+        max_bytes: 4096
+```
+
+The purpose enum attests to a *supplemental-context-only* operation, never an
+independent audit, acceptance test, mandatory read or write readback. No missing
+boolean is interpreted as permission. Unknown policy keys/purposes, missing budget,
+symlinks, secret paths and absent current operation-to-requirement edges reject
+without reading. The exact path must resolve through a current committed
+`hermes-work-map-v1` step; a singleton requirement ledger does not establish a link.
+The normative work-map grammar is unchanged.
+
+The request has exactly `version`, `path`, `objective`, `acceptance`, `offset`,
+`limit`. Strings are bounded to 1,200 characters, offset/limit to 1..2,000, and the
+entire source file to the smaller of the explicit byte budget and 64 KiB. The
+objective and acceptance are proposed descriptions, not grants. Main `read_file`
+execution is a separate owner and cannot enter the suppressible branch.
+
+Identical windows replay locally without Jev. Differing optional windows offer
+retained source receipts to F04. Only the literal negotiation
+`optional_read="supervision.optional-read.v1"` enables its `reuse_candidate`
+action codec; the plugin conditionally requests that exact grant. Grant omission,
+expiry or an unavailable judgment executes the normal optional read. A successful
+reuse returns the **original** source ref, window, bytes, snapshot and hash, not a
+new read or passing verification receipt. Required/new-state work is not waived.
+
+The owner checks current profile/registration generation, work revision, live
+profile policy, exact requirement link and filesystem snapshot at consumption.
+The actual read uses a bounded regular-file descriptor with `O_NOFOLLOW` and
+pre/post metadata pins; this is ordinary local-filesystem currentness, not protection
+against a privileged actor forging inode metadata. At most 16 receipts (1 MiB)
+are held; finish/revoke/unload clears bytes. Effect settlement uses the existing
+runtime owner seam, not a competing database. Durable common settlement remains
+owned by the common host delivery integration.
+
+`test_supervision_optional_reads.py` drives authentic CLI input, native todo,
+committed plan, public read API, the full installed plugin registry and strict
+MockTransport. It counts real source opens: the positive returns the original
+bytes with one open rather than two. This is a synthetic functional avoided-read
+measurement, **not** a latency, token-cost or production-quality claim.
+
+### Remaining concrete supplier constraints
+
+- F05: the exact work-map step grammar contains only `todo_id`,
+  `requirement_indexes`, `target_refs`. It cannot express acceptance, parent input
+  dependency, specialist capability or overhead/parallelism. Goals/tool lists do
+  not supply those facts. `retain_plan` still has no ordinary producer/disposition
+  owner; the current policy returns no proposal when no candidate passes.
+- F06/F11: main post-call results do not establish user-requested repetition or
+  registered retry/poll policy. Route metadata must come from its real owner,
+  not a guessed false flag. Failure and loop opportunities now share a host-owned
+  intervention ledger while retaining distinct opportunity targets.
+- F07: the existing `hermes verify` CLI can execute arbitrary bootstrap/build/test
+  recipes. There is no optional/independence declaration or complete input,
+  dependency and environment scope from which to safely derive reusable checks.
+  Command spelling or workspace status cannot fill those fields. Existing
+  receipt-reuse codec and SQLite receipt fence are unchanged.
+- F08: raw retrieval results and ranking are not accepted/rejected evidence
+  decisions. No ordinary research owner currently supplies that pass ledger and
+  an explicit optional expansion. No stop-execution effect is claimed.
 
 ## Exact plugin codec join for receipt reuse
 

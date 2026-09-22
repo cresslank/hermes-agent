@@ -45,6 +45,8 @@ class _Registration:
                 _registry.pop((self.scope, self.plugin_id), None)
         from agent.supervision_view_binding import registration_closed
         registration_closed(self.scope)
+        from agent.supervision_optional_reads import clear_optional_reads
+        clear_optional_reads(self.scope, self.plugin_id)
 
 
 def registrations_for_scope(scope):
@@ -78,6 +80,7 @@ class SupervisionFacade:
             capabilities["receipt_reuse"] = EfficiencyOwner.receipt_reuse_version
             from agent.supervision_children import VERSION as CHILD_RELEVANCE_VERSION
             capabilities['child_relevance'] = CHILD_RELEVANCE_VERSION
+            capabilities["optional_read"] = "supervision.optional-read.v1"
         return capabilities
 
     def _owner_capabilities(self):
@@ -205,6 +208,16 @@ class SupervisionFacade:
         from agent.supervision_policy import runtime_for_agent
         agent = get_active_subagent_parent()
         return runtime_for_agent(agent) if agent is not None else None
+
+    def read_optional_context(self, request):
+        """Read an explicitly profile-authorized supplemental local source.
+
+        This is not main tool dispatch. Missing permission, budget or a current
+        work-map link returns None without reading. No source can grant itself
+        optionality; the profile policy and native file owner decide.
+        """
+        from agent.supervision_optional_reads import read_optional_context
+        return read_optional_context(self, request)
 
     def current_revision(self):
         runtime = self._active_runtime()

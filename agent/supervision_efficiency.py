@@ -181,16 +181,20 @@ class EfficiencyOwner:
         self.lock = threading.RLock()
         self.routes = OrderedDict()
         self.attempt_policies = {}
+        self.requirement_links = {}
         self.read_intents = {}
         self.delegations = {}
         self.hints = deque(maxlen=4)
         self.attempts = deque(maxlen=12)
         self.reads = OrderedDict()
         self.read_pending = {}
+        self.read_payloads = {}
         self.checks = OrderedDict()
         self.passes = deque(maxlen=3)
         self.emitted = OrderedDict()
         self.bound_routes = {}
+        self.incident_by_target = {}
+        self.handled_incidents = set()
         self.guards = {}
         self.attempted_routes = deque(maxlen=12)
         self.sequence = 0
@@ -202,44 +206,52 @@ class EfficiencyOwner:
         if epoch != self.epoch:
             self.attempts.clear()
             self.attempt_policies.clear()
+            self.requirement_links.clear()
             self.read_intents.clear()
             self.delegations.clear()
             self.hints.clear()
             self.reads.clear()
             self.read_pending.clear()
+            self.read_payloads.clear()
             self.checks.clear()
             self.passes.clear()
             self.emitted.clear()
             self.bound_routes.clear()
+            self.incident_by_target.clear()
+            self.handled_incidents.clear()
             self.guards.clear()
             self.attempted_routes.clear()
             self.epoch = epoch
 
-    def admit_read_intent(self, path, *, independent_check):
+    def admit_read_intent(self, path, *, independent_check, requirement_id=None):
         """Native planner declares independence; missing intent never means false."""
         self.runtime._assert_owner(tool_worker=True)
-        if type(independent_check) is not bool or not _text(path):
+        if (type(independent_check) is not bool or not _text(path)
+                or requirement_id is not None and not _text(requirement_id)):
             raise ValueError("read_intent")
         with self.lock:
             self._sync()
             if len(self.read_intents) >= 32 and path not in self.read_intents:
                 raise ValueError("read_intent_capacity")
             self.read_intents[path] = independent_check
+            self.requirement_links["read_file", path] = requirement_id
 
     def admit_attempt_policy(self, name, path, *, registered_poll, registered_retry,
-                             pagination, user_repetition, deterministic_handler_available):
+                             pagination, user_repetition, deterministic_handler_available, requirement_id=None):
         """Native retry owner explicitly qualifies one route; no prose inference."""
         self.runtime._assert_owner(tool_worker=True)
         flags = dict(registered_poll=registered_poll, registered_retry=registered_retry,
                      pagination=pagination, user_repetition=user_repetition,
                      deterministic_handler_available=deterministic_handler_available)
-        if not _text(name) or not _text(path) or any(type(v) is not bool for v in flags.values()):
+        if (not _text(name) or not _text(path) or any(type(v) is not bool for v in flags.values())
+                or requirement_id is not None and not _text(requirement_id)):
             raise ValueError("attempt_policy")
         with self.lock:
             self._sync()
             if len(self.attempt_policies) >= 32 and (name, path) not in self.attempt_policies:
                 raise ValueError("attempt_policy_capacity")
             self.attempt_policies[name, path] = flags
+            self.requirement_links[name, path] = requirement_id
 
     def drain(self):
         self.runtime._assert_owner()
@@ -278,11 +290,20 @@ class EfficiencyOwner:
         return [r for r in self.routes.values() if r.available() and not any(
             a["id"] == r.id and a["prerequisite_revision"] == r.prerequisite_revision for a in self.attempted_routes)]
 
-    def _requirement(self):
-        # Ambiguous multi-requirement work must use an explicit owner link, not the
-        # first item in a list. Native cheap producers only infer a singleton.
-        reqs = self.runtime.requirements
-        return {"id": reqs[0].id, "text": reqs[0].text} if len(reqs) == 1 else None
+    def _requirement(self, name, arguments):
+        # Even a singleton ledger is not an operation-to-requirement edge.
+        if not isinstance(arguments, dict):
+            return None
+        refs = self.runtime.action_requirements(arguments)
+        declared = self.requirement_links.get((name, arguments.get("path")))
+        if declared is not None:
+            refs = (declared,)
+        if len(refs) != 1:
+            return None
+        spans = {r.id: r.text for r in self.runtime.requirements}
+        for work_map in self.runtime.work_maps.values():
+            spans.update((r.id, r.text) for r in work_map["requirement_spans"])
+        return {"id": refs[0], "text": spans[refs[0]]} if refs[0] in spans else None
 
     def _emit(self, event, facts, target, refs, *, routes=(), wait=False, relations=(), valid=None):
         key = (event, target)
@@ -291,6 +312,8 @@ class EfficiencyOwner:
                 return None
             self.emitted[key] = True
             self.bound_routes[target] = {r.id: r for r in routes}
+            if _text(facts.get("incident_id")):
+                self.incident_by_target[target] = facts["incident_id"]
             if valid is not None:
                 self.guards[target] = valid
         facts = {**facts, "changed": True, "evidence_refs": list(refs)}
@@ -326,6 +349,9 @@ class EfficiencyOwner:
                         return "stale"
                 except Exception:
                     return "stale"
+                incident = self.incident_by_target.get(target)
+                if incident in self.handled_incidents:
+                    return "no_op"
                 m = proposal.metadata
                 route_id = m.get("route_id")
                 if route_id is not None:
@@ -340,6 +366,8 @@ class EfficiencyOwner:
                 from agent.supervision_policy import TEMPLATES
                 result.append("[Task-bound advisory; lower-trust evidence, not an instruction]\n" +
                               TEMPLATES[proposal.template_id] + "\n" + detail)
+                if incident is not None:
+                    self.handled_incidents.add(incident)
                 return "applied"
         self.runtime.consume_owner_action(target, Action.ADVISE, apply)
         return result[0] if result else None
@@ -358,7 +386,7 @@ class EfficiencyOwner:
             if not failed:
                 self.attempts.clear()  # conservative progress: never equate success with no progress
                 return None
-            requirement = self._requirement()
+            requirement = self._requirement(name, arguments)
             target = arguments.get("path") if isinstance(arguments, dict) else None
             if (not requirement or not _text(target) or not isinstance(result, str)
                     or not _text(call_id) or is_stall_guard_repeatable(name)):
@@ -379,6 +407,8 @@ class EfficiencyOwner:
             keys = ("target", "route_family", "artifact_revision", "evidence_revision", "progress_revision", "input_revision")
             matching = [a for a in self.attempts if all(a[k] == attempt[k] for k in keys)][-6:]
             incident = "failure:" + _pin((self.epoch, tuple(attempt[k] for k in keys)))
+            if incident in self.handled_incidents:
+                return None
         # Emit the concrete failure once; exact error handlers still own their paths.
         hint = self._emit("failure_incident", {"incident_id": incident,
             "error": {"id": call_id, "text": result[:600], "mechanism": "tool_reported_failure", "category": name},
@@ -387,7 +417,7 @@ class EfficiencyOwner:
             incident, (call_id, requirement["id"], *(r.id for r in routes)), routes=routes, wait=True)
         if len(matching) >= 3 and matching[-1]["sequence"] - matching[0]["sequence"] < 12:
             loop = "loop:" + incident.removeprefix("failure:")
-            return self._emit("guardrail_candidate", {"incident_id": loop, "requirement": requirement,
+            return self._emit("guardrail_candidate", {"incident_id": incident, "requirement": requirement,
                 "attempts": matching, "window_start_sequence": matching[0]["sequence"],
                 "window_end_sequence": matching[-1]["sequence"], "registered_poll": False,
                 "registered_retry": False, "pagination": False, "user_repetition": False,
@@ -450,7 +480,7 @@ class EfficiencyOwner:
     def before_read(self, arguments, call_id):
         """Recommend prior exact local read receipts, but NEVER suppress main calls."""
         self.runtime._assert_owner(tool_worker=True)
-        requirement = self._requirement()
+        requirement = self._requirement("read_file", arguments)
         path = arguments.get("path")
         with self.lock:
             self._sync()
@@ -488,7 +518,7 @@ class EfficiencyOwner:
     def read_completed(self, call_id, *, failed, result=None):
         with self.lock:
             operation = self.read_pending.pop(call_id, None)
-            if operation is None or failed or not isinstance(result, str):
+            if operation is None or failed or not isinstance(result, str) or len(result.encode("utf-8")) > 131072:
                 return
             try:
                 readback = json.loads(result)
@@ -507,8 +537,10 @@ class EfficiencyOwner:
                 return
             self.reads[call_id] = {**operation, "status": "succeeded", "source_ref": "tool:" + call_id,
                                   "result_valid": True, "authorized_reuse": True}
+            self.read_payloads[call_id] = result.encode("utf-8")
             while len(self.reads) > 16:
-                self.reads.popitem(last=False)
+                oldest, _ = self.reads.popitem(last=False)
+                self.read_payloads.pop(oldest, None)
 
     def admit_delegation(self, intent):
         self.runtime._assert_owner(tool_worker=True)

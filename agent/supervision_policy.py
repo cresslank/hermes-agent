@@ -669,6 +669,9 @@ class SupervisionRuntime:
                 return self._settle(proposal, status, "owner_settlement")
 
     def finish_turn(self):
+        optional_reads = getattr(self, "optional_reads", None)
+        if optional_reads is not None:
+            optional_reads.clear()
         from agent.supervision_view_binding import reset_views
         reset_views(self)
         with self.ready:
@@ -676,6 +679,9 @@ class SupervisionRuntime:
             self.ready.notify_all()
 
     def revoke(self):
+        optional_reads = getattr(self, "optional_reads", None)
+        if optional_reads is not None:
+            optional_reads.clear()
         from agent.supervision_view_binding import close_views
         close_views(self)
         with self.ready:

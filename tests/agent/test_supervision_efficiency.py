@@ -118,7 +118,8 @@ def observe_result(native, name, args, result, ident, failed):
 def admit_failures(native, path, **overrides):
     policy = dict(registered_poll=False, registered_retry=False, pagination=False,
                   user_repetition=False, deterministic_handler_available=False)
-    native.owner.admit_attempt_policy("read_file", path, **{**policy, **overrides})
+    native.owner.admit_attempt_policy("read_file", path,
+        requirement_id=native.runtime.requirements[0].id, **{**policy, **overrides})
 
 
 def feature_calls(native, feature):
@@ -128,7 +129,8 @@ def feature_calls(native, feature):
 def test_f04_native_dispatch_retains_main_read_and_reuses_only_advisory(native, monkeypatch, tmp_path):
     path = tmp_path / "fixture.txt"
     path.write_text("synthetic source")
-    native.owner.admit_read_intent(str(path), independent_check=False)
+    native.owner.admit_read_intent(str(path), independent_check=False,
+        requirement_id=native.runtime.requirements[0].id)
     from agent.tool_executor import _dispatch_authorized_once, _ManagedToolResult, _ToolCallRef
     from tools.file_tools import read_file_tool
     monkeypatch.setattr("agent.tool_executor._pre_tool_block", lambda agent, ref: (None, ref.args))
@@ -191,6 +193,21 @@ def test_native_repetition_exemptions_produce_zero_questions(native, flag):
         observe_result(native, "read_file", {"path": "synthetic.txt"}, '{"error":"missing"}', str(i), True)
     flush(native)
     assert not native.calls
+
+
+def test_failure_and_later_loop_share_one_host_incident(native):
+    admit_failures(native, "synthetic.txt")
+    hints = []
+    for i in range(4):
+        observe_result(native, "read_file", {"path": "synthetic.txt"},
+                       '{"error":"same failure"}', f"repeat-{i}", True)
+        flush(native)
+        hints.extend(native.runtime.drain_at_safe_point())
+        native.runtime.committed_batch([])
+    assert len(hints) == 1
+    assert len(feature_calls(native, "F11")) == 1
+    assert not feature_calls(native, "F06")
+    assert len(native.owner.handled_incidents) == 1
 
 
 def test_progress_or_changed_target_cannot_become_loop(native):
