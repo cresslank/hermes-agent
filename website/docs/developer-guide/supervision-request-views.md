@@ -6,11 +6,22 @@ a negotiated supervisor keep their existing behavior.
 
 ## Binding and decision protocol
 
-Bind `agent._supervision_views = SupervisionViews(facade_adapter, scope=revision_key)`.
-The immutable revision key must cover the owning profile, lineage, work/run,
-instruction, requirements, evidence, catalog and control revisions. Call
-`owner.reset(new_revision_key)` when that scope changes. Never populate host
-owner state from untrusted tool arguments or plugin-produced authorization flags.
+`runtime_for_agent(create=True)` attaches `NativeViewsBinding` and its actual
+`SupervisionViews` when a supervisor is registered for the active profile. Accepted
+instruction changes and turn binding reset the revision-bound views; finish,
+revocation and plugin unload detach stale presentation closures. The immutable
+scope covers profile, lineage, work/run, instruction, requirements, evidence,
+catalog and control revisions. No plugin-produced authorization flags or tool
+arguments populate authorized host state.
+
+The native binding projects provider-neutral domain facts from accepted user
+sources, locally authorized catalogs, persisted results and producer-marked optional
+progress. Observations use the existing runtime worker registration, explicit host
+egress policy and proposal queue. Execution owners settle synchronous selections;
+status proposals only schedule settlement on the existing presentation dispatcher.
+Core imports no plugin types. The evidence owner's typed request protocol remains
+separate; this adapter handles the existing native `select_tools`, `select_skills`,
+`select_windows`, `suppress_status` and `clarify_default` actions.
 
 The adapter implements exactly:
 
@@ -31,11 +42,12 @@ Requests carry `domain`, `scope`, `revision`, `deadline`, and an isolated copy o
 (canonical IDs only) or `relation` (a finite domain-specific label). Unknown IDs,
 stale revisions, changed scope, expiry, exceptions and uncertainty retain baseline.
 
-`cycle_deadline()` allocates one absolute monotonic deadline, 150 ms from the first
-eligible owner admission. Retrieval, output selection, clarification and optional
-status share it. `request_views()` advances the cycle only after consuming the next
-request view; callers must not refresh the token before each result or notice.
-This supports first-seen, delayed worker results, rather than a cache-only design.
+Native `cycle_deadline()` delegates to `SupervisionRuntime.shared_deadline()`:
+one absolute monotonic deadline, 150 ms from the original round issuance. Request
+views cannot renew it. Output, clarification, status and dependent skill-detail
+selection share it with the other runtime owners. Runtime turn/completed-batch
+boundaries alone open a new round. The standalone `SupervisionViews` protocol
+retains its local-cycle fallback for non-native embedders.
 
 ## Catalog and request assembly
 
@@ -76,6 +88,14 @@ Required IDs rank first. Only an explicitly unresolved ambiguous selection creat
 one positive request-only hint. Removing a hint or ending its scope does not erase
 loaded skill bodies, mandatory rules, safety instructions or transcript history.
 
+Native assembly uses bounded lexical overlap only as an ambiguity prefilter, not
+as a semantic decision. Explicit tool names and active required-tool pins bypass
+optional shortlisting. Skill candidates come from the native scoped list; a
+metadata shortlist must pass a second full-content detail decision under the same
+deadline before producing a hint. Native reads disable preprocessing; missing,
+pruned, oversized or ambiguous bodies stay baseline. Catalogs without separate
+exclusion metadata are explicitly labeled unknown, not assigned invented exclusions.
+
 ## Result and retrieval owners
 
 The canonical result insertion is `tool_executor._commit_tool_result`, shared by
@@ -90,8 +110,9 @@ are selectable. Critical failure/approval/partial/mutation/cleanup/receipt block
 and neighboring blocks remain mandatory. Every sibling status/receipt field is
 retained. The selected view includes exact source offsets, omission metadata and a
 full-output reference. The **original** result is persisted with the existing
-spillover path translator before inline evidence is removed; persistence failure
-returns baseline. Result-reference guardrails retain the full artifact path.
+spillover path translator **before selection is dispatched**, using a
+content-fingerprinted artifact name; persistence failure returns baseline without
+inference. Result-reference guardrails retain the full artifact path.
 Opaque, multimodal, huge-line and larger/incomplete pools retain existing behavior.
 
 `owner.rank_retrieval(tuple(candidates), required_ids=(), complete=True)` accepts
@@ -123,8 +144,11 @@ execution context, never invoke inline on an inference worker.
 `call_later(seconds, callback)` returns a cancellation callable.
 `asyncio_owner_callbacks(existing_loop)` supplies a thread-safe pair for a gateway
 or TUI event loop, with absolute-deadline preservation even when timer arming slips.
-CLI adapters supply their existing UI pump dispatcher. Missing dispatch/scheduler
-means normal baseline presentation; it must not start a substitute thread or turn.
+CLI binds its prompt-toolkit application loop, gateway binds its turn loop, and
+WebSocket-backed TUI binds its transport loop. Stdio/headless surfaces without an
+existing dispatcher retain immediate baseline presentation; no substitute thread,
+user turn or wake is created. Reset detaches old closures synchronously and posts
+cleanup of that captured set, so delayed teardown cannot erase a new scope's notices.
 
 There are at most 32 pending slots **per profile**, shared across adapter instances,
 and one replaceable slot per scope-qualified subject. Exact duplicates are local.
@@ -152,6 +176,22 @@ independently has an admitted default. The output distinguishes `resolved_value`
 with `resolution="authorized_default"` from `user_response`; it never fabricates a
 user answer. The model-visible clarify schema cannot create these grants.
 
+The native accepted-input source currently recognizes only an explicit presentation
+contract as the entire accepted user message (not an embedded or quoted example),
+never an action/approval/secret default:
+
+````text
+```hermes-defaults-v1
+{"output_format":"markdown"}
+```
+````
+
+`markdown`, `plain_text`, and `json` are the finite values for the literal question
+`Output format?`. The admitted source ID, exact source text, scope and reversible
+presentation alternatives accompany the semantic decision. Other questions retain
+the original clarification UI. Broader retrieval/user-only resolution is not
+inferred from model-authored question text.
+
 ## Verification boundary
 
 `tests/agent/test_supervision_views.py` exercises native request assembly and real
@@ -162,5 +202,18 @@ archive recovery, adversarial candidate mutation and the real inline clarify pat
 worker-to-owner dispatch, a real asyncio loop, profile queue capacity, deadline
 slips, reset/unload, warning policy and liveness bookkeeping. No live inference,
 configuration changes, network credentials or production activation are part of
-these tests. A host must finish binding its negotiated facade and UI lifecycle
-callbacks before claiming the optional features are active.
+these tests.
+
+`tests/agent/test_supervision_native_views.py` additionally runs the real standalone
+plugin registry and `NativeHostBridge` with a strict fake HTTP transport through
+these native consumers, including positive F12/F13/F16/F18/F19 decisions. Supply
+`JEV_SUPERVISOR_SOURCE`, or for the clean-environment canonical runner place the
+reviewed source checkout path in the disposable test HOME's
+`.hermes/jev-supervisor-test-source`. Without that explicit dependency this optional
+cross-repository suite is skipped, not counted as integration proof. No runtime
+owner is monkeypatched to manufacture a successful proposal.
+
+The native adapter intentionally leaves unsupported domains and uncertain evidence
+at baseline. The plugin revision used for qualification must include the matching
+feature/action codecs; a missing material-notification codec still preserves the
+original UI through the bounded baseline timeout, not a fabricated decision.

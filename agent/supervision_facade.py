@@ -42,6 +42,8 @@ class _Registration:
         with _lock:
             if _registry.get((self.scope, self.plugin_id)) is self:
                 _registry.pop((self.scope, self.plugin_id), None)
+        from agent.supervision_view_binding import registration_closed
+        registration_closed(self.scope)
 
 
 def registrations_for_scope(scope):

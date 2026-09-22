@@ -1246,6 +1246,8 @@ class TurnRunner:
         baked into the cached agent."""
         ctx = self._ctx
         runner = self._runner
+        from agent.supervision_view_binding import bind_presentation_loop
+        bind_presentation_loop(agent, ctx._loop_for_step)
         agent._notification_config = ctx.user_config
         agent._notification_platform = ctx.source.platform
         # ALWAYS attached (never gated to None): its body gates each event class, and subagent-

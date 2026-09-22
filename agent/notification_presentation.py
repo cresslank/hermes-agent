@@ -170,6 +170,7 @@ class StatusCoalescer:
         self._queue_state = state
         self._lock, self._pending, self._last = state.lock, state.pending, state.last
         self._generation = 0
+        self._owned_subjects = set()
 
     def clear(self, subject):
         with self._lock:
@@ -178,15 +179,25 @@ class StatusCoalescer:
         if item and callable(item.cancel):
             item.cancel()
 
-    def reset(self):
+    def detach(self):
+        """Revoke only current closures now; return owner-dispatched timer cleanup.
+
+        A later reset callback must not cancel notices created in the new scope.
+        """
         with self._lock:
             self._generation += 1
-            items = list(self._pending.values())
-            self._pending.clear()
-            self._last.clear()
-        for item in items:
-            if callable(item.cancel):
-                item.cancel()
+            items = [self._pending.pop(s) for s in self._owned_subjects if s in self._pending]
+            for subject in self._owned_subjects:
+                self._last.pop(subject, None)
+            self._owned_subjects.clear()
+        def cleanup():
+            for item in items:
+                if callable(item.cancel):
+                    item.cancel()
+        return cleanup
+
+    def reset(self):
+        self.detach()()
 
     close = reset
 
@@ -206,6 +217,8 @@ class StatusCoalescer:
         old = None
         item = None
         with self._lock:
+            self._owned_subjects.intersection_update(set(self._pending) | set(self._last))
+            self._owned_subjects.add(metadata.subject)
             pending = self._pending.get(metadata.subject)
             if (self._last.get(metadata.subject) or (None,))[0] == key or (pending and pending.fingerprint == key):
                 return  # exact optional duplicates never dispatch inference
@@ -273,6 +286,9 @@ class StatusCoalescer:
                                item.previous[1] if suppress and item.previous else item.payload)
         if callable(item.cancel):
             item.cancel()
+        release = getattr(self.views.facade, "release_status_future", None)
+        if callable(release):
+            release(item.future)
         if not suppress:
             item.render()
 

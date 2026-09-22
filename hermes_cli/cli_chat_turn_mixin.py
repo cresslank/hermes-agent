@@ -243,6 +243,8 @@ class CLIChatTurnMixin:
                                                              **getattr(message, "supervision_metadata", {})})
             agent._pending_cli_user_message = staged_user_message
             self.conversation_history.append(staged_user_message)
+        from agent.supervision_view_binding import bind_presentation_loop
+        bind_presentation_loop(agent, getattr(getattr(self, "_app", None), "loop", None))
         from agent.supervision_context import accept_pending_input
         # Only a scope bound by the real submission owner grants authentic origin.
         accept_pending_input(agent)

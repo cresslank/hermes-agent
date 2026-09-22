@@ -70,6 +70,8 @@ def runtime_for_agent(agent, *, create=False):
         return None
     runtime = SupervisionRuntime(agent, profile, lineage)
     agent._supervision_runtime = runtime
+    from agent.supervision_view_binding import attach_views
+    attach_views(runtime)
     return runtime
 
 
@@ -139,6 +141,8 @@ class SupervisionRuntime:
             self.last_final_text = ""
             self.closed_targets.clear()
             self.closed = False
+        from agent.supervision_view_binding import reset_views
+        reset_views(self, preserve_defaults=True)
 
     def shared_deadline(self, owner_deadline=None):
         with self.lock:
@@ -183,6 +187,11 @@ class SupervisionRuntime:
             self.designated_refs.update(refs_in_text(bounded))
             self._remember()
             self.ready.notify_all()  # stale a waiting action without granting a fresh budget
+        from agent.supervision_view_binding import reset_views
+        reset_views(self)
+        binding = getattr(self.agent(), "_supervision_view_binding", None)
+        if binding is not None:
+            binding.accept_defaults(origin)
         self.observe("authenticated_instruction_admitted", {"requirements": project(spans), "source_message_id": origin.message_id,
                      "text": bounded, "continuation": origin.continuation},
                      completeness=self.completeness, origin_kind=origin.kind, data_class="task_text",
@@ -304,7 +313,9 @@ class SupervisionRuntime:
             self.pending.append((proposal, registration))
             receipt = self._settle(proposal, "accepted", "queued")
             self.ready.notify_all()
-            return receipt
+        from agent.supervision_view_binding import proposal_queued
+        proposal_queued(self, proposal.target_id)
+        return receipt
 
     def _take(self, target_id, actions):
         """Effect-edge compare under the instruction fence. Called by execution owners only."""
@@ -634,11 +645,15 @@ class SupervisionRuntime:
                 return self._settle(proposal, status, "owner_settlement")
 
     def finish_turn(self):
+        from agent.supervision_view_binding import reset_views
+        reset_views(self)
         with self.ready:
             self.closed = True
             self.ready.notify_all()
 
     def revoke(self):
+        from agent.supervision_view_binding import close_views
+        close_views(self)
         with self.ready:
             self.closed = True
             self.revision = replace(self.revision, run_generation=self.revision.run_generation + 1)

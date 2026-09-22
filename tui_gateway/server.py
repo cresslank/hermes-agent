@@ -992,6 +992,11 @@ def _wire_session_agent(sid: str, key: str, agent) -> bool:
         notify_registered = True
         load_permanent_allowlist()
     _wire_callbacks(sid)
+    from agent.supervision_view_binding import bind_presentation_loop
+    with _sessions_lock:
+        transport = (_sessions.get(sid) or {}).get("transport")
+    # WebSocket/TUI owner loop; stdio without a dispatcher keeps immediate baseline.
+    bind_presentation_loop(agent, getattr(transport, "_loop", None))
     with contextlib.suppress(Exception):  # bare agents without the attribute must not break startup
         agent.background_review_callback = lambda message, _sid=sid: _emit("review.summary", _sid, {"text": str(message)})
         agent.memory_notifications = _load_memory_notifications()

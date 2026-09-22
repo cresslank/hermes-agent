@@ -35,11 +35,15 @@ class AuthorizedDefault:
     authorized: bool = False
     secret: bool = False
     approval: bool = False
+    source_text: str = ""
+    interpretations: tuple[dict, ...] = ()
 
 
 class SupervisionViews:
-    def __init__(self, facade, *, scope: str, clock=time.monotonic):
+    def __init__(self, facade, *, scope: str, clock=time.monotonic, deadline_provider=None):
         self.facade, self.scope, self.clock = facade, scope, clock
+        self.deadline_provider = deadline_provider
+        self.required_tools = ()
         self.deadline: float | None = None
         self._budget_lock = threading.Lock()
         self.tool_selection = None
@@ -48,6 +52,8 @@ class SupervisionViews:
         self.cache_identity = ""
 
     def cycle_deadline(self):
+        if self.deadline_provider is not None:
+            return self.deadline_provider()
         with self._budget_lock:
             if self.deadline is None:
                 self.deadline = self.clock() + .150
@@ -60,6 +66,7 @@ class SupervisionViews:
     def reset(self, scope: str):
         self.scope = scope
         self.tool_selection = None
+        self.required_tools = ()
         self.skills = SkillView()
         self.defaults.clear()
         self.next_cycle()
@@ -177,23 +184,24 @@ class SupervisionViews:
         required |= {blocks[j]["id"] for i in indices for j in (i - 1, i + 1) if 0 <= j < len(blocks)}
         if len(blocks) > 8:
             return baseline
+        # The feature may only observe a persisted source. Failure keeps baseline
+        # without dispatching a semantic selection.
+        from tools.tool_result_storage import maybe_persist_tool_result, extract_persisted_path
+        archive = maybe_persist_tool_result(original, tool_name, call_id + "-" + fingerprint(original),
+                                            env=env, config=budget, threshold=0)
+        path = extract_persisted_path(archive)
+        if not path:
+            return baseline
         revision = fingerprint((self.scope, call_id, original))
         answer = self._decide("select_windows", "oversized_structured_result", {
             "tool_name": tool_name, "call_id": call_id, "candidates": tuple(blocks),
-            "required_ids": tuple(sorted(required)), "complete": True,
+            "required_ids": tuple(sorted(required)), "complete": True, "source_ref": path,
         }, revision=revision)
         selected = _selected(answer, tuple(b["id"] for b in blocks))
         if not selected:
             return baseline
         keep = set(selected) | required
         if len(keep) == len(blocks):
-            return baseline
-        from tools.tool_result_storage import maybe_persist_tool_result, extract_persisted_path
-        # Retain ORIGINAL bytes, not the selected projection. A failed archive write
-        # cannot justify deleting inline evidence. Use normal remote path translation.
-        archive = maybe_persist_tool_result(original, tool_name, call_id, env=env, config=budget, threshold=0)
-        path = extract_persisted_path(archive)
-        if not path:
             return baseline
         chosen = [b for b in blocks if b["id"] in keep]
         view = dict(envelope)
@@ -236,6 +244,9 @@ def request_views(agent, api_messages, schemas):
     owner = getattr(agent, "_supervision_views", None)
     if not isinstance(owner, SupervisionViews):
         return api_messages, schemas
+    binding = getattr(agent, "_supervision_view_binding", None)
+    if binding is not None:
+        binding.prepare_catalogs()
     available = None
     if owner.tool_selection is not None and getattr(owner, "include_deferred", False):
         from agent.supervision_catalog import authorized_tool_schemas
@@ -243,7 +254,7 @@ def request_views(agent, api_messages, schemas):
             available = authorized_tool_schemas(agent)
         except Exception:
             owner.tool_selection = None
-    tools = owner.tools(schemas, required_ids=getattr(agent, "_supervision_required_tools", ()),
+    tools = owner.tools(schemas, required_ids=tuple(set(owner.required_tools) | set(getattr(agent, "_supervision_required_tools", ()))),
                         rules_revision=getattr(agent, "_supervision_rules_revision", ""),
                         available_schemas=available)
     if owner.skills.hints:
