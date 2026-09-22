@@ -1,0 +1,76 @@
+"""Canonical state.db adapter for owned delegation control.
+
+DDL belongs to hermes_state_common.SCHEMA_SQL (delivery owner), not this module.
+Every transition is a durable compare-and-swap; missing schema/storage fails closed.
+No connection, agent, or bearer capability is exposed to a supervisor plugin.
+"""
+from __future__ import annotations
+
+import json
+import time
+from typing import Callable
+
+
+class ControlConflict(ValueError):
+    """The durable child revision changed or the identity already exists."""
+
+
+class ControlDeadlineExpired(ValueError):
+    """The propagated action deadline expired before durable commit."""
+
+
+class SQLiteControlStore:
+    def __init__(self, connect: Callable | None = None):
+        if connect is None:
+            from tools.async_delegation import _connect
+            connect = _connect
+        self._connect = connect
+
+    def create(self, snapshot: dict) -> None:
+        conn = self._connect()
+        try:
+            with conn:
+                conn.execute(
+                    "INSERT INTO delegation_controls "
+                    "(child_id,parent_session_id,generation,control_revision,snapshot_json,updated_at) "
+                    "VALUES (?,?,?,?,?,?)",
+                    (snapshot['child_id'], snapshot['parent_session_id'], snapshot['generation'],
+                     snapshot['control_revision'], json.dumps(snapshot, sort_keys=True), time.time()),
+                )
+        finally:
+            conn.close()
+
+    def compare_and_swap(self, snapshot: dict, expected_revision: int, *, deadline: float | None = None) -> None:
+        if snapshot['control_revision'] != expected_revision + 1:
+            raise ControlConflict('Control revisions must advance exactly once')
+        conn = self._connect()
+        try:
+            with conn:
+                if deadline is not None:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise ControlDeadlineExpired('Delegation action deadline expired')
+                    conn.execute(f"PRAGMA busy_timeout={max(1, min(10000, int(remaining * 1000)))}")
+                conn.execute('BEGIN IMMEDIATE')
+                if deadline is not None and time.monotonic() >= deadline:
+                    raise ControlDeadlineExpired('Delegation action deadline expired')
+                result = conn.execute(
+                    "UPDATE delegation_controls SET control_revision=?,snapshot_json=?,updated_at=? "
+                    "WHERE child_id=? AND parent_session_id=? AND generation=? AND control_revision=?",
+                    (snapshot['control_revision'], json.dumps(snapshot, sort_keys=True), time.time(),
+                     snapshot['child_id'], snapshot['parent_session_id'], snapshot['generation'], expected_revision),
+                )
+                if result.rowcount != 1:
+                    raise ControlConflict('Stale delegation control revision')
+                if deadline is not None and time.monotonic() >= deadline:
+                    raise ControlDeadlineExpired('Delegation action deadline expired')
+        finally:
+            conn.close()
+
+    def read(self, child_id: str) -> dict | None:
+        conn = self._connect()
+        try:
+            row = conn.execute('SELECT snapshot_json FROM delegation_controls WHERE child_id=?', (child_id,)).fetchone()
+            return json.loads(row[0]) if row else None
+        finally:
+            conn.close()

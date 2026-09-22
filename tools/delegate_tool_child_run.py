@@ -46,10 +46,23 @@ def _append_missed_steer(entry: Dict[str, Any], late_steer: Optional[str]) -> No
 
 def _close_child(child: Any, log_message: str) -> None:
     """Best-effort ``child.close()`` (tool sandboxes, browser daemons, httpx clients)."""
+    closed = False
     with _quiet(log_message, exc_info=True):
         close = getattr(child, "close", None)
         if callable(close):
             close()
+        closed = True
+    from agent.owned_delegation import binding_of
+    binding = binding_of(child)
+    if binding:
+        # Storage failure leaves control unsettled; never skip later host cleanup.
+        with _quiet("Failed to persist owned child settlement: %s", exc_info=True):
+            owner, handle = binding
+            if not closed:
+                snapshot = owner.status(handle)
+                owner.reconcile(handle, expected_revision=snapshot['control_revision'],
+                                processes_stopped=False, effects_reconciled=False)
+            owner.finish(handle)
 
 def _with_children_lock(parent_agent: Any, op: str, child: Any) -> None:
     """``parent_agent._active_children.<op>(child)`` under the parent's lock when it has one."""
@@ -93,6 +106,9 @@ def _detach_child(parent_agent: Any, child: Any) -> None:
 def _signal_child_stop(child: Any, *reason: str, tool_reason: str = "parent delegation ended") -> None:
     """Cooperative interrupt so the child's worker thread can exit cleanly. ``tool_reason`` is the
     fixed cause the child's tools see (a pending approval wait reports it instead of a user deny)."""
+    with _quiet(None):
+        from agent.owned_delegation import seal_explicit_stop
+        seal_explicit_stop(child)
     with _quiet(None):
         if (child is not None and not request_hard_interrupt(child, *reason, tool_reason=tool_reason)
                 and hasattr(child, "_interrupt_requested")):

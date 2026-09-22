@@ -713,9 +713,25 @@ def _dispatch_authorized_once(
         agent._iters_since_skill = 0
 
     from agent.terminal_approval_batch import prepare_current_terminal
-    prepare_current_terminal(ref)
-    _advance_start_order(lambda: _begin_tool_execution(agent, ref, display_index))
-    return _run_with_activity_heartbeat(agent, ref.name, lambda: execute(ref.args))
+    from agent.owned_delegation import dispatch_fence, ControlDenied
+    started = False
+    try:
+        # Last boundary AFTER plugin/Relay argument rewrites, shared by sequential,
+        # concurrent and inline (including nested delegate) execution. Denied
+        # capabilities must not open a terminal approval prompt either.
+        with dispatch_fence(agent, ref.name, ref.args):
+            prepare_current_terminal(ref)
+            _advance_start_order(lambda: _begin_tool_execution(agent, ref, display_index))
+            started = True
+            return _run_with_activity_heartbeat(agent, ref.name, lambda: execute(ref.args))
+    except ControlDenied:
+        if not started:
+            _advance_start_order()
+        state.blocked = True
+        return _blocked_tool_result(
+            agent, ref, block_message="Owned child dispatch denied by control/effect policy",
+            block_error_type="owned_delegation_fence", guardrail_decision=None,
+        )
 
 
 def _run_agent_tool_execution_middleware(

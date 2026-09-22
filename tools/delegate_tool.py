@@ -384,6 +384,7 @@ def _build_children(
         _child_context = t.get("context")
         if _task_schema is not None:
             _child_context = append_output_contract(_child_context, _task_schema)
+        child = None
         try:
             child = _build_child_preserving_parent_tools(
                 task_index=i, goal=t["goal"], context=_child_context,
@@ -391,7 +392,19 @@ def _build_children(
                 model=creds["model"], max_iterations=max_iterations, task_count=len(task_list),
                 parent_agent=parent_agent, role=_normalize_role(t.get("role") or top_role), **overrides,
             )
-        except ValueError as exc:
+            from agent.owned_delegation import register_launch
+            register_launch(parent_agent, child, t.get("supervision"), goal=t["goal"])
+        except Exception as exc:
+            # No scheduling occurred. Close all already-built siblings and retain
+            # their durable terminal control records rather than orphaning them.
+            from tools.delegate_tool_child_run import _close_child
+            for _, _, built in children:
+                _close_child(built, "Failed to close unlaunched child")
+            if child is not None and all(child is not built for _, _, built in children):
+                _close_child(child, "Failed to close rejected child")
+            import sqlite3
+            if not isinstance(exc, (ValueError, OSError, sqlite3.Error)):
+                raise  # preserve the legacy unexpected-constructor failure contract
             return [], str(exc)
         if _task_schema is not None:
             with _quiet("Could not attach output schema to child %d", i):
@@ -498,6 +511,15 @@ def delegate_task(
         return tool_error(str(exc))
     max_children = _get_max_concurrent_children()
     task_list, err = _normalize_task_list(goal, context, tasks, output_schema, top_role, max_children)
+    if not err:
+        from agent.owned_delegation import validate_request, owner_of
+        try:
+            for task in task_list:
+                validate_request(task.get("supervision"))
+                if task.get("supervision") is not None and owner_of(parent_agent) is None:
+                    raise ValueError("Supervised launch requires a configured host owner grant")
+        except ValueError as exc:
+            err = str(exc)
     if not err:
         task_schemas, err = _coerce_task_schemas(task_list, output_schema)
     if not err:
@@ -630,6 +652,8 @@ def _build_dynamic_schema_overrides() -> dict:
 def _p(type_: str, description: str, **extra) -> dict:
     return {"type": type_, **extra, "description": description}
 
+from agent.owned_delegation import SUPERVISION_SCHEMA
+
 DELEGATE_TASK_SCHEMA = {
     "name": "delegate_task",
     # description / tasks.description are placeholders: the real text is built per get_definitions() call by
@@ -662,6 +686,7 @@ DELEGATE_TASK_SCHEMA = {
                             "Background THIS child needs: file paths, error messages, constraints. Each child "
                             "sees only its own context — repeat shared background in every task that needs it.",
                         ),
+                        "supervision": SUPERVISION_SCHEMA,
                         "output_schema": _p(
                             "object",
                             "Optional JSON Schema this child's final answer must validate against (told to the "

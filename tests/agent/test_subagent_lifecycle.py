@@ -41,6 +41,10 @@ class FakeChild:
 
 @pytest.fixture
 def lifecycle(monkeypatch):
+    # Each fixture owns a registry; repeated synthetic IDs must not overwrite
+    # retained terminal handles from an earlier test.
+    from agent import subagent_lifecycle as lifecycle_module
+    monkeypatch.setattr(lifecycle_module, "_REGISTRY", lifecycle_module._Registry())
     parent = SimpleNamespace(session_id="parent-1", enabled_toolsets=["file"])
     counter = iter(range(1000))
 

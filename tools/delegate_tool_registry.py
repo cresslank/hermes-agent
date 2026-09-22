@@ -99,6 +99,11 @@ def interrupt_subagent(subagent_id: str) -> bool:
     if agent is None:
         return False
     try:
+        from agent.owned_delegation import seal_explicit_stop
+        seal_explicit_stop(agent)
+    except Exception as exc:
+        logger.debug("Could not persist child stop fence: %s", exc)
+    try:
         return bool(request_hard_interrupt(agent, f"Interrupted via TUI ({subagent_id})"))
     except Exception as exc:
         logger.debug("interrupt_subagent(%s) failed: %s", subagent_id, exc)
