@@ -96,6 +96,7 @@ class SupervisionFacade:
             capabilities['child_relevance'] = CHILD_RELEVANCE_VERSION
             capabilities['direct_control'] = 'supervision.direct-control.v1'
             capabilities["optional_read"] = "supervision.optional-read.v1"
+            capabilities["action_authorization"] = "supervision.action-authorization.v1"
             from agent.supervision_delivery import FINAL_ACTIONS_VERSION, FINAL_ACTIONS
             capabilities["final_actions_version"] = FINAL_ACTIONS_VERSION
             capabilities["final_actions"] = dict(FINAL_ACTIONS)

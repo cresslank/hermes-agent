@@ -138,6 +138,8 @@ class SupervisionRuntime:
         self.final_continuations = 0
         from agent.supervision_dependencies import DependencyOwner
         self.dependencies = DependencyOwner(self)
+        from agent.supervision_action_scope import ActionScopeOwner
+        self.action_scope = ActionScopeOwner(self)
         self._remember()
 
     def _assert_owner(self, *, tool_worker=False):
@@ -244,6 +246,8 @@ class SupervisionRuntime:
                                     requirements=self.revision.requirements + 1)
             bounded, omitted = bounded_text(origin.text)
             self.sources[origin.message_id] = bounded
+            self.action_scope.admitted(continuation=origin.continuation,
+                                       omitted=omitted or len(self.sources) > 12)
             while len(self.sources) > 12:
                 self.sources.popitem(last=False)
             spans, complete = enumerate_requirements(origin.text, origin.message_id)
@@ -325,7 +329,7 @@ class SupervisionRuntime:
                 origin_kind=origin_kind, deadline_class="owner" if deadline is not None else "background",
                 owner=owner, required_obligations=required_obligations, deadline_issued_at=issued,
                 turn_id=getattr(self.agent(), "_current_turn_id", "") or "",
-                tool_call_id=target_id if event == "action_proposed_with_scope_conflict" else "")
+                tool_call_id=target_id if event == "action_proposed" else "")
         for reg in regs:
             # Recheck immediately before disclosing any facts or issuing egress
             # policy; admission of another recipient is never transferable.
@@ -399,6 +403,10 @@ class SupervisionRuntime:
             facts = action_conflict_facts(self, name, args, proposal.target_id, targets)
             if facts is None or facts["link"]["id"] != link_id:
                 return "stale", "action_link_changed"
+        if proposal.owner == "action_scope":
+            from agent.supervision_action_scope import valid_proposal
+            if not valid_proposal(proposal):
+                return "rejected", "invalid_action_authorization"
         if proposal.owner == "corrections":
             from agent.supervision_correction_semantics import valid_proposal
             if not valid_proposal(self, proposal):
@@ -681,35 +689,9 @@ class SupervisionRuntime:
 
     def prepare_action(self, tool_name, arguments, tool_call_id):
         self._assert_owner(tool_worker=True)
-        self.dependencies.planning.dispatch(tool_name, arguments, tool_call_id)
-        # These owners expose a literal resource field. Shell/code/opaque connector
-        # argument strings are not evidence of the target or effect class.
-        target_fields = {"read_file": ("path",), "write_file": ("path",), "patch": ("path",)}.get(tool_name, ())
-        targets = [arguments[k] for k in target_fields if type(arguments.get(k)) is str]
-        links = tuple(dict.fromkeys(ref for target in targets
-                      for ref in self.invalidated_action_edges.get(target, ())))
-        if not links or tool_call_id in self.closed_targets:
-            return None
-        from agent.supervision_context import action_conflict_facts
-        from agent.supervision_dependencies import LinkedOpportunity
-        facts = action_conflict_facts(self, tool_name, arguments, tool_call_id, targets)
-        if facts is None or facts["link"]["id"] in self.reanchored_links:
-            return None
-        self.action_edges[tool_call_id] = (tool_name, dict(arguments), tuple(targets), facts["link"]["id"])
-        while len(self.action_edges) > 64:
-            self.action_edges.pop(next(iter(self.action_edges)))
-        deadline = self.shared_deadline()
-        revision = self.revision
-        self.observe("action_proposed_with_scope_conflict", facts,
-                     target_id=tool_call_id, actions=(Action.ADVISE,), evidence_refs=links,
-                     deadline=deadline, data_class="task_text", required_obligations=links,
-                     completeness=LinkedOpportunity())
-        self._wait_for(tool_call_id, deadline, revision)
-        with self.lock:
-            proposal = self._take(tool_call_id, {Action.ADVISE})
-            advisory = self._apply_advisory(proposal) if proposal else None
-            self.closed_targets.add(tool_call_id)
-            return advisory
+        with self.decision_boundary():
+            self.dependencies.planning.dispatch(tool_name, arguments, tool_call_id)
+            return self.action_scope.prepare(tool_name, arguments, tool_call_id)
 
     def mark_dispatched(self, tool_call_id):
         with self.lock:

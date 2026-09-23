@@ -246,6 +246,7 @@ class DecisionSnapshotV1:
 
 
 class Action(str, Enum):
+    AUTHORIZE_ACTION = "authorize_action"
     ADVISE = "advise"
     CONTINUE = "continue"
     UPDATE_DEPENDENCIES = "update_dependencies"

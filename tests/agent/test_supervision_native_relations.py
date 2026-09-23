@@ -47,7 +47,7 @@ def native(tmp_path, monkeypatch):
     monkeypatch.setenv('HERMES_HOME', str(home))
     fields = '''target_id requirements source_message_id text continuation coverage_scope global_coverage
     continuation_available omitted_requirement_ids changed evidence_refs requirement_refs action current_step
-    authorized_scope link immutable_verified claim linked_requirement_id evidence_contract deterministic_contract
+    authorized_scope accepted_scope scope_complete link immutable_verified claim linked_requirement_id evidence_contract deterministic_contract
     candidates new_instruction origin_authenticated origin_kind quoted epoch_advanced explicit_stop prior'''.split()
     policy = {'id': 'relations-fixture', 'profile': str(home), 'fields': {k: 'synthetic' for k in fields}, 'sources': {}, 'fixture': True}
     config = {'supervision': {'enabled': True, 'plugins': {'fixture-relations': {
@@ -55,7 +55,7 @@ def native(tmp_path, monkeypatch):
     (home / 'config.yaml').write_text(json.dumps(config))
     manager = PluginManager(scope_key=str(home))
     facade = PluginContext(PluginManifest(name='fixture-relations'), manager).supervision
-    calls, mode = [], {'F09': 'unrelated', 'F17': 'supports', 'F21': 'narrows'}
+    calls, mode = [], {'F09': 'outside_scope', 'F17': 'supports', 'F21': 'narrows'}
 
     async def respond(request):
         assert request.url == 'https://api.typesafe.ai/v1/systemone'
@@ -134,21 +134,23 @@ def source_plan(native, tmp_path, *, read_source=False):
     return rt, claim, source, source_text
 
 
-def test_native_drift_reanchors_without_fabricating_negative_obligations(native, tmp_path, monkeypatch):
-    rt, _, _ = commit_plan(native, tmp_path / 'plan.md', conflict=True)
-    result, effects = dispatch(native, monkeypatch)
-    assert not effects and json.loads(result)['executed'] is False, (native.calls, list(rt.receipts.values()), native.bridge.supervisor.inspect())
-    facts = next(c['state']['facts'] for c in native.calls if 'link' in c['state']['facts'])
-    assert facts['link']['valid_prerequisite'] is None and facts['link']['required_cleanup'] is None
-    assert facts['current_step']['id'] == 'step'
-    assert any(r.status == 'applied' for r in rt.receipts.values())
+def test_native_scope_uses_authenticated_prose_not_changed_plan(native, monkeypatch):
+    rt = accept(native.agent, 'Fix the schema adapter locally; do not deploy.')
+    assert rt is not None
+    result, effects = dispatch(native, monkeypatch, name='terminal', arguments={'command': 'deploy production'})
+    assert not effects and json.loads(result)['executed'] is False
+    facts = next(c['state']['facts'] for c in native.calls if 'accepted_scope' in c['state']['facts'])
+    assert facts['accepted_scope'] == [{'id': next(iter(rt.sources)), 'text': next(iter(rt.sources.values()))}]
+    assert facts['action']['arguments'] == {'command': 'deploy production'}
+    assert not rt.work_maps and not rt.invalidated_action_edges
+    assert any(r.reason == 'action_suppressed' for r in rt.receipts.values())
 
 
-@pytest.mark.parametrize('relation', ['necessary_prerequisite', 'required_cleanup', 'insufficient'])
-def test_native_drift_preserves_prerequisites_cleanup_and_ambiguity(native, tmp_path, monkeypatch, relation):
+@pytest.mark.parametrize('relation', ['within_scope', 'prerequisite'])
+def test_native_scope_preserves_direct_work_and_prerequisites(native, monkeypatch, relation):
     native.mode['F09'] = relation
-    commit_plan(native, tmp_path / 'plan.md', conflict=True)
-    result, effects = dispatch(native, monkeypatch)
+    accept(native.agent, 'Fix the schema adapter locally and run its tests.')
+    result, effects = dispatch(native, monkeypatch, name='terminal', arguments={'command': 'pytest tests/schema'})
     assert result == 'ordinary result' and effects
 
 
@@ -223,7 +225,7 @@ def test_unavailable_or_unlinked_never_certifies_support_or_starts_extra_turn(na
     if mode == 'malformed':
         native.mode['malformed'] = True
     elif mode == 'expired':
-        native.mode['delay'] = .3
+        native.mode['delay'] = 1.1  # exceeds the native one-second budget
     elif mode == 'denied':
         native.facade._registration.grants = frozenset({'observe'})
     elif mode == 'unrelated':
@@ -284,13 +286,13 @@ def test_changed_partial_native_read_revokes_prior_complete_source(native, tmp_p
     assert rt.dependencies.edges[edge.id].source.text == text
 
 
-def test_reanchor_is_once_for_exact_changed_plan_not_each_retry(native, tmp_path, monkeypatch):
-    rt, _, _ = commit_plan(native, tmp_path / 'plan.md', conflict=True)
+def test_scope_refusal_is_not_bypassed_by_unavailable_retry(native, monkeypatch):
+    accept(native.agent, 'Fix the schema adapter locally; do not deploy.')
     first, _ = dispatch(native, monkeypatch, call_id='first')
     assert json.loads(first)['executed'] is False
-    count = len(native.calls)
+    native.mode['malformed'] = True
     second, effects = dispatch(native, monkeypatch, call_id='retry')
-    assert second == 'ordinary result' and effects and len(native.calls) == count
+    assert json.loads(second)['executed'] is False and not effects
 
 
 def test_actual_conversation_uses_one_targeted_continuation_without_interim_candidate(native, tmp_path):
@@ -299,6 +301,7 @@ def test_actual_conversation_uses_one_targeted_continuation_without_interim_cand
     from agent.supervision_context import accepted_input_origin, accepted_origin_scope
     from tests.agent.test_tool_call_incremental_persistence import _make_tool_defs
     native.mode['F17'] = 'partial'
+    native.mode['F09'] = 'within_scope'
     with (patch('model_tools.get_tool_definitions', return_value=_make_tool_defs('todo', 'read_file', 'write_file')),
           patch('model_tools.check_toolset_requirements', return_value={}),
           patch('agent.process_bootstrap.OpenAI')):
