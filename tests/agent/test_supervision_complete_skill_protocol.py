@@ -24,16 +24,18 @@ def test_remote_skill_selection_keeps_complete_large_body_local(native, size):
     assert body not in json.dumps(native.calls)
     stages = [call['state']['facts']['stage'] for call, _ in native.calls]
     if size > 65536:
-        assert stages == ['metadata']
+        assert stages == ['catalog']
         assert result.api_messages[-1] == history[-1]
         assert not native.agent._supervision_view_binding.skill_contents()
     else:
-        assert stages == ['metadata', 'detail'], native.bridge.supervisor.inspect()
+        assert stages == ['catalog', 'detail'], native.bridge.supervisor.inspect()
         assert body in result.api_messages[-1]['content']
-        row, = native.calls[-1][0]['state']['facts']['candidates']
+        rows = native.calls[-1][0]['state']['facts']['candidates']
+        assert len(rows) == 3
+        row = next(r for r in rows if r['id'] == 'alpha')
         assert row['local_content']['chars'] == len(body)
-        assert 'content' not in row and 'excerpt_complete' not in row
-        assert 'local-only procedure' not in json.dumps(native.calls)
+        assert len(row['content']) == 700 and row['excerpt_complete'] is False
+        assert 'local-only procedure' in row['content']
         assert any(r.status == 'applied' for r in native.runtime.receipts.values())
         assert assemble(native.agent, history).api_messages == result.api_messages
 
@@ -71,7 +73,7 @@ def test_local_body_hydration_rechecks_exact_snapshot_and_fences(native, monkeyp
     assert result.api_messages[-1] == history[-1]
     assert not native.agent._supervision_view_binding.skill_contents()
     assert not any(r.status == 'applied' for r in native.runtime.receipts.values())
-    assert 'Never disclose setup' not in json.dumps(native.calls)
+    assert body not in json.dumps(native.calls)  # only the authorized opening crosses the wire
 
 
 @pytest.mark.parametrize('key', ['supervisor_control', 'obligation', 'source', 'provenance', 'supervis\\u006fr_control'])

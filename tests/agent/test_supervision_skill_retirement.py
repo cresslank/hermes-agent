@@ -80,7 +80,7 @@ def test_ready_hint_exact_removal_at_committed_native_phase(native, monkeypatch,
     assert binding.skill_hints[hint.plugin_id] is entry
     assert binding.views.skills.owned_hints[hint.plugin_id] is hint
     assert binding.views.skills.hints['other-plugin'] == foreign
-    assert [b['state']['facts']['stage'] for b, _ in native.calls] == ['metadata', 'detail']
+    assert [b['state']['facts']['stage'] for b, _ in native.calls] == ['catalog', 'detail']
     todo(native, messages, [{**t, 'status': 'completed'} for t in items], concurrent)
     native.drain()
     assert skills.hints == {'other-plugin': foreign}, native.bridge.supervisor.inspect()
@@ -119,7 +119,7 @@ def test_ready_hint_exact_removal_at_committed_native_phase(native, monkeypatch,
         assert binding.views.skills.hints == {'other-plugin': foreign}
         assert not binding.skill_hints
         assert messages == before_assembly
-        assert [b['state']['facts']['stage'] for b, _ in native.calls] == ['metadata', 'detail', 'unload']
+        assert [b['state']['facts']['stage'] for b, _ in native.calls] == ['catalog', 'detail', 'unload']
         if not extra_batch:
             assert native.runtime.round_deadline == deadline  # assembly cannot renew the completion window
     native.mode['retirement_trace']['next_request'] = result.api_messages
@@ -407,7 +407,7 @@ def test_retired_hint_stays_retired_after_completed_bookkeeping(native, record_p
     history = copy.deepcopy(messages)
     result = assemble(native.agent, messages)
     native.drain()
-    assert [b['state']['facts']['stage'] for b, _ in native.calls] == ['metadata', 'detail', 'unload']
+    assert [b['state']['facts']['stage'] for b, _ in native.calls] == ['catalog', 'detail', 'unload']
     presented = native.mode['presented_skill_rows']
     assert result.api_messages[:len(presented)] == presented
     assert entry[0].content not in result.api_messages[-1]['content']

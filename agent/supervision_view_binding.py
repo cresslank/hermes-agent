@@ -327,14 +327,14 @@ class NativeViewsBinding:
             if snapshot is None:
                 return None
             snapshots[selected_id] = snapshot
-            if len(snapshot.content) <= 1200:
-                details.append({**rows[selected_id], 'content': snapshot.content, 'excerpt_complete': True, 'pruned': False})
-            else:
-                # Full bodies remain LOCAL. The dependent vote selects exact
-                # owner-read snapshots by catalog metadata, not unseen body fit.
-                # No truncation, extra source class, or larger remote envelope.
-                details.append({**rows[selected_id], 'local_content': {
-                    'version': 'supervision.local-skill.v1',
+            from tools.skills_tool import _parse_frontmatter
+            metadata, instructions = _parse_frontmatter(snapshot.content)
+            complete = len(snapshot.content) <= 700
+            details.append({**rows[selected_id],
+                'full_description': metadata.get('description') or rows[selected_id]['description'],
+                'content': snapshot.content if complete else instructions[:700],
+                'excerpt_complete': complete, 'pruned': False,
+                'local_content': {'version': 'supervision.local-skill.v1',
                     'sha256': fingerprint(snapshot.content), 'chars': len(snapshot.content)}})
         with self.lock:
             if (self.details.get(target) is not context or context['expected'] != runtime.revision or
@@ -342,7 +342,7 @@ class NativeViewsBinding:
                 return None
             context['served_ids'] = tuple(selected)
             context['served_content'] = {name: snapshot.content for name, snapshot in snapshots.items()}
-            context['local_snapshots'] = {row['id']: snapshots[row['id']] for row in details if 'local_content' in row}
+            context['local_snapshots'] = snapshots
             context['served_registration'] = registration
         return {**request, 'candidates': details}
 
@@ -710,7 +710,7 @@ class NativeViewsBinding:
                 'consequence': 'Render the same answer content in ' + c} for c in choices))
 
     def prepare_catalogs(self):
-        """One metadata ambiguity check per accepted scope, at request assembly."""
+        """One whole-roster skill selection per accepted scope at request assembly."""
         if self.views.scope != scope_key(self.runtime):
             self.reset(preserve_defaults=True)
         if self.closed:
@@ -726,7 +726,7 @@ class NativeViewsBinding:
         if self.catalog_seen != self.views.scope:
             self.catalog_seen = self.views.scope
             self._tools(ref, text, words, agent)
-        self._skills(ref, text, words)
+        self._skills(ref, text)
 
     def _tools(self, ref, text, words, agent):
         try:
@@ -790,8 +790,9 @@ class NativeViewsBinding:
         # Focused-skill contract admits one optional match, not one per provider.
         return tuple(contents[:1])
 
-    def _skills(self, ref, text, words):
+    def _skills(self, ref, text):
         from tools.skills_tool import skills_list
+        from agent.skill_utils import extract_skill_description
         # A semantic optional match cannot replace an explicit/mandatory route,
         # including a mandatory body that was too large or otherwise ineligible.
         if self.local_skill_route or any(c.required for c in self.views.skills.candidates):
@@ -803,17 +804,21 @@ class NativeViewsBinding:
             if self.skill_catalog_seen == catalog_key:
                 return
             self.skill_catalog_seen = catalog_key
-            # Explicit names are mandatory matches: ordinary focused-skill rules win.
-            if any(r['name'] in text for r in rows):
+            # Nonliteral explicit routes (including negated/quoted instructions)
+            # stay with ordinary skill handling; mere name substrings are not routes.
+            if re.search(r'\b(?:use|load)\s+(?:the\s+)?skill\b', text, re.I):
                 return
-            rows = [r for r in rows if words & _words(r.get('description', ''))]
-            if not 2 <= len(rows) <= 8:
+            if any(re.search(r'\b(?:use|load)\s+(?:the\s+)?`?' + re.escape(r['name']) + r'`?(?![\w-])', text, re.I) for r in rows):
                 return
-            candidates: list[dict[str, Any]] = [{'id': r['name'], 'description': r['description'], 'covers': r['description'],
-                'does_not_cover': 'Unknown: this catalog supplies no separate exclusions; inspect full content before use.',
+            # Every available entry participates: no lexical prefilter or 2..8
+            # eligibility gate. The provider rejects unsupported sizes as a whole.
+            if not rows:
+                return
+            candidates: list[dict[str, Any]] = [{'id': r['name'],
+                'description': extract_skill_description({'description': r['description']}),
                 'authorized': True} for r in rows]
-            facts = dict(task_ref=ref, task=text, rule_scope='Existing focused-skill rules; native request assembly supplies the selected complete content.',
-                ambiguous=True, mandatory_match=False, mandatory_ids=[], stage='metadata', candidates=candidates)
+            facts = dict(task_ref=ref, task=text, rule_scope='Existing focused-skill rules and explicit user instructions take precedence; native request assembly supplies the selected complete content.',
+                ambiguous=True, mandatory_match=False, mandatory_ids=[], stage='catalog', candidates=candidates)
             ids = tuple(r['id'] for r in candidates)
             revision = self.views.skills.catalog(tuple(SkillCandidate(r['id'], r['description']) for r in candidates), scope)
             self._request('catalog_ambiguity', facts, action=Action.SELECT_SKILLS, refs=(ref,), candidates=ids,

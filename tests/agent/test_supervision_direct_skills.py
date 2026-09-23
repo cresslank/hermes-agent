@@ -16,7 +16,7 @@ def test_remote_selected_complete_body_reaches_main_request_without_skill_tool(n
     request = assemble(native.agent, history)
     assert body in request.api_messages[-1]['content']
     assert 'Optional skill candidate:' not in request.api_messages[-1]['content']
-    assert [call['state']['facts']['stage'] for call, _ in native.calls] == ['metadata', 'detail']
+    assert [call['state']['facts']['stage'] for call, _ in native.calls] == ['catalog', 'detail']
     assert history == before
     # Selecting/removing future eligibility cannot mutate previously sent bytes.
     native.facade.unregister()

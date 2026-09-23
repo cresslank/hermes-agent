@@ -108,10 +108,12 @@ def native(tmp_path, monkeypatch, request):
                 answers[key] = {'type': 'choice', 'choice': chosen, 'confidence': 1.0,
                                 'probabilities': {k: float(k == chosen) for k in options}}
             else:
-                positive = not key.startswith('F19/material:')
+                positive = not key.startswith('F19/material:') and key != 'F12/gate:prose_suffices'
                 if key.startswith(('F13/fit:', 'F16/needed:')):
                     positive = key.split(':', 1)[1] == next(iter(first['criteria']))
                 answers[key] = {'type': 'noul', 'noul': mode.get('remaining', .01) if key == 'F12/remaining' else mode.get('material', .01) if key.startswith('F19/material:') else .99 if positive else .01}
+        if mode.get('skill_answers') and any(k.startswith('F12/') for k in answers):
+            answers = mode['skill_answers'](body, answers)
         return httpx.Response(200, json={'model': body['model'], 'usage': {}, 'answers': answers})
     cfg = Config(str(home), True, policy_id='offline-fixture', allowed_classes={'synthetic'}, fixture_policy=True)
     transport = Transport(cfg, FixtureCredential(str(home)), http_transport=httpx.MockTransport(handle))
@@ -226,10 +228,10 @@ def test_plugin_skill_metadata_detail_hint_and_native_scope_reset(native, monkey
     body = (native.home / 'skills/alpha/SKILL.md').read_text()
     assert body in result.api_messages[-1]['content'], native.bridge.supervisor.inspect()
     assert 'Optional skill candidate:' not in str(result.api_messages)
-    assert [c[0]['state']['facts']['stage'] for c in native.calls] == ['metadata','detail']
-    assert reads == [('alpha', threading.get_ident())]
+    assert [c[0]['state']['facts']['stage'] for c in native.calls] == ['catalog','detail']
+    assert reads == [(name, threading.get_ident()) for name in ('alpha', 'beta', 'alpha')]
     readiness.assert_not_called()
-    assert len(replies) == 1 and replies[0]['selected_ids'] == ['alpha']
+    assert len(replies) == 1 and replies[0]['selected_ids'] == ['alpha', 'beta']
     assert len({c[0]['state']['facts']['target_id'] for c in native.calls}) == 1
     assert not native.agent._supervision_view_binding.detail_requests
     assert not native.agent._supervision_view_binding.details
@@ -274,7 +276,7 @@ def test_skill_details_reject_changed_bindings_without_reading(native, monkeypat
     assert replies == [None]
     reads.assert_not_called()
     assert 'Native skill content:' not in str(result.api_messages)
-    assert [c[0]['state']['facts']['stage'] for c in native.calls] == ['metadata']
+    assert [c[0]['state']['facts']['stage'] for c in native.calls] == ['catalog']
     assert not native.agent._supervision_view_binding.details
     assert not native.agent._supervision_view_binding.detail_requests
 
@@ -317,7 +319,7 @@ def test_skill_details_fail_closed_and_do_not_read_after_revocation(native, monk
     assert reads == ['alpha']
     assert replies == [None]
     assert 'Native skill content:' not in str(result.api_messages)
-    assert [c[0]['state']['facts']['stage'] for c in native.calls] == ['metadata']
+    assert [c[0]['state']['facts']['stage'] for c in native.calls] == ['catalog']
     assert not native.agent._supervision_view_binding.details
     assert not native.agent._supervision_view_binding.detail_requests
 
@@ -332,8 +334,8 @@ def test_skill_hint_requires_ready_proposal_over_served_ids(native, monkeypatch,
             if case == 'shortlist':
                 proposal['metadata']['phase'] = 'shortlist'
             else:
-                proposal['candidate_ids'] = ['beta']
-                proposal['metadata']['selected_ids'] = ['beta']
+                proposal['candidate_ids'] = ['gamma']
+                proposal['metadata']['selected_ids'] = ['gamma']
             receipts.append(submit(proposal))
             return receipts[-1]
         return submit(proposal)

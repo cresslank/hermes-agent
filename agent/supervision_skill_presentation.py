@@ -29,9 +29,11 @@ def read_skill_content(name, *, description=None, max_chars=MAX_SKILL_CHARS):
     secret lookup, readiness action, environment registration or tool runs here.
     An oversized or pruned skill is ineligible, never a partial instruction.
     """
+    from agent.skill_utils import extract_skill_description
     from tools.skills_tool import (
         _is_skill_disabled, _locate_skill, _read_skill_text, _safe_frontmatter,
         _skill_lookup_path_error, _skill_search_dirs, skill_matches_platform,
+        skill_matches_environment, skill_matches_apps, _truncate_description,
     )
     if not isinstance(name, str) or ':' in name or _skill_lookup_path_error(name):
         return None
@@ -44,8 +46,9 @@ def read_skill_content(name, *, description=None, max_chars=MAX_SKILL_CHARS):
         metadata = _safe_frontmatter(content=body)
         if (not isinstance(body, str) or not 0 < len(body) <= max_chars
                 or '[SKILL_PRUNED]' in body or '!`' in body or '${HERMES_' in body
-                or (description is not None and metadata.get('description') != description)
+                or (description is not None and extract_skill_description({'description': _truncate_description(metadata.get('description', ''))}) != description)
                 or not skill_matches_platform(metadata)
+                or not skill_matches_environment(metadata) or not skill_matches_apps(metadata)
                 or _is_skill_disabled(metadata.get('name', name))):
             return None
         return SkillContent(name, body, str(path))
@@ -80,7 +83,9 @@ class SkillPresentation:
                 if not skill.content or any(skill.content in text for text in visible):
                     continue
                 additions.append('\n\n[Native skill content: ' + skill.name + '\nSource: ' + skill.source
-                    + '\nComplete read-only snapshot; existing focused-skill and explicit instructions still apply.\n'
+                    + '\nComplete read-only snapshot, already loaded by native skill selection. '
+                    + 'Do not reselect or fetch this same content with skill_view. '
+                    + 'Existing focused-skill and explicit instructions still apply; load distinct required references normally.\n'
                     + skill.content + '\nEnd native skill content]')
                 visible.append(skill.content)
             if additions:
