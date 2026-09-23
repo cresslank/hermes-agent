@@ -569,7 +569,7 @@ class NativeViewsBinding:
         feature_action = {'F12': 'rank_skill_ids', 'F13': 'apply_canonical_tool_view',
                           'F16': 'select_exact_spans_preserve_receipts'}[feature]
         if (proposal.feature_id != feature or proposal.metadata.get('feature_action') != feature_action
-                or not ids or not set(ids) <= set(known)
+                or (not ids and feature != 'F16') or not set(ids) <= set(known)
                 or not set(required) <= set(ids)):
             return None
         return {'selected_ids': list(ids), 'metadata': project(proposal.metadata)}
@@ -804,15 +804,14 @@ class NativeViewsBinding:
             catalog = Catalog.tools(schemas, required_ids=required,
                                     rules_revision=getattr(agent, '_supervision_rules_revision', ''))
             self.views.required_tools = required
-            explicit = bool(required)
-            matches = [s for s in schemas if tool_id(s) not in catalog.required_ids and
-                       words & _words(s.get('function', s).get('description', ''))]
-            if catalog.discoverable and not explicit and 2 <= len(matches) <= 8:
+            # Offer the complete authorized roster, including explicit pins and
+            # companions. No lexical shortlist can certify completeness.
+            if catalog.discoverable and 1 <= len(schemas) <= 128:
                 rows: list[dict[str, Any]] = [{'id': tool_id(s), 'description': s.get('function', s).get('description', ''),
-                    'authorized': True, 'available': True, 'schema_hash': fingerprint(s)} for s in matches]
-                if all(isinstance(r['description'], str) and 0 < len(r['description']) <= 1200 for r in rows):
+                    'authorized': True, 'available': True, 'schema_hash': fingerprint(s)} for s in schemas]
+                if all(isinstance(r['description'], str) and 0 < len(r['description']) <= 8192 for r in rows):
                     facts = dict(operation_ref=ref, operation=text, contract=text, ambiguous=True,
-                        explicit_tool=False, deterministic_route=False, candidates=rows,
+                        explicit_tool=bool(required), deterministic_route=False, candidates=rows,
                         mandatory_ids=sorted(catalog.required_ids),
                         discovery_ids=[i for i in catalog.ids if i in {'tool_search','hermes_tool_search','tool_describe','tool_call'}])
                     result = self._request('tool_capability_ambiguity', facts, action=Action.SELECT_TOOLS,

@@ -17,7 +17,7 @@ METADATA_VERSION = "supervision.metadata.v1"
 DECISION_BUDGET_SECONDS = 1.0
 
 
-def bounded_metadata(value):
+def bounded_metadata(value, *, selection_limit=64):
     """Lossless descriptor data, never executable authority; owners validate semantics.
 
     Bound before copying/encoding, including cycles, non-JSON types and nonfinite
@@ -27,7 +27,7 @@ def bounded_metadata(value):
         raise ValueError("invalid_metadata")
     nodes = 0
 
-    def visit(item, depth=0):
+    def visit(item, depth=0, key=None):
         nonlocal nodes
         nodes += 1
         if nodes > 512 or depth > 6:
@@ -38,9 +38,10 @@ def bounded_metadata(value):
             for key, child in item.items():
                 if type(key) is not str or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,63}", key):
                     raise ValueError("invalid_metadata_key")
-                visit(child, depth + 1)
+                visit(child, depth + 1, key)
         elif isinstance(item, (list, tuple)):
-            if len(item) > 64:
+            limit = selection_limit if depth == 1 and key in {"selected_ids", "mandatory_ids", "discovery_ids"} else 64
+            if len(item) > limit:
                 raise ValueError("metadata_bounds")
             for child in item:
                 visit(child, depth + 1)
@@ -303,11 +304,13 @@ class InterventionProposalV1:
         for name in ("proposal_id", "plugin_generation", "feature_id", "incident_id", "owner", "target_id"):
             if type(getattr(self, name)) is not str or not 0 < len(getattr(self, name)) <= 256:
                 raise ValueError("invalid_identifier")
-        if len(self.evidence_refs) > 64 or len(self.candidate_ids) > 32:
+        native_set = (self.owner == "native_views" and
+            (self.feature_id, self.action) in {("F13", Action.SELECT_TOOLS), ("F16", Action.SELECT_WINDOWS)})
+        if len(self.evidence_refs) > 64 or len(self.candidate_ids) > (128 if native_set else 32):
             raise ValueError("too_many_refs")
         if any(type(x) is not str or not 0 < len(x) <= 256 for x in (*self.evidence_refs, *self.candidate_ids)):
             raise ValueError("invalid_ref")
-        metadata = bounded_metadata(self.metadata)
+        metadata = bounded_metadata(self.metadata, selection_limit=128 if native_set else 64)
         for key in ("selected_ids", "candidate_ids"):
             if key in metadata and (not isinstance(metadata[key], tuple) or metadata[key] != self.candidate_ids):
                 raise ValueError("metadata_selection_mismatch")

@@ -110,7 +110,8 @@ def native(tmp_path, monkeypatch, request):
             else:
                 positive = not key.startswith('F19/material:') and key != 'F12/gate:prose_suffices'
                 if key.startswith(('F13/fit:', 'F16/needed:')):
-                    positive = key.split(':', 1)[1] == next(iter(first['criteria']))
+                    defaults = ['mcp_view_alpha'] if key.startswith('F13/') else [facts['candidates'][0]['id']]
+                    positive = key.split(':', 1)[1] in mode.get('selected_ids', defaults)
                 answers[key] = {'type': 'noul', 'noul': mode.get('remaining', .01) if key == 'F12/remaining' else mode.get('material', .01) if key.startswith('F19/material:') else .99 if positive else .01}
         if mode.get('skill_answers') and any(k.startswith('F12/') for k in answers):
             answers = mode['skill_answers'](body, answers)
@@ -451,7 +452,7 @@ def test_plugin_result_selection_after_archive_at_canonical_commit(native, name,
     assert result['output'] == ''.join(original['output'][s['start']:s['end']] for s in spans)
     assert 'WARNING partial result; cleanup not run' in result['output']
     assert len(result['output']) < len(original['output'])
-    body, = [c[0] for c in native.calls if 'F16/select' in c[0]['questions']]
+    body, = [c[0] for c in native.calls if any(k.startswith('F16/needed:') for k in c[0]['questions'])]
     assert set(body['state']['facts']['mandatory_ids']) <= {s['id'] for s in spans}
     ref = body['state']['facts']['source_ref']
     assert 0 < len(ref) <= 256 and ref != source.path

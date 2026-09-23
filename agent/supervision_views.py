@@ -23,7 +23,7 @@ from typing import Any
 from agent.supervision_catalog import Catalog, SkillView, fingerprint
 from agent.supervision_types import DECISION_BUDGET_SECONDS
 
-_CRITICAL = re.compile(r"error|fail|warn|not[ _-]run|partial|approv|denied|mutat|cleanup|cancel|timeout|exit|receipt|commit|supervisor[ _-]control|obligation|provenance|source_ref|decision_id|input_ref", re.I)
+_CRITICAL = re.compile(r"error|fail|warn|not[ _-]run|partial|approv|denied|mutat|effect|cleanup|cancel|timeout|exit|receipt|commit|supervisor[ _-]control|obligation|provenance|source_ref|decision_id|input_ref", re.I)
 
 
 @dataclass(frozen=True)
@@ -196,7 +196,7 @@ class SupervisionViews:
         malformed, oversized-line and incomplete critical-span pools use baseline.
         """
         scope = self.scope
-        if not isinstance(original, str) or len(original) < 2400:
+        if not isinstance(original, str) or not 2400 <= len(original) <= 2 * 1024 * 1024:
             return baseline
         try:
             envelope = json.loads(original)
@@ -216,8 +216,14 @@ class SupervisionViews:
         # No selection can erase neighbors of a failure or receipt.
         indices = {i for i, b in enumerate(blocks) if b["critical"]}
         required |= {blocks[j]["id"] for i in indices for j in (i - 1, i + 1) if 0 <= j < len(blocks)}
-        if len(blocks) > 8:
+        # Evaluate at most 128 optional exact blocks; preserve every unexamined
+        # block and all critical neighbors locally. No truncated roster claim.
+        optional = [b for b in blocks if b['id'] not in required]
+        if not optional:
             return baseline
+        if len(optional) > 128:
+            optional = [optional[i * len(optional) // 128] for i in range(128)]
+        window_ids = {b['id'] for b in optional}
         # The feature may only observe a persisted source. Failure keeps baseline
         # without dispatching a semantic selection.
         from tools.tool_result_storage import maybe_persist_tool_result, extract_persisted_path
@@ -237,18 +243,18 @@ class SupervisionViews:
             self._result_sources[ref] = source
         try:
             answer = self._decide("select_windows", "oversized_structured_result", {
-                "tool_name": tool_name, "call_id": call_id, "candidates": tuple(blocks),
-                "required_ids": tuple(sorted(required)), "complete": True, "source_ref": ref,
+                "tool_name": tool_name, "call_id": call_id, "candidates": tuple(optional),
+                "required_ids": (), "complete": True, "source_ref": ref,
             }, revision=revision)
             if self.result_source(ref, scope=scope, revision=revision) is not source:
                 return baseline
         finally:
             with self._result_lock:
                 self._result_sources.pop(ref, None)
-        selected = _selected(answer, tuple(b["id"] for b in blocks))
-        if not selected:
+        selected = _selected(answer, tuple(b["id"] for b in optional), allow_empty=True)
+        if selected is None:
             return baseline
-        keep = set(selected) | required
+        keep = set(selected) | required | {b['id'] for b in blocks if b['id'] not in window_ids}
         if len(keep) == len(blocks):
             return baseline
         chosen = [b for b in blocks if b["id"] in keep]
@@ -258,20 +264,25 @@ class SupervisionViews:
             "omitted": True, "full_output_ref": path, "original_chars": len(text),
             "spans": [{"id": b["id"], "start": b["start"], "end": b["end"]} for b in chosen],
         }
-        return json.dumps(view, ensure_ascii=False)
+        rendered = json.dumps(view, ensure_ascii=False)
+        # Never expand an already compact native spill preview in the name of
+        # salience. Its existing full-source pointer remains the fallback.
+        if isinstance(baseline, str) and len(rendered) >= len(baseline):
+            return baseline
+        return rendered
 
 
-def _selected(answer, known):
+def _selected(answer, known, *, allow_empty=False):
     ids = answer.get("selected_ids") if isinstance(answer, dict) else None
-    if (not isinstance(ids, (list, tuple)) or not ids or any(not isinstance(i, str) for i in ids)
+    if (not isinstance(ids, (list, tuple)) or (not ids and not allow_empty) or any(not isinstance(i, str) for i in ids)
             or len(set(ids)) != len(ids) or not set(ids) <= set(known)):
         return None
     return tuple(ids)
 
 
 def _blocks(text):
-    if len(text) > 8 * 1200:
-        return None  # no admissible eight-block pool; bound nested-value parsing too
+    if len(text) > 1024 * 1024:
+        return None  # bounded local parsing; only 128 exact blocks cross the wire
     # A keyword on the opening line cannot protect a long nested JSON value by
     # neighbor blocks alone. Bind its entire value, including distant leaves.
     protected = []
