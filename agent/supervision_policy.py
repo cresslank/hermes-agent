@@ -11,7 +11,7 @@ import weakref
 from contextvars import ContextVar
 
 from agent.supervision_types import (
-    Action, Completeness, DecisionSnapshotV1, EffectReceiptV1,
+    Action, Completeness, DecisionSnapshotV1, EffectReceiptV1, DECISION_BUDGET_SECONDS,
     InterventionProposalV1, OwnerDecisionV1, OwnerRequestV1, Revision, SettlementV1,
     project,
 )
@@ -173,7 +173,7 @@ class SupervisionRuntime:
         with self.lock:
             if self.round_deadline is None:
                 self.round_deadline_issued_at = self.clock()
-                self.round_deadline = self.round_deadline_issued_at + .150
+                self.round_deadline = self.round_deadline_issued_at + DECISION_BUDGET_SECONDS
             return min(self.round_deadline, owner_deadline) if owner_deadline is not None else self.round_deadline
 
     def accept_instruction(self, origin):

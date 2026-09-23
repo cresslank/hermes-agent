@@ -154,7 +154,7 @@ def test_native_settlement_projects_once_and_retains_original(agent, facade, nam
     assert agent._flush_messages_to_session_db.called
 
 
-def test_uncached_retrieval_then_result_share_absolute_150ms_token(agent, facade):
+def test_uncached_retrieval_then_result_share_absolute_decision_token(agent, facade):
     owner = agent._supervision_views
     # Model the admitted monotonic budget independently of OS descheduling
     # BETWEEN owner calls. Each decision still runs on a real delayed worker and
@@ -177,7 +177,9 @@ def test_uncached_retrieval_then_result_share_absolute_150ms_token(agent, facade
 def test_result_fail_open(agent, facade, fault):
     owner, raw = agent._supervision_views, output()
     if fault == "stale": facade.bad = True
-    if fault == "expired": facade.delay = .18
+    if fault == "expired":
+        owner.deadline = owner.clock() + .01
+        facade.delay = .03
     if fault == "opaque": raw = "x" * 4000
     if fault == "huge_line": raw = json.dumps({"output": "x" * 5000})
     if fault == "unknown": facade.select_windows = lambda r: {"revision": r["revision"], "selected_ids": ["bad"]}

@@ -12,6 +12,10 @@ from typing import Any, Mapping
 VERSION = "supervision.v1"
 METADATA_VERSION = "supervision.metadata.v1"
 
+# One upper bound for a native decision and its dependent evidence pass.
+# Results are consumed immediately; this is not a mandatory wait.
+DECISION_BUDGET_SECONDS = 1.0
+
 
 def bounded_metadata(value):
     """Lossless descriptor data, never executable authority; owners validate semantics.

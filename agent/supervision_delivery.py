@@ -11,7 +11,7 @@ import sqlite3
 import time
 
 from agent import supervision_store as store
-from agent.supervision_types import Action, Completeness, SettlementV1
+from agent.supervision_types import Action, Completeness, SettlementV1, DECISION_BUDGET_SECONDS
 
 @dataclass(frozen=True)
 class DeliveryCompleteness(Completeness):
@@ -347,7 +347,7 @@ def final_decision(event, target_session):
             "source_ref": object_id, "verification": "provisional", "novel_claim": True}]}
     # One original admission deadline, not a fresh allowance per proposal/feature.
     issued = runtime.clock()
-    deadline = min(issued + .150, runtime.round_deadline) if not runtime.closed and runtime.round_deadline else issued + .150
+    deadline = min(issued + DECISION_BUDGET_SECONDS, runtime.round_deadline) if not runtime.closed and runtime.round_deadline else issued + DECISION_BUDGET_SECONDS
     actions = {Action.RETAIN_RESULT, Action.FINAL_BOUNDED_VIEW, Action.DELIVER_FINAL}
     with runtime.lock:
         if runtime.revision != current_revision:

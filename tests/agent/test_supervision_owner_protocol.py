@@ -6,7 +6,7 @@ import pytest
 
 from agent.subagent_lifecycle import bind_subagent_parent
 from agent.supervision_owner_protocol import decode_request, encode_decision
-from agent.supervision_types import Action, OwnerDecisionV1
+from agent.supervision_types import Action, OwnerDecisionV1, DECISION_BUDGET_SECONDS
 from hermes_cli.plugins import PluginContext
 from hermes_cli.plugins_manifest import PluginManifest
 from tests.agent.supervision_test_support import rig as rig, accept
@@ -31,7 +31,7 @@ def test_codec_preserves_unknowns_immutable_facts_exact_refs_and_deadline(rig):
     rt, req = request(rig)
     assert req.event == "retrieval_candidates" and req.target_id == "lcm:exact-id"
     assert req.evidence_refs == ("lcm:1:0-1", "lcm:2:0-1")
-    assert req.deadline == 100.150 and rt.round_deadline_issued_at == 100
+    assert req.deadline == 100 + DECISION_BUDGET_SECONDS and rt.round_deadline_issued_at == 100
     assert not req.completeness.complete and req.completeness.global_coverage == "unknown"
     assert "qualifiers_complete" not in req.candidates[0]
     assert "constraints_match" not in req.candidates[0]

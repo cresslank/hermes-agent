@@ -3,7 +3,7 @@
 Integration seam: attach ``SupervisionViews(facade, scope=revision_key)`` as
 ``agent._supervision_views``. The facade's rank_candidates/select_windows/
 evaluate_relation(request) must promptly return a concurrent Future or a validated
-mapping. Only the owner waits, at most the remaining ONE shared 150ms cycle token.
+mapping. The consumer waits only for the remaining shared native decision budget.
 The facade owns egress consent and worker admission; no model is called here.
 Response: {revision: request.revision, selected_ids: [canonical IDs]} or for
 relations {revision: ..., relation: finite_label}. None means normal baseline.
@@ -21,6 +21,7 @@ import uuid
 from typing import Any
 
 from agent.supervision_catalog import Catalog, SkillView, fingerprint
+from agent.supervision_types import DECISION_BUDGET_SECONDS
 
 _CRITICAL = re.compile(r"error|fail|warn|not[ _-]run|partial|approv|denied|mutat|cleanup|cancel|timeout|exit|receipt|commit|supervisor[ _-]control|obligation|provenance|source_ref|decision_id|input_ref", re.I)
 
@@ -78,7 +79,7 @@ class SupervisionViews:
             return self.deadline_provider()
         with self._budget_lock:
             if self.deadline is None:
-                self.deadline = self.clock() + .150
+                self.deadline = self.clock() + DECISION_BUDGET_SECONDS
             return self.deadline
 
     def next_cycle(self):

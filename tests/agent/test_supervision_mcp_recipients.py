@@ -264,7 +264,8 @@ def test_recipient_authority_at_disclosure_proposal_and_consumption(tmp_path, mo
         # The owner's original deadline remains one shared token, never one per
         # recipient or reissued after unload/replacement.
         if v.runtime.round_deadline is not None:
-            assert v.runtime.round_deadline == pytest.approx(v.runtime.round_deadline_issued_at + .150)
+            from agent.supervision_types import DECISION_BUDGET_SECONDS
+            assert v.runtime.round_deadline == pytest.approx(v.runtime.round_deadline_issued_at + DECISION_BUDGET_SECONDS)
 
 
 def test_two_profile_a_b_a_keeps_mcp_authority_and_other_owners_separate(tmp_path, monkeypatch):

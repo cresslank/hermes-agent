@@ -257,7 +257,8 @@ def test_shared_original_deadline_is_not_renewed_between_owners(vertical):
     recall(v)
     first = v.runtime.round_deadline
     issued = v.runtime.round_deadline_issued_at
-    assert first == pytest.approx(issued + .150)
+    from agent.supervision_types import DECISION_BUDGET_SECONDS
+    assert first == pytest.approx(issued + DECISION_BUDGET_SECONDS)
     from web.muxyard.provider import MuxyardWebSearchProvider
     MuxyardWebSearchProvider(ExtractClient(), supervision=v.mux).extract(["https://example.invalid/synthetic"], max_chars=100)
     assert v.runtime.round_deadline == first
