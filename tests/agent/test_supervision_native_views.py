@@ -223,7 +223,9 @@ def test_plugin_skill_metadata_detail_hint_and_native_scope_reset(native, monkey
     native.accept('Analyze weather observations.')
     history = [{'role':'user', 'content':'Analyze weather observations.'}]
     result = assemble(native.agent, history)
-    assert 'Optional skill candidate: alpha' in str(result.api_messages), native.bridge.supervisor.inspect()
+    body = (native.home / 'skills/alpha/SKILL.md').read_text()
+    assert body in result.api_messages[-1]['content'], native.bridge.supervisor.inspect()
+    assert 'Optional skill candidate:' not in str(result.api_messages)
     assert [c[0]['state']['facts']['stage'] for c in native.calls] == ['metadata','detail']
     assert reads == [('alpha', threading.get_ident())]
     readiness.assert_not_called()
@@ -271,7 +273,7 @@ def test_skill_details_reject_changed_bindings_without_reading(native, monkeypat
     native.drain()
     assert replies == [None]
     reads.assert_not_called()
-    assert 'Optional skill candidate:' not in str(result.api_messages)
+    assert 'Native skill content:' not in str(result.api_messages)
     assert [c[0]['state']['facts']['stage'] for c in native.calls] == ['metadata']
     assert not native.agent._supervision_view_binding.details
     assert not native.agent._supervision_view_binding.detail_requests
@@ -314,7 +316,7 @@ def test_skill_details_fail_closed_and_do_not_read_after_revocation(native, monk
     native.drain()
     assert reads == ['alpha']
     assert replies == [None]
-    assert 'Optional skill candidate:' not in str(result.api_messages)
+    assert 'Native skill content:' not in str(result.api_messages)
     assert [c[0]['state']['facts']['stage'] for c in native.calls] == ['metadata']
     assert not native.agent._supervision_view_binding.details
     assert not native.agent._supervision_view_binding.detail_requests
@@ -339,7 +341,7 @@ def test_skill_hint_requires_ready_proposal_over_served_ids(native, monkeypatch,
     result = assemble(native.agent, [{'role': 'user', 'content': 'Analyze weather observations.'}])
     native.drain()
     assert receipts and receipts[0]['status'] == 'accepted'
-    assert 'Optional skill candidate:' not in str(result.api_messages)
+    assert 'Native skill content:' not in str(result.api_messages)
     assert any(r.reason == 'skill_details_required' for r in native.runtime.receipts.values())
 
 
@@ -556,14 +558,15 @@ def test_expired_original_budget_never_renews(native):
 
 
 @pytest.mark.parametrize('native', [False], indirect=True)
-def test_missing_explicit_egress_policy_keeps_original_clarify(native):
+def test_missing_egress_policy_does_not_block_local_accepted_default(native):
     from agent.inline_tool_executors import INLINE_TOOL_EXECUTORS, InlineToolContext
     native.accept('```hermes-defaults-v1\n{"output_format":"markdown"}\n```')
     native.agent.clarify_callback = MagicMock(return_value={'answers': {'q0': 'json'}})
     result = json.loads(INLINE_TOOL_EXECUTORS['clarify'](native.agent,
         {'questions': [{'question':'Output format?', 'choices':['markdown','plain_text','json']}]}, InlineToolContext('task')))
-    assert result['responses'][0]['user_response'] == 'json'
-    native.agent.clarify_callback.assert_called_once()
+    assert result['responses'][0]['user_response'] == ''
+    assert result['responses'][0]['resolved_value'] == 'markdown'
+    native.agent.clarify_callback.assert_not_called()
     native.drain()
     assert not native.calls
 
@@ -611,7 +614,7 @@ def test_unknown_and_material_optional_update_reaches_original_ui_once(native, r
 
 
 @pytest.mark.parametrize('case', ['embedded', 'material', 'no_trusted_source'])
-def test_clarification_default_needs_exact_authority_and_nonmaterial_decision(native, case):
+def test_clarification_default_needs_exact_authority_not_remote_vote(native, case):
     from agent.inline_tool_executors import INLINE_TOOL_EXECUTORS, InlineToolContext
     contract = '```hermes-defaults-v1\n{"output_format":"markdown"}\n```'
     if case == 'embedded':
@@ -625,8 +628,14 @@ def test_clarification_default_needs_exact_authority_and_nonmaterial_decision(na
     result = json.loads(INLINE_TOOL_EXECUTORS['clarify'](native.agent,
         {'questions': [{'question':'Output format?', 'choices':['markdown','plain_text','json']}],
          'authorized_default': 'markdown', 'authorized': True}, InlineToolContext('task')))
-    native.agent.clarify_callback.assert_called_once()
-    assert result['responses'][0]['user_response'] == 'json'
+    if case == 'material':
+        native.agent.clarify_callback.assert_not_called()
+        assert result['responses'][0]['resolved_value'] == 'markdown'
+        assert result['responses'][0]['user_response'] == ''
+    else:
+        native.agent.clarify_callback.assert_called_once()
+        assert result['responses'][0]['user_response'] == 'json'
+    assert not native.calls
     assert not any(r.status == 'applied' for r in native.runtime.receipts.values())
 
 
@@ -679,13 +688,13 @@ def test_negotiated_clarification_contract_uses_exact_source_or_original_ui(nati
     else:
         a.clarify_callback.assert_called_once()
         assert result['responses'][0]['user_response'] == 'json'
-    assert any(r.status == 'applied' and r.reason == 'native_view' for r in native.runtime.receipts.values()), native.bridge.supervisor.inspect()
-    assert len(native.calls) == 1
+    assert not any(r.status == 'applied' for r in native.runtime.receipts.values())
+    assert not native.calls  # finite accepted contract is resolved by its owner
 
 
 @pytest.mark.parametrize('resolution', ['retrievable', 'user_only'])
-@pytest.mark.parametrize('guard', ['grant', 'metadata', 'unload'])
-def test_dedicated_clarification_actions_keep_original_ui_when_denied(native, monkeypatch, resolution, guard):
+@pytest.mark.parametrize('guard', ['grant', 'scope', 'unload'])
+def test_local_clarification_preserves_native_scope_without_remote_authority(native, monkeypatch, resolution, guard):
     from agent.inline_tool_executors import INLINE_TOOL_EXECUTORS, InlineToolContext
     native.mode.update(resolution=resolution, material=.99 if resolution == 'user_only' else .01)
     if resolution == 'retrievable':
@@ -693,27 +702,27 @@ def test_dedicated_clarification_actions_keep_original_ui_when_denied(native, mo
         native.accept('```hermes-defaults-v1\n{"output_format_ref":"format-source"}\n```', continuation=True)
     else:
         native.accept('```hermes-defaults-v1\n{"output_format":"ask"}\n```')
-    submit, replies = native.facade.submit, []
-    def denied(proposal):
-        proposal = copy.deepcopy(proposal)
-        if guard == 'grant':
-            native.facade._registration.grants -= {proposal['action']}
-        if guard == 'metadata':
-            proposal['metadata']['feature_action'] = 'use_authorized_default'
-        if guard == 'unload':
-            native.facade.unregister()
-        replies.append(submit(proposal))
-        return replies[-1]
-    monkeypatch.setattr(native.facade, 'submit', denied)
+    submit = MagicMock(side_effect=AssertionError('deterministic contract must not propose remote authority'))
+    monkeypatch.setattr(native.facade, 'submit', submit)
+    if guard == 'grant':
+        native.facade._registration.grants = frozenset({'observe'})
+    elif guard == 'scope':
+        native.accept('Different work.')
+    else:
+        native.facade.unregister()
     native.agent.clarify_callback = MagicMock(return_value={'answers': {'q0': 'json'}})
     result = json.loads(INLINE_TOOL_EXECUTORS['clarify'](native.agent,
         {'questions': [{'question':'Output format?', 'choices':['markdown','plain_text','json']}]}, InlineToolContext('task')))
     native.drain()
-    assert len(replies) == 1
-    if guard == 'grant':
-        assert replies[0]['reason'] == 'grant_missing'
-    native.agent.clarify_callback.assert_called_once()
-    assert result['responses'][0]['user_response'] == 'json'
+    submit.assert_not_called()
+    assert not native.calls
+    if guard == 'grant' and resolution == 'retrievable':
+        native.agent.clarify_callback.assert_not_called()
+        assert result['responses'][0]['resolved_value'] == 'markdown'
+        assert result['responses'][0]['user_response'] == ''
+    else:
+        native.agent.clarify_callback.assert_called_once()
+        assert result['responses'][0]['user_response'] == 'json'
     assert not any(r.status == 'applied' for r in native.runtime.receipts.values())
 
 
@@ -726,11 +735,9 @@ def test_clarification_retrieval_never_broadens_pinned_source(native, monkeypatc
     if case == 'evicted':
         native.runtime.sources.pop('format-source')
     if case == 'changed_during_decision':
-        submit = native.facade.submit
-        def changed(proposal):
-            native.runtime.sources['format-source'] = '```hermes-defaults-v1\n{"output_format":"json"}\n```'
-            return submit(proposal)
-        monkeypatch.setattr(native.facade, 'submit', changed)
+        # The decision is now synchronous. Mutate after pinning, before the
+        # native owner resolves it, rather than waiting for a nonexistent vote.
+        native.runtime.sources['format-source'] = '```hermes-defaults-v1\n{"output_format":"json"}\n```'
     native.agent.clarify_callback = MagicMock(return_value={'answers': {'q0': 'json'}})
     result = json.loads(INLINE_TOOL_EXECUTORS['clarify'](native.agent,
         {'questions': [{'question': 'Password?' if case == 'wrong_question' else 'Output format?',
@@ -739,7 +746,7 @@ def test_clarification_retrieval_never_broadens_pinned_source(native, monkeypatc
     native.agent.clarify_callback.assert_called_once()
     assert result['responses'][0]['user_response'] == 'json'
     assert not any(r.status == 'applied' for r in native.runtime.receipts.values())
-    assert len(native.calls) == (1 if case == 'changed_during_decision' else 0)
+    assert not native.calls
 
 
 @pytest.mark.parametrize('native', ['legacy_codecs'], indirect=True)
@@ -759,11 +766,17 @@ def test_older_host_missing_clarification_capabilities_preserves_ui(native, monk
         return replies[-1]
     monkeypatch.setattr(native.bridge, 'submit', capture)
     native.agent.clarify_callback = MagicMock(return_value={'answers': {'q0': 'json'}})
-    INLINE_TOOL_EXECUTORS['clarify'](native.agent,
-        {'questions': [{'question':'Output format?', 'choices':['markdown','plain_text','json']}]}, InlineToolContext('task'))
+    result = json.loads(INLINE_TOOL_EXECUTORS['clarify'](native.agent,
+        {'questions': [{'question':'Output format?', 'choices':['markdown','plain_text','json']}]}, InlineToolContext('task')))
     native.drain()
-    assert replies == [{'status': 'rejected', 'reason': 'action_codec_unavailable'}]
-    native.agent.clarify_callback.assert_called_once()
+    assert replies == [] and not native.calls
+    if resolution == 'retrievable':
+        native.agent.clarify_callback.assert_not_called()
+        assert result['responses'][0]['resolved_value'] == 'markdown'
+        assert result['responses'][0]['user_response'] == ''
+    else:
+        native.agent.clarify_callback.assert_called_once()
+        assert result['responses'][0]['user_response'] == 'json'
     assert not any(r.status == 'applied' for r in native.runtime.receipts.values())
 
 

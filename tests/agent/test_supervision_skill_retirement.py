@@ -38,7 +38,9 @@ def ready(native):
              {'id': 'cleanup', 'content': 'Clean up the owned scratch artifacts.', 'status': 'pending'}]
     todo(native, messages, items)
     result = assemble(native.agent, messages)
-    assert 'Optional skill candidate: alpha' in str(result.api_messages), native.bridge.supervisor.inspect()
+    body = (native.home / 'skills/alpha/SKILL.md').read_text()
+    assert body in result.api_messages[-1]['content'], native.bridge.supervisor.inspect()
+    native.mode['presented_skill_rows'] = copy.deepcopy(result.api_messages)
     binding = native.agent._supervision_view_binding
     entry, = binding.skill_hints.values()
     assert entry[0].plugin_id == 'fixture-views'
@@ -109,8 +111,11 @@ def test_ready_hint_exact_removal_at_committed_native_phase(native, monkeypatch,
         before_assembly = copy.deepcopy(messages)
         result = assemble(native.agent, messages)
         native.drain()
-        assert 'Optional skill candidate: alpha' not in str(result.api_messages)
-        assert foreign in str(result.api_messages)
+        presented = native.mode['presented_skill_rows']
+        assert result.api_messages[:len(presented)] == presented  # cached prefix is immutable
+        assert hint.content not in result.api_messages[-1]['content']
+        assert foreign not in str(result.api_messages)  # unbound recommendations are not bodies
+        assert binding.skill_contents() == ()
         assert binding.views.skills.hints == {'other-plugin': foreign}
         assert not binding.skill_hints
         assert messages == before_assembly
@@ -299,7 +304,10 @@ def test_retirement_reopens_only_for_relevant_native_events(native, event):
     result = assemble(native.agent, messages)
     native.drain()
     reopened = event in {'changed_phase', 'reopened', 'reopened_renamed', 'catalog', 'steering', 'task'}
-    assert ('Optional skill candidate: alpha' in str(result.api_messages)) is reopened
+    assert bool(binding.skill_contents()) is reopened
+    presented = native.mode['presented_skill_rows']
+    assert result.api_messages[:len(presented)] == presented
+    assert sum(original_hint.content in row.get('content', '') for row in result.api_messages) == 1
     assert len(native.calls) == calls + (2 if reopened else 0)
     assert messages == history
     assert len(removal_calls(native)) == 1
@@ -365,7 +373,9 @@ def test_skill_effects_fail_closed_when_real_receipt_writer_is_locked(native, mo
     calls = len(native.calls)
     result = assemble(native.agent, messages)
     assert binding.views.skills.hints == before
-    assert ('Optional skill candidate: alpha' in str(result.api_messages)) is bool(before)
+    body = (native.home / 'skills/alpha/SKILL.md').read_text()
+    assert any(body in row.get('content', '') for row in result.api_messages) is bool(before)
+    assert bool(binding.skill_contents()) is bool(before)
     assert len(native.calls) == calls
 
 
@@ -383,7 +393,10 @@ def test_retired_hint_stays_retired_after_completed_bookkeeping(native, record_p
     completed = [{**t, 'status': 'completed'} for t in items]
     todo(native, messages, completed)
     result = assemble(native.agent, messages)
-    assert 'Optional skill candidate: alpha' not in str(result.api_messages)
+    presented = native.mode['presented_skill_rows']
+    assert result.api_messages[:len(presented)] == presented
+    assert entry[0].content not in result.api_messages[-1]['content']
+    assert not binding.skill_contents()
     assert len(removal_calls(native)) == 1
     phase = binding.skill_phase
     changed = (list(reversed(completed)) if bookkeeping == 'reorder' else
@@ -395,7 +408,10 @@ def test_retired_hint_stays_retired_after_completed_bookkeeping(native, record_p
     result = assemble(native.agent, messages)
     native.drain()
     assert [b['state']['facts']['stage'] for b, _ in native.calls] == ['metadata', 'detail', 'unload']
-    assert 'Optional skill candidate: alpha' not in str(result.api_messages)
+    presented = native.mode['presented_skill_rows']
+    assert result.api_messages[:len(presented)] == presented
+    assert entry[0].content not in result.api_messages[-1]['content']
+    assert not binding.skill_contents()
     assert binding.skill_phase == phase
     record_property('retirement', dict(bookkeeping=bookkeeping, old_hint=entry[0].id,
         stages=[b['state']['facts']['stage'] for b, _ in native.calls], next_request=result.api_messages))

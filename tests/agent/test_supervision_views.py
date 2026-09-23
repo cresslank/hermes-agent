@@ -115,7 +115,10 @@ def test_skill_hints_are_request_only_and_unload_cannot_erase_loaded_history(age
     assert view.ranked_ids == ("exact", "optional")
     history = [{"role": "user", "content": "loaded skill body stays here"}]
     result = assemble(agent, history)
-    assert "Optional skill candidate: optional" in str(result.api_messages)
+    # Catalog recommendations alone are not complete skill bodies and cannot
+    # enter the native request. Only the bound snapshot consumer may add content.
+    assert "Optional skill candidate:" not in str(result.api_messages)
+    assert result.api_messages[-1] == history[-1]
     view.remove_own_hint("another_plugin")
     assert view.hints
     view.remove_own_hint("plugin")
@@ -185,23 +188,24 @@ def test_result_fail_open(agent, facade, fault):
 def test_native_inline_clarification_never_fabricates_user_answer(agent, blocked):
     from agent.inline_tool_executors import INLINE_TOOL_EXECUTORS, InlineToolContext
     owner = agent._supervision_views
-    fields = dict(question="Format?", value="Bullets", scope=owner.scope, evidence_ref="instruction:1",
+    fields = dict(question="Output format?", value="markdown", scope=owner.scope, evidence_ref="instruction:1",
                   low_stakes=True, authorized=True)
     if blocked in ("secret", "approval"): fields[blocked] = True
     if blocked in ("low_stakes", "authorized"): fields[blocked] = False
     if blocked == "scope": fields[blocked] = "stale"
-    owner.defaults["Format?"] = AuthorizedDefault(**fields)
-    agent.clarify_callback = MagicMock(return_value={"answers": {"q0": "Paragraphs"}})
+    owner.defaults["Output format?"] = AuthorizedDefault(**fields)
+    agent.clarify_callback = MagicMock(return_value={"answers": {"q0": "json"}})
     result = json.loads(INLINE_TOOL_EXECUTORS["clarify"](agent,
-        {"questions": [{"question": "Format?", "choices": ["Bullets", "Paragraphs"]}],
+        {"questions": [{"question": "Output format?", "choices": ["markdown", "plain_text", "json"]}],
          "authorized": True}, InlineToolContext("task-1")))
     if blocked is None:
         assert not agent.clarify_callback.called
-        assert result["responses"][0]["resolved_value"] == "Bullets"
+        assert result["responses"][0]["resolved_value"] == "markdown"
         assert result["responses"][0]["user_response"] == ""
     else:
         assert agent.clarify_callback.called
-        assert result["responses"][0]["user_response"] == "Paragraphs"
+        assert result["responses"][0]["user_response"] == "json"
+    assert not agent._supervision_views.facade.calls
 
 
 def test_native_deferred_discovery_selection_and_dispatch_scope(agent):

@@ -263,6 +263,28 @@ def _selected(answer, known):
 
 
 def _blocks(text):
+    if len(text) > 8 * 1200:
+        return None  # no admissible eight-block pool; bound nested-value parsing too
+    # A keyword on the opening line cannot protect a long nested JSON value by
+    # neighbor blocks alone. Bind its entire value, including distant leaves.
+    protected = []
+    decoder = json.JSONDecoder()
+    for match in re.finditer(r'"((?:[^"\\]|\\.)*)"\s*:\s*', text):
+        try:
+            key = json.loads('"' + match[1] + '"')
+        except ValueError:
+            return None
+        if not _CRITICAL.search(key) and key != 'source':
+            continue
+        try:
+            _, end = decoder.raw_decode(text, match.end())
+        except (ValueError, RecursionError):
+            # A malformed nested control cannot safely be divided into passages.
+            return None
+        protected.append((match.start(), end))
+    def critical(start, excerpt):
+        end = start + len(excerpt)
+        return bool(_CRITICAL.search(excerpt)) or any(a < end and b > start for a, b in protected)
     blocks, start, current = [], 0, ""
     for line in text.splitlines(keepends=True):
         if len(line) > 1200:
@@ -270,14 +292,14 @@ def _blocks(text):
         if current and len(current) + len(line) > 1200:
             blocks.append({"id": f"{start}:{start + len(current)}", "start": start,
                            "end": start + len(current), "excerpt": current,
-                           "critical": bool(_CRITICAL.search(current))})
+                           "critical": critical(start, current)})
             start += len(current)
             current = ""
         current += line
     if current:
         blocks.append({"id": f"{start}:{start + len(current)}", "start": start,
                        "end": start + len(current), "excerpt": current,
-                       "critical": bool(_CRITICAL.search(current))})
+                       "critical": critical(start, current)})
     return blocks
 
 

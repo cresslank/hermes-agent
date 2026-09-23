@@ -316,23 +316,33 @@ class NativeViewsBinding:
         if (not isinstance(selected, list) or not 1 <= len(selected) <= 3 or
                 any(not isinstance(i, str) or i not in rows for i in selected) or len(set(selected)) != len(selected)):
             return None
-        details = []
+        details, snapshots = [], {}
         for selected_id in selected:
             with self.lock:
                 if (self.details.get(target) is not context or self.closed or runtime.closed or
                         context['expected'] != runtime.revision or not registration.active or
                         runtime.clock() >= context['deadline']):
                     return None
-            snapshot = read_skill_content(selected_id, description=rows[selected_id]['description'], max_chars=1200)
+            snapshot = read_skill_content(selected_id, description=rows[selected_id]['description'])
             if snapshot is None:
                 return None
-            details.append({**rows[selected_id], 'content': snapshot.content, 'excerpt_complete': True, 'pruned': False})
+            snapshots[selected_id] = snapshot
+            if len(snapshot.content) <= 1200:
+                details.append({**rows[selected_id], 'content': snapshot.content, 'excerpt_complete': True, 'pruned': False})
+            else:
+                # Full bodies remain LOCAL. The dependent vote selects exact
+                # owner-read snapshots by catalog metadata, not unseen body fit.
+                # No truncation, extra source class, or larger remote envelope.
+                details.append({**rows[selected_id], 'local_content': {
+                    'version': 'supervision.local-skill.v1',
+                    'sha256': fingerprint(snapshot.content), 'chars': len(snapshot.content)}})
         with self.lock:
             if (self.details.get(target) is not context or context['expected'] != runtime.revision or
                     not registration.active or runtime.clock() >= context['deadline']):
                 return None
             context['served_ids'] = tuple(selected)
-            context['served_content'] = {row['id']: row['content'] for row in details}
+            context['served_content'] = {name: snapshot.content for name, snapshot in snapshots.items()}
+            context['local_snapshots'] = {row['id']: snapshots[row['id']] for row in details if 'local_content' in row}
             context['served_registration'] = registration
         return {**request, 'candidates': details}
 
@@ -397,6 +407,13 @@ class NativeViewsBinding:
                 if not task or proposal.evidence_refs != (task[0],):
                     return None
                 ids = tuple(answer['selected_ids'])
+                from agent.supervision_skill_presentation import read_skill_content
+                snapshots = self.details[proposal.target_id].get('local_snapshots', {})
+                for name in ids:
+                    if name in snapshots and read_skill_content(name) != snapshots[name]:
+                        return None  # changed/disabled/relocated bodies are not the voted snapshot
+                if self.runtime.clock() >= self.details[proposal.target_id]['deadline']:
+                    return None
                 if not skills.rank(ids, revision=revision, plugin_id=registration.plugin_id, ambiguous=True):
                     return None
                 hint = SkillHint('hint:' + uuid.uuid4().hex, registration.plugin_id, registration.generation,
@@ -564,7 +581,8 @@ class NativeViewsBinding:
         source = self.views.result_source(f['source_ref'], scope=request['scope'], revision=request['revision'])
         if source is None or request['scope'] != scope_key(self.runtime):
             return None
-        rows = [{**b, 'text': b['excerpt'], 'neighbors_complete': True} for b in f['candidates']]
+        rows = [{**{k: v for k, v in b.items() if k != 'excerpt'},
+                 'text': b['excerpt'], 'neighbors_complete': True} for b in f['candidates']]
         ids = tuple(b['id'] for b in rows)
         facts = dict(question=task[1], source_ref=f['source_ref'], oversized=True, structured=True,
             source_immutable=True, critical_fields_complete=True, mandatory_ids=f['required_ids'],

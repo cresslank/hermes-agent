@@ -25,8 +25,19 @@ from tests.agent.supervision_test_support import Agent
 
 @pytest.fixture
 def vertical(tmp_path, monkeypatch):
-    paths = [os.environ.get(k) for k in (
-        "JEV_SUPERVISOR_SOURCE", "LCM_SUPERVISION_SOURCE", "MUXYARD_SUPERVISION_SOURCE")]
+    # Like native_views, permit only explicit HOME-local source pointers when
+    # the canonical clean-env runner strips external source bindings.
+    paths = []
+    for env, pointer in (
+        ('JEV_SUPERVISOR_SOURCE', 'jev-supervisor-test-source'),
+        ('LCM_SUPERVISION_SOURCE', 'lcm-supervision-test-source'),
+        ('MUXYARD_SUPERVISION_SOURCE', 'muxyard-supervision-test-source'),
+    ):
+        value = os.environ.get(env)
+        source = Path.home() / '.hermes' / pointer
+        if not value and source.is_file():
+            value = source.read_text().strip()
+        paths.append(value)
     if not all(paths):
         pytest.skip("explicit isolated Jev/LCM/Muxyard source checkouts required")
     # DNS is a remote I/O boundary too; do not resolve even synthetic URLs.
