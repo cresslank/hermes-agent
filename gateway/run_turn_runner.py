@@ -950,6 +950,7 @@ class TurnRunner:
                         ),
                         on_before_finalize=pause_typing_before_finalize,
                         initial_reply_to_id=ctx.event_message_id, run_still_current=ctx._run_still_current,
+                        emission_agent=lambda: ctx.agent_holder[0] if ctx.agent_holder else None,
                     )
                     ctx.stream_consumer_holder[0] = stream_consumer
                     # #105341: a consumer created only for interim commentary (text streaming off)
@@ -1180,7 +1181,11 @@ class TurnRunner:
         diagnostic = is_diagnostic_notice(notice)
         def present():
             try:
-                line = render_notice_line(notice)
+                from agent.supervision_corrections import notice_owner
+                text = getattr(notice, "text", None)
+                # Keep the native owner through scheduling. Generic rendering would
+                # turn a correction into an unchecked ordinary platform notice.
+                line = text if notice_owner(text) is not None else render_notice_line(notice)
             except Exception:
                 logger.debug("render_notice_line failed", exc_info=True)
                 return
@@ -1246,6 +1251,8 @@ class TurnRunner:
         baked into the cached agent."""
         ctx = self._ctx
         runner = self._runner
+        from agent.supervision_view_binding import bind_presentation_loop
+        bind_presentation_loop(agent, ctx._loop_for_step)
         agent._notification_config = ctx.user_config
         agent._notification_platform = ctx.source.platform
         # ALWAYS attached (never gated to None): its body gates each event class, and subagent-

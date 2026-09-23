@@ -319,13 +319,20 @@ class SessionMessagesMixin:
         # holding the lock for seconds (VACUUM, checkpoint) can't kill it.
         return self._execute_write(_do, patience_s=self._TRANSCRIPT_WRITE_PATIENCE_S)
 
-    def append_delegation_delivery(self, session_id: str, content: str, metadata: Dict[str, Any]) -> int:
+    def append_delegation_delivery(self, session_id: str, content: str, metadata: Dict[str, Any], *,
+        supervision_delivery_id: Optional[str] = None, delivery_subtype: str = "final",
+        destination_lease: Optional[str] = None, turn_lease_holder: Optional[str] = None) -> int:
         """Record a detached API result once, between client turns, including replay after rotation.
 
         The event's unit id, not its text or active flag, is the identity. Check and insert
         share the writer transaction, so independent gateway processes cannot duplicate it.
         """
-        delegation_id = metadata.get("delegation_id")
+        metadata = dict(metadata)
+        if supervision_delivery_id:
+            metadata["supervision_delivery_id"] = supervision_delivery_id
+            metadata["delivery_subtype"] = delivery_subtype
+            metadata["supervision_destination_lease"] = destination_lease
+        delegation_id = metadata.get("delegation_id") or supervision_delivery_id
         if not delegation_id:
             raise ValueError("Delegation delivery requires a stable delegation_id")
         msg = {"content": content,
@@ -334,6 +341,26 @@ class SessionMessagesMixin:
         params = self._message_row_params(session_id, "user", msg, None, time.time(), keep_reasoning=True)
 
         def _do(conn):
+            if supervision_delivery_id:
+                from agent.supervision_store import validate_consumption, consume, AdmissionError
+                self._check_transcript_write_guards(conn, session_id, None,
+                    turn_lease_holder=turn_lease_holder, reject_active_turn_lease=not bool(turn_lease_holder))
+                items = metadata.get("supervision_deliveries") or [metadata]
+                rows = [validate_consumption(conn, item["supervision_delivery_id"], session_id,
+                                             item.get("supervision_destination_lease")) for item in items]
+                existing_ids = {row["message_row_id"] for row in rows if row["state"] == "consumed"}
+                if existing_ids:
+                    if len(existing_ids) != 1 or any(row["state"] != "consumed" for row in rows):
+                        raise AdmissionError("mixed previously consumed delivery group")
+                    msg_id = existing_ids.pop()
+                    if conn.execute("SELECT 1 FROM messages WHERE id=?", (msg_id,)).fetchone() is None:
+                        raise AdmissionError("consumed message missing")
+                    return msg_id
+                msg_id = conn.execute(_INSERT_MESSAGE_SQL, params).lastrowid
+                self._bump_session_counters(conn, session_id, 1, 0, unit=True)
+                for row in rows:
+                    consume(conn, row, msg_id)
+                return msg_id
             existing = conn.execute(
                 """WITH RECURSIVE lineage(id) AS (
                     SELECT ? UNION

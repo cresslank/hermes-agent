@@ -250,6 +250,7 @@ INLINE_TOOL_EXECUTORS: Dict[str, InlineToolExecutor] = {
         ("question", "question", ""), ("choices", "choices"), ("multi_select", "multi_select", False),
         ("questions", "questions"),
         callback=lambda agent, ctx: agent.clarify_callback,
+        supervision=lambda agent, ctx: getattr(agent, "_supervision_views", None),
     ),
     "read_terminal": _callback_tool(
         "tools.read_terminal_tool", "read_terminal_tool", "read_terminal_callback",

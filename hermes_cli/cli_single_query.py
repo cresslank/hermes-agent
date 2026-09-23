@@ -6,6 +6,8 @@ cli-level names through ``from cli import ...`` at call time so facade monkeypat
 
 from __future__ import annotations
 
+from agent.native_emission import for_agent
+
 from typing import TYPE_CHECKING
 
 import logging
@@ -270,7 +272,12 @@ def _run_quiet_single_query(cli, effective_query, emitter=None):
     ):
         print(f"Error: {result['error']}", file=sys.stderr)
     elif response:
-        print(response)
+        from agent.native_emission import observed_stream
+        with for_agent(cli.agent):
+            stream = observed_stream(sys.stdout, surface="cli.stdout", operation="final")
+            print(response, file=stream)
+            if stream is not sys.stdout:
+                stream.flush()
 
     # Kanban goal_mode: keep working in THIS session until a judge agrees the card is
     # done, the worker terminates it, or the turn budget runs out (sticky block).

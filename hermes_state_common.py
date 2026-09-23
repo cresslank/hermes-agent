@@ -546,6 +546,7 @@ CREATE TABLE IF NOT EXISTS async_delegations (
     owner_started_at INTEGER,
     task_json TEXT,
     delivery_claim TEXT,
+    control_child_ids TEXT NOT NULL DEFAULT '[]',
     delivery_claimed_at REAL,
     -- Mirrors the delegation tool's own CREATE TABLE (tools/async_delegation.py
     -- _initialize_schema). Keeping the canonical fresh-install shape identical
@@ -557,6 +558,123 @@ CREATE TABLE IF NOT EXISTS async_delegations (
     -- from the canonical schema (#94691).
     origin_session_id TEXT NOT NULL DEFAULT ''
 );
+
+-- Child lifecycle is the sole mutable control authority (including synchronous launches).
+CREATE TABLE IF NOT EXISTS delegation_controls (
+    child_id TEXT PRIMARY KEY,
+    parent_session_id TEXT NOT NULL,
+    generation TEXT NOT NULL,
+    control_revision INTEGER NOT NULL CHECK(control_revision >= 1),
+    snapshot_json TEXT NOT NULL,
+    updated_at REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_delegation_controls_parent ON delegation_controls(parent_session_id);
+
+-- Compact host-owned work and effect receipts. No semantic payloads or probabilities.
+CREATE TABLE IF NOT EXISTS supervision_work (
+    profile TEXT NOT NULL, lineage TEXT NOT NULL, work_id TEXT NOT NULL,
+    session_id TEXT NOT NULL, revision_json TEXT NOT NULL, closed INTEGER NOT NULL,
+    created_at REAL NOT NULL, updated_at REAL NOT NULL,
+    PRIMARY KEY(profile,lineage,work_id)
+);
+CREATE TABLE IF NOT EXISTS supervision_receipts (
+    profile TEXT NOT NULL, proposal_id TEXT NOT NULL, lineage TEXT NOT NULL,
+    work_id TEXT NOT NULL, session_id TEXT NOT NULL, incident_id TEXT NOT NULL,
+    plugin_generation TEXT NOT NULL, owner TEXT NOT NULL, target_id TEXT NOT NULL,
+    action TEXT NOT NULL, revision_json TEXT NOT NULL, evidence_json TEXT NOT NULL,
+    deadline REAL NOT NULL, status TEXT NOT NULL CHECK(status IN
+        ('accepted','selected','applied','consumed','no_op','rejected','stale','expired','unknown')),
+    reason TEXT NOT NULL, watermark INTEGER NOT NULL, receipt_id TEXT NOT NULL,
+    delivery_id TEXT, created_at REAL NOT NULL, updated_at REAL NOT NULL,
+    PRIMARY KEY(profile,proposal_id)
+);
+CREATE INDEX IF NOT EXISTS idx_supervision_receipts_delivery ON supervision_receipts(delivery_id);
+CREATE TRIGGER IF NOT EXISTS supervision_work_delete BEFORE DELETE ON sessions BEGIN
+    DELETE FROM supervision_receipts WHERE session_id=OLD.id OR lineage=OLD.id;
+    DELETE FROM supervision_work WHERE session_id=OLD.id OR lineage=OLD.id;
+END;
+CREATE TRIGGER IF NOT EXISTS supervision_work_reset AFTER UPDATE OF end_reason ON sessions
+WHEN NEW.end_reason IN ('session_reset','session_switch','idle','daily','suspended','resume_pending_expired','new_session','user_exit','closed')
+ AND (OLD.end_reason IS NULL OR OLD.end_reason != NEW.end_reason) BEGIN
+    UPDATE supervision_work SET closed=1 WHERE session_id=OLD.id;
+    UPDATE supervision_receipts SET status='stale',reason='generation_changed'
+        WHERE session_id=OLD.id AND status='accepted';
+END;
+
+CREATE TABLE IF NOT EXISTS supervision_owner_records (
+    profile TEXT NOT NULL, lineage TEXT NOT NULL, work_id TEXT NOT NULL,
+    record_id TEXT NOT NULL, kind TEXT NOT NULL CHECK(kind IN
+        ('planning','research_pass','gap_obligation','claim_delivery','correction')),
+    session_id TEXT NOT NULL, revision INTEGER NOT NULL, status TEXT NOT NULL,
+    body_json TEXT NOT NULL CHECK(length(CAST(body_json AS BLOB))<=16384), updated_at REAL NOT NULL,
+    PRIMARY KEY(profile,lineage,work_id,record_id)
+);
+CREATE INDEX IF NOT EXISTS idx_supervision_owner_session ON supervision_owner_records(session_id);
+CREATE TRIGGER IF NOT EXISTS supervision_owner_delete BEFORE DELETE ON sessions BEGIN
+    DELETE FROM supervision_owner_records WHERE session_id=OLD.id OR lineage=OLD.id;
+END;
+CREATE TRIGGER IF NOT EXISTS supervision_owner_reset AFTER UPDATE OF end_reason ON sessions
+WHEN NEW.end_reason IN ('session_reset','session_switch','idle','daily','suspended','resume_pending_expired','new_session','user_exit','closed')
+ AND (OLD.end_reason IS NULL OR OLD.end_reason != NEW.end_reason) BEGIN
+    UPDATE supervision_owner_records SET status='stale' WHERE session_id=OLD.id;
+END;
+
+-- Source bytes and destination receipts share the canonical state owner. No plugin DB.
+CREATE TABLE IF NOT EXISTS supervision_generations (
+    session_id TEXT PRIMARY KEY, generation INTEGER NOT NULL DEFAULT 1,
+    revoked INTEGER NOT NULL DEFAULT 0
+);
+CREATE TRIGGER IF NOT EXISTS delegation_control_deleted_parent BEFORE INSERT ON delegation_controls
+WHEN EXISTS (SELECT 1 FROM supervision_generations WHERE session_id=NEW.parent_session_id AND revoked=1)
+BEGIN
+    SELECT RAISE(ABORT, 'delegation parent revoked');
+END;
+CREATE TABLE IF NOT EXISTS delegation_result_objects (
+    object_id TEXT PRIMARY KEY, profile TEXT NOT NULL, session_id TEXT NOT NULL,
+    launch_id TEXT NOT NULL, source_id TEXT NOT NULL, subtype TEXT NOT NULL,
+    content_hash TEXT NOT NULL, payload BLOB NOT NULL, created_at REAL NOT NULL,
+    settled_at REAL, effect_pending INTEGER NOT NULL DEFAULT 0,
+    effect_refs_json TEXT NOT NULL DEFAULT '[]',
+    UNIQUE(profile, launch_id, source_id, content_hash)
+);
+CREATE TRIGGER IF NOT EXISTS delegation_result_immutable BEFORE UPDATE OF
+    object_id,profile,session_id,launch_id,source_id,subtype,content_hash,payload,created_at ON delegation_result_objects BEGIN
+    SELECT RAISE(ABORT, 'immutable result object');
+END;
+CREATE TABLE IF NOT EXISTS supervision_admissions (
+    delivery_id TEXT PRIMARY KEY, profile TEXT NOT NULL, lineage TEXT NOT NULL,
+    target_session_id TEXT NOT NULL, target_generation INTEGER NOT NULL,
+    launch_id TEXT NOT NULL, source_id TEXT NOT NULL, subtype TEXT NOT NULL,
+    source_claim TEXT NOT NULL, object_id TEXT NOT NULL,
+    event_json TEXT NOT NULL, state TEXT NOT NULL
+        CHECK(state IN ('persisted','parked','accepted','consumed')),
+    disposition TEXT NOT NULL, view_text TEXT, not_before REAL,
+    destination_lease TEXT, lease_expires REAL,
+    message_row_id INTEGER, created_at REAL NOT NULL, updated_at REAL NOT NULL,
+    UNIQUE(profile, lineage, launch_id, source_id, subtype),
+    FOREIGN KEY(object_id) REFERENCES delegation_result_objects(object_id)
+);
+CREATE INDEX IF NOT EXISTS idx_supervision_recovery
+    ON supervision_admissions(target_session_id, state);
+CREATE INDEX IF NOT EXISTS idx_result_objects_launch ON delegation_result_objects(launch_id);
+CREATE TRIGGER IF NOT EXISTS supervision_session_delete BEFORE DELETE ON sessions BEGIN
+    INSERT INTO supervision_generations(session_id, generation, revoked) VALUES(OLD.id, 2, 1)
+    ON CONFLICT(session_id) DO UPDATE SET generation=generation+1, revoked=1;
+    DELETE FROM supervision_admissions WHERE target_session_id=OLD.id OR lineage=OLD.id
+        OR object_id IN (SELECT object_id FROM delegation_result_objects WHERE session_id=OLD.id);
+    DELETE FROM delegation_result_objects WHERE session_id=OLD.id;
+    DELETE FROM delegation_controls WHERE parent_session_id=OLD.id;
+    DELETE FROM async_delegations WHERE parent_session_id=OLD.id OR origin_session_id=OLD.id
+        OR origin_session=OLD.id;
+END;
+CREATE TRIGGER IF NOT EXISTS supervision_session_reset AFTER UPDATE OF end_reason ON sessions
+WHEN NEW.end_reason IN ('session_reset','session_switch','idle','daily','suspended','resume_pending_expired','new_session','user_exit','closed')
+ AND (OLD.end_reason IS NULL OR OLD.end_reason != NEW.end_reason) BEGIN
+    INSERT INTO supervision_generations(session_id, generation, revoked) VALUES(OLD.id, 2, 1)
+    ON CONFLICT(session_id) DO UPDATE SET generation=generation+1, revoked=1;
+    UPDATE supervision_admissions SET state='parked', disposition='retain_without_wake',
+        destination_lease=NULL, lease_expires=NULL WHERE target_session_id=OLD.id AND state!='consumed';
+END;
 
 CREATE INDEX IF NOT EXISTS idx_sessions_source ON sessions(source);
 CREATE INDEX IF NOT EXISTS idx_sessions_source_id ON sessions(source, id);

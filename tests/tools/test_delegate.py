@@ -103,6 +103,10 @@ class TestStripBlockedTools(unittest.TestCase):
             )
 
         _, kwargs = MockAgent.call_args
+        self.assertIs(kwargs["side_agent"], True)
+        self.assertIs(kwargs["skip_context_files"], True)
+        self.assertIs(kwargs["skip_memory"], True)
+        self.assertIsNone(kwargs["iteration_budget"])
         disabled = kwargs["disabled_toolsets"]
         self.assertIn("browser", disabled)
         for toolset_name in (

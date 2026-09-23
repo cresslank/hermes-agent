@@ -703,6 +703,7 @@ def _sanitize_gateway_final_response(platform: Any, text: str) -> str:
     # Raw-text/programmatic surfaces above keep passthrough — their JSON consumers escape surrogates safely.
     from agent.message_sanitization import _sanitize_surrogates
 
+    original = text
     text = _sanitize_surrogates(str(text))
 
     # Some OpenAI-compatible providers leak their exact end-of-sequence control token into
@@ -722,7 +723,8 @@ def _sanitize_gateway_final_response(platform: Any, text: str) -> str:
     redacted = _redact_gateway_user_facing_secrets(str(text))
     if _looks_like_gateway_provider_error(redacted):
         return _gateway_provider_error_reply(redacted)
-    return redacted
+    from agent.supervision_original_output import unchanged
+    return unchanged(original, redacted)
 
 
 def _prepare_gateway_status_message(platform: Any, event_type: str, message: str) -> Optional[str]:
@@ -3061,7 +3063,7 @@ def _format_gateway_process_notification(evt: dict) -> "str | None":
         text += "]"
         return text
 
-    if evt_type in ("async_delegation", "heartbeat"):
+    if evt_type in ("async_delegation", "heartbeat", "literal_source_change"):
         from tools.process_registry_notifications import format_process_notification
         return format_process_notification(evt)
 
@@ -3081,7 +3083,7 @@ def _drain_gateway_watch_events(completion_queue) -> "list[dict]":
         evt_type = evt.get("type", "completion")
         if evt_type in {
             "watch_match", "watch_disabled", "watch_overflow_tripped", "watch_overflow_released",
-            "heartbeat"}:
+            "heartbeat", "literal_source_change"}:
             watch_events.append(evt)
         elif evt_type == "async_delegation":
             requeue.append(evt)

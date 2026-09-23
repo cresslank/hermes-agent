@@ -186,7 +186,8 @@ def _run_batch(normalized: List[dict], callback, question: str) -> str:
 
 
 def clarify_tool(question: str, choices: Optional[List[str]] = None, multi_select: bool = False,
-                 questions: Optional[List[dict]] = None, callback: Optional[Callable] = None) -> str:
+                 questions: Optional[List[dict]] = None, callback: Optional[Callable] = None,
+                 supervision=None) -> str:
     """Ask one question (``question``/``choices``/``multi_select``) or a batch (``questions``
     wins when non-empty). ``callback(question, choices, multi_select=False) -> str`` is
     platform injected (batch-capable ones also take ``questions=``). Returns result JSON.
@@ -207,6 +208,12 @@ def clarify_tool(question: str, choices: Optional[List[str]] = None, multi_selec
         if error:
             return tool_error(error)
         if normalized:
+            # A batch is suppressible only when EVERY question has an independently
+            # authorized owner default; never silently answer a material remainder.
+            resolved = [_owner_default(supervision, e["question"], e["choices_offered"], e["multi_select"])
+                        for e in normalized]
+            if all(r is not None for r in resolved):
+                return json.dumps({"responses": resolved}, ensure_ascii=False)
             if callback is None:
                 return tool_error(_UNAVAILABLE)
             try:
@@ -223,6 +230,9 @@ def clarify_tool(question: str, choices: Optional[List[str]] = None, multi_selec
         if not isinstance(choices, list):
             return tool_error("choices must be a list of strings.")
         choices = _clean_choices(choices)
+    resolved = _owner_default(supervision, question, choices, multi_select)
+    if resolved is not None:
+        return json.dumps(resolved, ensure_ascii=False)
     if callback is None:
         return tool_error(_UNAVAILABLE)
     # The bare list goes back to the agent; the "(Recommended)" label is presentation only.
@@ -234,6 +244,16 @@ def clarify_tool(question: str, choices: Optional[List[str]] = None, multi_selec
     return json.dumps({"question": question, "choices_offered": choices,
                        "user_response": _clean_answer(raw_response, multi_select and choices is not None)},
                       ensure_ascii=False)
+
+
+def _owner_default(supervision, question, choices, multi_select):
+    from agent.supervision_views import SupervisionViews
+    if not isinstance(supervision, SupervisionViews):
+        return None
+    try:
+        return supervision.clarify(question, choices, multi_select=multi_select)
+    except Exception:
+        return None
 
 
 def check_clarify_requirements() -> bool:

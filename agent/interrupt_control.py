@@ -241,7 +241,7 @@ class InterruptControlMixin:
                 self._pending_steer = None
         return True
 
-    def steer(self, text: str) -> bool:
+    def steer(self, text: str, *, origin=None) -> bool:
         """Queue user text for delivery as its own user row after the current tool batch finishes (no
         interrupt); multiple calls concatenate with newlines. Returns False for empty text."""
         if not text or not text.strip():
@@ -250,9 +250,12 @@ class InterruptControlMixin:
         with _ic_lock(self, "_pending_steer_lock"):
             existing = _ic_slot(self, "_pending_steer_lock", "_pending_steer")
             self._pending_steer = (existing + "\n" + cleaned) if existing else cleaned
+        from agent.supervision_context import accept_pending_input, origin_matches_delivery
+        if origin_matches_delivery(origin, cleaned):
+            accept_pending_input(self, origin)
         return True
 
-    def redirect(self, text: str) -> bool:
+    def redirect(self, text: str, *, origin=None) -> bool:
         """Redirect the active turn without converting it into a new task: during a model request only that
         request is cancelled (completed messages kept, partial reasoning becomes assistant context, the
         correction is appended as a real user message, the loop retries); during tool execution it degrades
@@ -267,7 +270,12 @@ class InterruptControlMixin:
                 if self._interrupt_requested:
                     return False
             try:
-                return bool(_native_steer(cleaned))
+                accepted = bool(_native_steer(cleaned))
+                if accepted:
+                    from agent.supervision_context import accept_pending_input, origin_matches_delivery
+                    if origin_matches_delivery(origin, cleaned):
+                        accept_pending_input(self, origin)
+                return accepted
             except Exception:
                 logger.debug("Codex app-server turn/steer failed", exc_info=True)
                 return False
@@ -277,7 +285,7 @@ class InterruptControlMixin:
         # `sleep` poller, a build), so ask the tool workers to YIELD: terminal hands the live
         # process to the background registry and returns; tools that don't yield are unaffected.
         if getattr(self, "_executing_tools", False):
-            accepted = self.steer(cleaned)
+            accepted = self.steer(cleaned, origin=origin)
             if accepted:
                 tracker = getattr(self, "_tool_worker_threads", None)
                 tracker_lock = getattr(self, "_tool_worker_threads_lock", None)
@@ -300,6 +308,9 @@ class InterruptControlMixin:
             )
             self._interrupt_requested = True
             self._interrupt_message = None
+        from agent.supervision_context import accept_pending_input, origin_matches_delivery
+        if origin_matches_delivery(origin, cleaned):
+            accept_pending_input(self, origin)
 
         # Interrupt only the model request — no fan-out to tool workers / child agents as interrupt() does.
         _execution_thread_id = getattr(self, "_execution_thread_id", None)

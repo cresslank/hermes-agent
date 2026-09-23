@@ -266,6 +266,16 @@ def _format_async_delegation(evt: dict) -> str:
     and result, so an agent deep in unrelated context can act on it or re-dispatch."""
     deleg_id = evt.get("delegation_id", "unknown")
     completed_at = evt.get("completed_at") or time.time()
+    if evt.get("finding_id"):
+        verification = "owner-verified" if evt.get("verified") is True else "provisional; not independently verified"
+        return "\n".join([
+            f"[ASYNC DELEGATION FINDING — {deleg_id}, {evt['finding_id']}]",
+            "A source owner committed this finding while the larger job may still be running. "
+            "This is not the final result or a failure notice; the final batch remains outstanding.",
+            f"Verification: {verification}",
+            f"Source receipt: {evt.get('source_receipt', '')}",
+            f"Immutable source: {evt.get('source_object_id', '')}",
+            "--- EXACT FINDING ---", str(evt.get("summary") or "")])
     if evt.get("task_failure_notice"):
         return _format_task_failure_notice(evt, deleg_id)
     if evt.get("is_batch") or isinstance(evt.get("results"), list):
@@ -301,6 +311,9 @@ def _format_async_delegation(evt: dict) -> str:
 
 def async_delegation_display_text(evt: dict) -> str:
     """Compact UI title; the separate model notification retains all task evidence."""
+    if evt.get("finding_id"):
+        verification = "Verified" if evt.get("verified") is True else "Provisional"
+        return f"Subagent Finding ({verification}): " + " ".join(str(evt.get("goal") or "Background task").split())
     raw_results = evt.get("results")
     results = [r for r in raw_results if isinstance(r, dict)] if isinstance(raw_results, list) else []
     results = results or [evt]
@@ -367,8 +380,11 @@ class TimelineNotification(str):
     @classmethod
     def for_delegation(cls, text: str, event: dict) -> "TimelineNotification":
         from agent.notification_presentation import diagnostic_process_event
-        return cls(text, async_delegation_display_text(event), "async_delegation_complete",
-                   "diagnostic" if diagnostic_process_event(event) else "result")
+        instance = cls(text, async_delegation_display_text(event), "async_delegation_complete",
+                       "diagnostic" if diagnostic_process_event(event) else "result")
+        from agent.completion_admission import delivery_metadata
+        instance.supervision_metadata = delivery_metadata(event)
+        return instance
 
 
 def _delegation_attribution_line(evt: dict) -> "str | None":
@@ -406,6 +422,8 @@ def format_process_notification(evt: dict) -> "str | None":
     # phantom "process exited (exit code ?)".
     if evt_type in ("watch_disabled", "watch_overflow_tripped", "watch_overflow_released"):
         return f"[IMPORTANT: {evt.get('message', '')}]"
+    if evt_type == "literal_source_change":
+        return "[Native source change for a previously delivered answer. Evidence is provisional; the main owner will review its exact linked sources.]"
     if evt_type == "async_delegation":
         return _format_async_delegation(evt)
     _sid, _cmd = evt.get("session_id", "unknown"), evt.get("command", "unknown")

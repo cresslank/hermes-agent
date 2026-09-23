@@ -345,7 +345,7 @@ def _persist_branch_seed(session: dict) -> None:
             _workdir_reraise_disk_full(exc, "branch seed persist failed")
 
 
-def _persist_submit_user_row(session: dict, text: Any, display_kind: str | None) -> None:
+def _persist_submit_user_row(session: dict, text: Any, display_kind: str | None, display_metadata: dict | None = None) -> None:
     """Write the submitted user turn at send time, before the agent build and turn: the agent's own
     crash persist only runs once the build finished, so quitting a frozen app during a slow first build
     left a session row with no message (#111868). The dict is staged on the session already stamped
@@ -365,13 +365,23 @@ def _persist_submit_user_row(session: dict, text: Any, display_kind: str | None)
         if db is None:
             return
         try:
-            staged["_row_id"] = db.append_message(
-                key, "user", content=text, display_kind=display_kind, timestamp=staged["timestamp"])
+            if display_metadata and (display_metadata.get("supervision_delivery_id") or display_metadata.get("supervision_deliveries")):
+                from agent.completion_admission import consume_metadata
+                staged["_row_id"] = consume_metadata(db, key, text, display_metadata)
+                staged["display_metadata"] = display_metadata
+            else:
+                staged["_row_id"] = db.append_message(
+                    key, "user", content=text, display_kind=display_kind, timestamp=staged["timestamp"])
         except Exception as exc:
             _workdir_reraise_disk_full(exc, "submit-time user row persist failed")
+            if display_metadata and (display_metadata.get("supervision_delivery_id") or display_metadata.get("supervision_deliveries")):
+                raise
             return
     staged[_DB_PERSISTED_MARKER] = True
     session["_submit_user_row"] = staged
+    from agent.supervision_context import accepted_input_origin
+    session["_submit_supervision_origin"] = (
+        accepted_input_origin(text, kind="tui", message_id=str(staged["_row_id"])) if not display_kind else None)
 
 
 def _adopt_submit_user_row(session: dict, agent, persist_user_message: Any, text: Any) -> None:
@@ -382,6 +392,7 @@ def _adopt_submit_user_row(session: dict, agent, persist_user_message: Any, text
     ``text`` is THIS turn's raw submit: a staged row from an earlier send (its turn ended before the agent
     ran) is discarded untouched, so the DB row stays the user's message and never a synthesized turn's text."""
     staged = session.pop("_submit_user_row", None)
+    origin = session.pop("_submit_supervision_origin", None)
     if not isinstance(staged, dict) or agent is None or staged.get("content") != text:
         return
     if staged["content"] != persist_user_message:
@@ -399,6 +410,10 @@ def _adopt_submit_user_row(session: dict, agent, persist_user_message: Any, text
     from agent.session_persistence import _persist_lock
     with _persist_lock(agent):
         agent._pending_cli_user_message = staged
+        agent._pending_supervision_origin = origin
+    from agent.supervision_context import accept_pending_input
+    if origin is not None:
+        accept_pending_input(agent, origin)
 
 
 # Yielded by _workdir_owner_db when the profile db failed to OPEN (vs "no store in this context"); row creation fails loud.

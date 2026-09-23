@@ -110,7 +110,8 @@ class WSTransport:
     def write(self, obj: dict) -> bool:
         if self._closed:
             return False
-        line = serialize_frame(obj, self._peer, _log)
+        from tui_gateway.emission import prepare_frame
+        line = prepare_frame(obj, _sanitize_ws_text(serialize_frame(obj, self._peer, _log)), self, self._peer)
         try:
             on_loop = asyncio.get_running_loop() is self._loop
         except RuntimeError:
@@ -178,7 +179,8 @@ class WSTransport:
             return False
         with self._token_lock:
             batch, self._pending_tokens = self._pending_tokens, []
-            batch.append(serialize_frame(obj, self._peer, _log))
+            from tui_gateway.emission import prepare_frame
+            batch.append(prepare_frame(obj, _sanitize_ws_text(serialize_frame(obj, self._peer, _log)), self, self._peer))
         await self._safe_send_many(batch)
         return not self._closed
 
@@ -192,7 +194,15 @@ class WSTransport:
                     return
                 payload = _sanitize_ws_text(line)
                 try:
-                    await asyncio.wait_for(self._ws.send_text(payload), timeout=_WS_SEND_DEADLINE_S)
+                    socket = self._ws
+                    deadline = self._loop.time() + _WS_SEND_DEADLINE_S
+                    await asyncio.wait_for(socket.send_text(payload), timeout=_WS_SEND_DEADLINE_S)
+                    # wait_for can return normally after its deadline when the
+                    # inner send suppresses cancellation. Keep delivery behavior
+                    # unchanged, but never certify that late/abandoned output.
+                    if not self._closed and self._ws is socket and self._loop.time() < deadline:
+                        from tui_gateway.emission import emitted_frame
+                        emitted_frame(line)
                 except asyncio.TimeoutError:
                     # The loop is responsive (the timer fired) but the socket never drained: unlike the
                     # loop-stall wait in write(), this is a dead peer. Latch under the writer lock so queued

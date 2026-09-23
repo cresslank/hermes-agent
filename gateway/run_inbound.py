@@ -223,6 +223,7 @@ class GatewayInboundMixin:
         # scale-to-zero: only real user-originated inbound stamps the last-inbound clock;
         # counting internal/system events would keep a genuinely idle gateway awake.
         self._scale_to_zero_note_real_inbound()
+        original_user_text = event.text  # before any plugin rewrite; never grant rewritten prose
         event = await self._hm_pre_gateway_dispatch_hook(event, source)
         if event is None:
             return None
@@ -252,6 +253,9 @@ class GatewayInboundMixin:
         # The busy path charged this event on arrival; a drained follow-up must not pay twice.
         if not getattr(event, "_bot_loop_admitted", False) and not self._admit_bot_message_for_source(source):
             return None
+        from agent.supervision_context import accepted_input_origin
+        event._supervision_origin = accepted_input_origin(
+            original_user_text, kind="gateway", message_id=str(event.message_id) if event.message_id else None)
         return event, source, False
 
     def _hm_estop_turn_allowed(self, event: "MessageEvent", source: SessionSource) -> bool:

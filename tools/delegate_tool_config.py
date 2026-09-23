@@ -58,10 +58,10 @@ def _get_subagent_approval_callback():
         return _subagent_auto_approve
     return _subagent_auto_deny
 
-def _knob(key: str, env_var: Optional[str], parse, default, invalid_msg: str):
+def _knob(key: str, env_var: Optional[str], parse, default, invalid_msg: str, *, config=None):
     """delegation.<key> > <env_var> > default. A config value that fails ``parse`` logs ``invalid_msg`` (``%r`` = the
     value) and yields the default; an env value that fails is silently ignored."""
-    val = _cfg().get(key)
+    val = (_cfg() if config is None else config).get(key)
     if val is not None:
         try:
             return parse(val)
@@ -82,11 +82,11 @@ def _warn_once(flag_name: str, message: str, *args: Any) -> None:
         globals()[flag_name] = True
         logger.warning(message, *args)
 
-def _get_oneshot_max_children() -> int:
+def _get_oneshot_max_children(*, config=None) -> int:
     """delegation.oneshot_max_children (total children per finite one-shot session; 0 = unlimited)."""
     return _knob(
         "oneshot_max_children", None, lambda v: max(0, int(v)), 2,
-        "delegation.oneshot_max_children=%r is not a valid integer; using default 2",
+        "delegation.oneshot_max_children=%r is not a valid integer; using default 2", config=config,
     )
 
 
@@ -148,7 +148,7 @@ def _get_child_timeout() -> Optional[float]:
         "delegation.child_timeout_seconds=%r is not a valid number; using default (no timeout)",
     )
 
-def _get_max_spawn_depth() -> int:
+def _get_max_spawn_depth(*, config=None) -> int:
     """delegation.max_spawn_depth floored at 1 (no ceiling). Depth 0 is the parent; agents at depths 0..N-1 may spawn,
     depth N is the leaf floor. Default 1 is flat. Each extra level multiplies API cost."""
     def _floored(v):
@@ -159,7 +159,7 @@ def _get_max_spawn_depth() -> int:
 
     return _knob(
         "max_spawn_depth", None, _floored, MAX_DEPTH,
-        f"delegation.max_spawn_depth=%r is not a valid integer; using default {MAX_DEPTH}",
+        f"delegation.max_spawn_depth=%r is not a valid integer; using default {MAX_DEPTH}", config=config,
     )
 
 def _get_orchestrator_enabled() -> bool:

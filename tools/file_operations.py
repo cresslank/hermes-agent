@@ -455,7 +455,8 @@ class ShellFileOperations(LintMixin, SearchMixin, FileOperations):
         """Error for a path that exists but would block if read."""
         return ReadResult(error=(
             f"Cannot read '{path}': not a regular file (directory, FIFO, "
-            "socket, or device). Reading it could block indefinitely."))
+            "socket, or device). Reading it could block indefinitely."),
+            _attempt_failure=("not_regular", "regular_file_guard", False))
 
     def _probe_regular_file(self, path: str) -> tuple[int, str]:
         """Byte size of a REGULAR file: ``(file_size, status)`` with status ``"ok"``,
@@ -828,7 +829,9 @@ class ShellFileOperations(LintMixin, SearchMixin, FileOperations):
                 "characters).")
             result.hint = f"{note} {result.hint}" if result.hint else note
             return result
-        return self._suggest_similar_files(path)
+        result = self._suggest_similar_files(path)
+        result._attempt_failure = ("not_found", "unicode_recovery_and_similar_files", True)
+        return result
 
     def _read_binary_file(self, path: str, offset: int, limit: int,
                           file_size: int, sample_bytes: Optional[bytes]) -> ReadResult:

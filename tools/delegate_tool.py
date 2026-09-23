@@ -44,7 +44,7 @@ from tools.delegate_tool_registry import (  # noqa: F401
     _CONTROL_ACTIONS, _active_subagents, _active_subagents_lock, _capture_gateway_steer_authority,
     _handle_control_action, _is_descendant_of, _owns_subagent_record, _register_subagent, _unregister_subagent,
     get_subagent_attribution, interrupt_subagent, is_spawn_paused, list_active_subagents, set_spawn_paused,
-    steer_subagent,
+    steer_subagent, track_native_admission,
 )
 from tools.delegate_tool_tasks import (  # noqa: F401
     _MAX_TASK_IMAGES, _coerce_task_images, _coerce_task_schemas, _normalize_task_images, _normalize_task_list,
@@ -153,6 +153,7 @@ def _apply_child_compression_cap(child, delegation_cfg: dict) -> None:
         cc._apply_threshold_tokens_cap()
 
 
+@track_native_admission
 def _build_child_agent(
     task_index: int,
     goal: str,
@@ -184,6 +185,7 @@ def _build_child_agent(
     import uuid as _uuid
     from run_agent import AIAgent
     from agent.delegation_context import delegated_child_context
+    from tools.delegate_context_recipe import constructor_context
     # Role is depth-derived: a child may delegate iff the kill switch is on and
     # depth budget remains below max_spawn_depth. The `role` arg is ignored.
     child_depth = getattr(parent_agent, "_delegate_depth", 0) + 1
@@ -234,18 +236,17 @@ def _build_child_agent(
     with delegated_child_context():
         try:
             child = AIAgent(
-                **rt, max_iterations=max_iterations, prefill_messages=getattr(parent_agent, "prefill_messages", None),
+                **rt, max_iterations=max_iterations, **constructor_context(parent_agent),
                 enabled_toolsets=child_toolsets, disabled_toolsets=child_disabled_toolsets, quiet_mode=True,
                 ephemeral_system_prompt=child_prompt, log_prefix=f"[subagent-{task_index}]", platform="subagent",
                 side_agent=True,
-                skip_context_files=True, skip_memory=True, clarify_callback=None,
+                clarify_callback=None,
                 thinking_callback=(
                     (lambda text: _safe_progress(child_progress_cb, "_thinking", text) if text else None)
                     if child_progress_cb else None
                 ),
                 session_db=child_session_db, parent_session_id=parent_sid, request_overrides=request_overrides,
                 tool_progress_callback=child_progress_cb,
-                iteration_budget=None,  # fresh budget per subagent
             )
         except BaseException:
             # No child close() will ever run: release the dedicated handle here.
@@ -362,6 +363,7 @@ def _run_single_child(
         run.cleanup(heartbeat=heartbeat, child_pool=child_pool, leased_cred_id=leased_cred_id, close_deferred=_child_close_deferred)
 
 
+@track_native_admission
 def _build_children(
     task_list: List[Dict[str, Any]], task_schemas: List[Optional[Dict[str, Any]]], creds: Dict[str, Any], *,
     top_role: str, max_iterations: int, parent_agent, routing_cfg: Dict[str, Any],
@@ -385,14 +387,33 @@ def _build_children(
         _child_context = t.get("context")
         if _task_schema is not None:
             _child_context = append_output_contract(_child_context, _task_schema)
+        child = None
         try:
+            from agent.supervision_policy import runtime_for_agent
+            planning_runtime = runtime_for_agent(parent_agent)
+            if planning_runtime is not None:
+                planning_runtime.dependencies.planning.dispatch("delegate_task", {"tasks": [t]}, "native-launch:" + str(i))
             child = _build_child_preserving_parent_tools(
                 task_index=i, goal=t["goal"], context=_child_context,
                 toolsets=None,  # always inherit the parent's toolsets
                 model=creds["model"], max_iterations=max_iterations, task_count=len(task_list),
                 parent_agent=parent_agent, role=_normalize_role(t.get("role") or top_role), **overrides,
             )
-        except ValueError as exc:
+            from agent.owned_delegation import register_launch
+            register_launch(parent_agent, child, t.get("supervision"), goal=t["goal"])
+            from agent.supervision_efficiency import observe_native
+            observe_native(parent_agent, "delegation_built", child, goal=t["goal"])
+        except Exception as exc:
+            # No scheduling occurred. Close all already-built siblings and retain
+            # their durable terminal control records rather than orphaning them.
+            from tools.delegate_tool_child_run import _close_child
+            for _, _, built in children:
+                _close_child(built, "Failed to close unlaunched child")
+            if child is not None and all(child is not built for _, _, built in children):
+                _close_child(child, "Failed to close rejected child")
+            import sqlite3
+            if not isinstance(exc, (ValueError, OSError, sqlite3.Error)):
+                raise  # preserve the legacy unexpected-constructor failure contract
             return [], str(exc)
         if _task_schema is not None:
             with _quiet("Could not attach output schema to child %d", i):
@@ -417,13 +438,12 @@ def _build_children(
     return children, None
 
 
-def _oneshot_spawn_budget(parent_agent: Any, requested: int) -> Optional[str]:
-    """Charge *requested* children against the finite one-shot session's total (delegation.oneshot_max_children);
-    the error text tells the model to do the work inline. Interactive and gateway sessions are never charged."""
+def _oneshot_spawn_preflight(parent_agent: Any, requested: int, *, config=None) -> Optional[str]:
+    """Read-only budget validation shared with actual charging; no reservation."""
     from agent.oneshot_footprint import is_single_query_session
     if not is_single_query_session():
         return None
-    cap = _get_oneshot_max_children()
+    cap = _get_oneshot_max_children() if config is None else _get_oneshot_max_children(config=config)
     if cap <= 0:
         return None
     spent = getattr(parent_agent, "_oneshot_children_spawned", 0)
@@ -433,10 +453,20 @@ def _oneshot_spawn_budget(parent_agent: Any, requested: int) -> Optional[str]:
             f"delegation.oneshot_max_children). Do the remaining work yourself in this session — reviewing "
             f"your own diff and running the tests inline is expected here, not a delegated review."
         )
-    parent_agent._oneshot_children_spawned = spent + requested
     return None
 
 
+def _oneshot_spawn_budget(parent_agent: Any, requested: int) -> Optional[str]:
+    error = _oneshot_spawn_preflight(parent_agent, requested)
+    if error:
+        return error
+    from agent.oneshot_footprint import is_single_query_session
+    if is_single_query_session() and _get_oneshot_max_children() > 0:
+        parent_agent._oneshot_children_spawned = getattr(parent_agent, "_oneshot_children_spawned", 0) + requested
+    return None
+
+
+@track_native_admission
 def delegate_task(
     goal: Optional[str] = None, context: Optional[str] = None, tasks: Optional[List[Dict[str, Any]]] = None,
     max_iterations: Optional[int] = None, role: Optional[str] = None, background: Optional[bool] = None,
@@ -499,6 +529,15 @@ def delegate_task(
         return tool_error(str(exc))
     max_children = _get_max_concurrent_children()
     task_list, err = _normalize_task_list(goal, context, tasks, output_schema, top_role, max_children)
+    if not err:
+        from agent.owned_delegation import validate_request, owner_of
+        try:
+            for task in task_list:
+                validate_request(task.get("supervision"))
+                if task.get("supervision") is not None and owner_of(parent_agent) is None:
+                    raise ValueError("Supervised launch requires a configured host owner grant")
+        except ValueError as exc:
+            err = str(exc)
     if not err:
         task_schemas, err = _coerce_task_schemas(task_list, output_schema)
     if not err:
@@ -631,6 +670,8 @@ def _build_dynamic_schema_overrides() -> dict:
 def _p(type_: str, description: str, **extra) -> dict:
     return {"type": type_, **extra, "description": description}
 
+from agent.owned_delegation import SUPERVISION_SCHEMA
+
 DELEGATE_TASK_SCHEMA = {
     "name": "delegate_task",
     # description / tasks.description are placeholders: the real text is built per get_definitions() call by
@@ -663,6 +704,7 @@ DELEGATE_TASK_SCHEMA = {
                             "Background THIS child needs: file paths, error messages, constraints. Each child "
                             "sees only its own context — repeat shared background in every task that needs it.",
                         ),
+                        "supervision": SUPERVISION_SCHEMA,
                         "output_schema": _p(
                             "object",
                             "Optional JSON Schema this child's final answer must validate against (told to the "

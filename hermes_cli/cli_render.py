@@ -447,9 +447,11 @@ def _render_final_assistant_content(text: str, mode: str = "render"):
     normalized_mode = str(mode or "render").strip().lower()
     if normalized_mode == "strip":
         # Strip first (inline markdown changes cell width), then re-align padding.
-        return _RichText(realign_markdown_tables(_strip_markdown_syntax(text), panel_width))
+        from hermes_cli.cli_origin import literal_renderable
+        return literal_renderable(_RichText(realign_markdown_tables(_strip_markdown_syntax(text), panel_width)), text)
     if normalized_mode == "raw":
-        return _rich_text_from_ansi(text or "")
+        from hermes_cli.cli_origin import literal_renderable
+        return literal_renderable(_rich_text_from_ansi(text or ""), text)
 
     # Normalising under-padded tables up front gives narrow-panel fallbacks consistent input.
     plain = _rich_text_from_ansi(text or "").plain
@@ -499,13 +501,13 @@ def _record_output_history(text: str) -> None:
 
 def _pt_print_ansi(text: str) -> None:
     """``_pt_print(ANSI(text))``, falling back to ``print`` when stdout is not a real console."""
-    from cli import _PT_ANSI, _pt_print
+    from hermes_cli.cli_emission import print_ansi, print_fallback
     try:
-        _pt_print(_PT_ANSI(text))
+        print_ansi(text)
     except Exception:
         # NoConsoleScreenBufferError (Windows) / OSError when stdout is e.g. a worker log file.
         with suppress(Exception):
-            print(text)
+            print_fallback(text)
 
 
 def _cprint(text: str):
@@ -514,13 +516,14 @@ def _cprint(text: str):
     From a background thread while an Application runs, a direct print races the input
     redraw and gets buried, so those go through ``run_in_terminal`` via ``call_soon_threadsafe``.
     """
-    from cli import _PT_ANSI, _pt_print, _pt_print_ansi, _record_output_history
+    from cli import _pt_print_ansi, _record_output_history
     _record_output_history(text)
+    from hermes_cli.cli_emission import print_ansi
 
     try:
         from prompt_toolkit.application import get_app_or_none, run_in_terminal
     except Exception:
-        _pt_print(_PT_ANSI(text))
+        print_ansi(text)
         return
 
     try:
@@ -547,7 +550,7 @@ def _cprint(text: str):
     except Exception:
         current_loop = None
     if loop is None or (current_loop is loop and loop.is_running()):
-        _pt_print(_PT_ANSI(text))
+        print_ansi(text)
         return
 
     def _schedule():
@@ -556,7 +559,7 @@ def _cprint(text: str):
         # Never fall back to a bare print on error: the sync path already printed.
         with suppress(Exception):
             import inspect as _inspect
-            coro = run_in_terminal(lambda: _pt_print(_PT_ANSI(text)))
+            coro = run_in_terminal(lambda: print_ansi(text))
             if coro is not None and (_inspect.isawaitable(coro) or _inspect.iscoroutine(coro)):
                 _asyncio.ensure_future(coro)
 
@@ -613,7 +616,8 @@ class ChatConsole:
     def __init__(self):
         from io import StringIO
         self._buffer = StringIO()
-        self._inner = Console(file=self._buffer, force_terminal=True, color_system="truecolor", highlight=False)
+        from hermes_cli.cli_origin import OriginConsole
+        self._inner = OriginConsole(file=self._buffer, force_terminal=True, color_system="truecolor", highlight=False)
 
     def print(self, *args, **kwargs):
         from cli import _OSC_ESCAPE_RE, _cprint
@@ -621,7 +625,12 @@ class ChatConsole:
         self._buffer.truncate()
         self._inner.width = shutil.get_terminal_size((80, 24)).columns
         self._inner.print(*args, **kwargs)
-        for line in _OSC_ESCAPE_RE.sub("", self._buffer.getvalue()).rstrip("\n").split("\n"):
+        rendered = self._buffer.getvalue()
+        lines = _OSC_ESCAPE_RE.sub("", rendered).rstrip("\n").split("\n")
+        mapped = self._inner.origin_lines
+        if len(mapped) == len(lines) and all(a == b for a, b in zip(mapped, lines)):
+            lines = mapped
+        for line in lines:
             _cprint(line)
 
     @contextmanager

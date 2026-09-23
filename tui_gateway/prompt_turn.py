@@ -1000,6 +1000,9 @@ def _run_prompt_submit(
     if admitted is None:
         return False
     images, agent = admitted
+    if display_metadata and (display_metadata.get("supervision_delivery_id") or display_metadata.get("supervision_deliveries")):
+        with _session_profile_runtime_scope(session):
+            _persist_submit_user_row(session, text, display_kind, display_metadata)
     from gateway.warning_notifications import diagnostic_turn_muted
     from agent.notification_presentation import notification_config_snapshot
     with _session_profile_runtime_scope(session):

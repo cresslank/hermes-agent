@@ -172,6 +172,8 @@ def _truncate_results(results: List[dict], char_limit: int, debug_call_data: dic
         model_text, truncated = _truncate_with_footer(clean, url, char_limit)
         result["content"] = model_text
         if truncated:
+            if isinstance(result.get("metadata"), dict):
+                result["metadata"]["truncated"] = True
             debug_call_data["pages_truncated"] += 1
             debug_call_data["truncation_metrics"].append(
                 {"url": url, "original_size": len(clean), "sent_size": len(model_text)}
@@ -182,11 +184,19 @@ def _truncate_results(results: List[dict], char_limit: int, debug_call_data: dic
 
 
 def _trim_results(results: List[dict]) -> List[dict]:
-    """Keep only url/title/content/error per entry (+ blocked_by_policy when present)."""
+    """Keep display fields plus bounded-provider provenance (never raw blobs).
+
+    Canonical source joins are part of the consumed evidence, not expendable
+    transport metadata. Cache entries without provenance remain unattributed.
+    """
     return [
         {
             "url": r.get("url", ""), "title": r.get("title", ""), "content": r.get("content", ""),
             "error": r.get("error"),
+            **({"metadata": {key: value for key, value in r["metadata"].items()
+                             if key in {"provider", "truncated", "input_index", "trace_id",
+                                        "outcome", "error_code", "source_provenance"}}}
+               if isinstance(r.get("metadata"), dict) and "source_provenance" in r["metadata"] else {}),
             **({"blocked_by_policy": r["blocked_by_policy"]} if "blocked_by_policy" in r else {}),
         }
         for r in results

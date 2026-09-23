@@ -90,6 +90,10 @@ class GatewayBusySessionMixin:
         pending_slot = getattr(adapter, "_pending_messages", None) if adapter is not None else None
         if pending_slot is None:
             return
+        if queued_event.internal:
+            from agent.completion_admission import accept_metadata
+            if not accept_metadata(queued_event.metadata or {}, capacity=self._BUSY_QUEUE_MAX_PENDING):
+                return
         if session_key in pending_slot:
             self._session_state(session_key).conversation.queued_events.append(queued_event)
         else:
@@ -105,6 +109,11 @@ class GatewayBusySessionMixin:
         staged into the slot for the NEXT recursion. Returns the (possibly updated) pending_event.
         """
         overflow = self._overflow_queue(session_key)
+        if not overflow:
+            return pending_event
+        from agent.completion_admission import valid_hint
+        while overflow and overflow[0].internal and not valid_hint(overflow[0].metadata or {}):
+            overflow.pop(0)  # revoked/obsolete hint, not deletion of the retained source
         if not overflow:
             return pending_event
         if pending_event is None:
@@ -291,10 +300,11 @@ class GatewayBusySessionMixin:
                 logger.warning("Steer into subagent %r failed: %s", getattr(child, "_delegate_id", child), exc)
         return accepted
 
-    def _steer_running_agent(self, running_agent: Any, text: str) -> bool:
+    def _steer_running_agent(self, running_agent: Any, text: str, *, origin=None) -> bool:
         """``running_agent.steer(text)`` plus fan-out to its active subagents (see
         :meth:`_steer_active_subagents`); True when the parent or any child queued it."""
-        accepted = bool(running_agent.steer(text))
+        from agent.interrupt_control import InterruptControlMixin
+        accepted = bool(running_agent.steer(text, origin=origin)) if isinstance(running_agent, InterruptControlMixin) else bool(running_agent.steer(text))
         return bool(self._steer_active_subagents(running_agent, text)) or accepted
 
     async def _session_has_compression_in_flight(self, session_key: str) -> bool:
@@ -619,8 +629,13 @@ class GatewayBusySessionMixin:
         """Call ``running_agent.<verb>(text)`` (steer/redirect); False + warning on failure."""
         try:
             call_text = self._steer_text_with_origin(text, event) if event else text
+            from agent.supervision_context import bind_origin_delivery
+            from agent.interrupt_control import InterruptControlMixin
+            origin = bind_origin_delivery(getattr(event, "_supervision_origin", None), call_text)
             if verb == "steer":
-                return self._steer_running_agent(running_agent, call_text)
+                return self._steer_running_agent(running_agent, call_text, origin=origin)
+            if isinstance(running_agent, InterruptControlMixin):
+                return bool(getattr(running_agent, verb)(call_text, origin=origin))
             return bool(getattr(running_agent, verb)(call_text))
         except Exception as exc:
             logger.warning("Gateway %s failed for session %s: %s", verb, session_key, exc)
@@ -790,6 +805,10 @@ class GatewayBusySessionMixin:
         if not self._admit_bot_message_for_source(event.source):
             return True
         event._bot_loop_admitted = True
+        if not event.internal:
+            from agent.supervision_context import accepted_input_origin
+            event._supervision_origin = accepted_input_origin(
+                event.text, kind="gateway", message_id=str(event.message_id) if event.message_id else None)
 
         effective_mode = self._effective_busy_input_mode(event.source)
         if self._draining:  # gateway restarting/stopping

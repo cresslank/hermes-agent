@@ -19,6 +19,9 @@ def _aux(timeout, *, reasoning_effort=True, **extra):
 
 
 DEFAULT_CONFIG = {
+    # Optional native receipt metadata; never source/egress/correction permission.
+    "supervision": {"enabled": False, "original_output": {
+        "version": "supervision.original-output.v1", "enabled": False}},
     "model": "",
     "providers": {},
     "fallback_providers": [],

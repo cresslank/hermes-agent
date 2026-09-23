@@ -175,6 +175,10 @@ class TurnFacadeMixin:
                 finish_task_run(**task_context, error=exc)
             raise
         finally:
+            from agent.supervision_policy import runtime_for_agent
+            supervision = runtime_for_agent(self)
+            if supervision is not None:
+                supervision.finish_turn()
             try:
                 if relay_turn is not None:
                     relay_runtime.SESSION_COORDINATOR.end_turn(relay_turn, outcome=relay_outcome)

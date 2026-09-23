@@ -27,6 +27,8 @@ class ReadResult:
     error: Optional[str] = None
     similar_files: List[str] = field(default_factory=list)
     _snapshot: Optional[tuple] = None
+    # Private native-owner classification; never reconstructed from serialized errors.
+    _attempt_failure: Optional[tuple] = None
 
     def to_dict(self) -> dict:
         return {k: v for k, v in self.__dict__.items() if not k.startswith("_") and v is not None and v != []}
