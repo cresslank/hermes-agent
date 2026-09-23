@@ -9,6 +9,7 @@ import time
 import uuid
 import weakref
 from contextvars import ContextVar
+from contextlib import contextmanager
 
 from agent.supervision_types import (
     Action, Completeness, DecisionSnapshotV1, EffectReceiptV1, DECISION_BUDGET_SECONDS,
@@ -132,6 +133,7 @@ class SupervisionRuntime:
         self.last_final_text = ""
         self.round_deadline = None
         self.round_deadline_issued_at = None
+        self._decision_budget = ContextVar[dict[str, float | None] | None]("native_decision_budget", default=None)
         self.closed = False
         self.final_continuations = 0
         from agent.supervision_dependencies import DependencyOwner
@@ -169,12 +171,46 @@ class SupervisionRuntime:
         from agent.supervision_receipts import record_work
         record_work(self)
 
+    @contextmanager
+    def decision_boundary(self):
+        """One native decision, including nested questions and dependent passes.
+
+        Budgets begin on first use, not during unrelated model/tool execution.
+        Concurrent native owners cannot renew or consume each other's allowance.
+        This changes timing only: revision, source and permission fences still apply.
+        """
+        if self._decision_budget.get() is not None:
+            yield
+            return
+        token = self._decision_budget.set({"issued": None, "deadline": None})
+        try:
+            yield
+        finally:
+            self._decision_budget.reset(token)
+
+    @property
+    def decision_issued_at(self):
+        budget = self._decision_budget.get()
+        return budget["issued"] if budget is not None else self.round_deadline_issued_at
+
     def shared_deadline(self, owner_deadline=None):
         with self.lock:
-            if self.round_deadline is None:
-                self.round_deadline_issued_at = self.clock()
-                self.round_deadline = self.round_deadline_issued_at + DECISION_BUDGET_SECONDS
-            return min(self.round_deadline, owner_deadline) if owner_deadline is not None else self.round_deadline
+            budget = self._decision_budget.get()
+            if budget is not None:
+                if budget["deadline"] is None:
+                    budget["issued"] = self.clock()
+                    budget["deadline"] = budget["issued"] + DECISION_BUDGET_SECONDS
+                    # Retain latest-boundary diagnostics for legacy inspection.
+                    # Active decisions use their own context, never these fields.
+                    self.round_deadline_issued_at = budget["issued"]
+                    self.round_deadline = budget["deadline"]
+                deadline = budget["deadline"]
+            else:
+                if self.round_deadline is None:
+                    self.round_deadline_issued_at = self.clock()
+                    self.round_deadline = self.round_deadline_issued_at + DECISION_BUDGET_SECONDS
+                deadline = self.round_deadline
+            return min(deadline, owner_deadline) if owner_deadline is not None else deadline
 
     def accept_instruction(self, origin):
         if not is_accepted_origin(origin):
@@ -269,7 +305,7 @@ class SupervisionRuntime:
                 issued = self.clock()
                 expiry = issued + 1
             else:
-                issued = deadline_issued_at if deadline_issued_at is not None else self.round_deadline_issued_at
+                issued = deadline_issued_at if deadline_issued_at is not None else self.decision_issued_at
                 # Unknown issuance remains unknown; never mint a renewed remote wait.
                 expiry = deadline
             event_id = uuid.uuid4().hex

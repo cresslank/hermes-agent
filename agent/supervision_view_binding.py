@@ -222,6 +222,7 @@ class NativeViewsBinding:
         if event == 'catalog_ambiguity':
             with self.lock:
                 self.details[target] = {'facts': facts, 'expected': expected, 'deadline': deadline,
+                                        'issued': runtime.decision_issued_at,
                                         'generation': generation, 'event_id': None}
         snapshot = runtime.observe(event, facts, target_id=target, actions=actions,
             evidence_refs=tuple(refs), deadline=deadline, owner='native_views',
@@ -301,7 +302,7 @@ class NativeViewsBinding:
                 request['expected'] != project(context['expected']) or context['expected'] != runtime.revision or
                 request['task_ref'] != context['facts']['task_ref'] or
                 request['deadline'] != context['deadline'] or runtime.clock() >= context['deadline'] or
-                request['deadline_issued_at'] != runtime.round_deadline_issued_at):
+                request['deadline_issued_at'] != context['issued']):
             return None
         keys = set(context['facts']) | {'target_id'}
         policy = registration.egress_policy
