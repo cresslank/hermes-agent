@@ -716,6 +716,10 @@ class SupervisionRuntime:
             self.closed_targets.add(tool_call_id)
 
     def prepare_final(self, text):
+        with self.decision_boundary():
+            return self._prepare_final(text)
+
+    def _prepare_final(self, text):
         self._assert_owner(tool_worker=True)
         if not isinstance(text, str) or not text or self.final_continuations or self.last_final == digest(text):
             return None

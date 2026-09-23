@@ -160,10 +160,12 @@ def offer_child_finding(delegation_id, object_id):
         "launch_id": delegation_id, "committed": True, "job_finished": False,
         "already_delivered": False, "deterministic_critical": False, "verification": "provisional"},
         "decisions": decisions}
-    deadline = runtime.shared_deadline()
+    issued = runtime.clock()
+    deadline = issued + DECISION_BUDGET_SECONDS
     snapshot = runtime.observe("finding_committed", facts, target_id=finding,
         actions=(Action.DELIVER_FINDING,), evidence_refs=(object_id,), owner="finding_admission",
-        deadline=deadline, completeness=DeliveryCompleteness(), data_class="project_excerpt")
+        deadline=deadline, deadline_issued_at=issued,
+        completeness=DeliveryCompleteness(), data_class="project_excerpt")
     if snapshot is not None:
         with runtime.lock:
             runtime.opportunities[finding]["delivery_source"] = (delegation_id, object_id, text, tuple(refs), decisions)
@@ -347,7 +349,7 @@ def final_decision(event, target_session):
             "source_ref": object_id, "verification": "provisional", "novel_claim": True}]}
     # One original admission deadline, not a fresh allowance per proposal/feature.
     issued = runtime.clock()
-    deadline = min(issued + DECISION_BUDGET_SECONDS, runtime.round_deadline) if not runtime.closed and runtime.round_deadline else issued + DECISION_BUDGET_SECONDS
+    deadline = issued + DECISION_BUDGET_SECONDS
     actions = {Action.RETAIN_RESULT, Action.FINAL_BOUNDED_VIEW, Action.DELIVER_FINAL}
     with runtime.lock:
         if runtime.revision != current_revision:

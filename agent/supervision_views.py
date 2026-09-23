@@ -304,7 +304,19 @@ def _blocks(text):
     return blocks
 
 
+def _decision_boundary(agent):
+    from contextlib import nullcontext
+    from agent.supervision_policy import runtime_for_agent
+    runtime = runtime_for_agent(agent)
+    return runtime.decision_boundary() if runtime is not None else nullcontext()
+
+
 def request_views(agent, api_messages, schemas):
+    with _decision_boundary(agent):
+        return _request_views(agent, api_messages, schemas)
+
+
+def _request_views(agent, api_messages, schemas):
     owner = getattr(agent, "_supervision_views", None)
     if not isinstance(owner, SupervisionViews):
         return api_messages, schemas
@@ -343,6 +355,11 @@ def request_views(agent, api_messages, schemas):
 
 
 def canonical_result_view(agent, original, baseline, **kwargs):
+    with _decision_boundary(agent):
+        return _canonical_result_view(agent, original, baseline, **kwargs)
+
+
+def _canonical_result_view(agent, original, baseline, **kwargs):
     owner = getattr(agent, "_supervision_views", None)
     if not isinstance(owner, SupervisionViews):
         return baseline

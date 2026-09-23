@@ -345,8 +345,9 @@ class SupervisionFacade:
                 return None
             try:
                 runtime._assert_owner(tool_worker=True)
-                typed = decode_request(action, request, plugin_id=self._context.plugin_id, runtime=runtime)
-                decision = runtime.owner_decision(action, typed)
+                with runtime.decision_boundary():
+                    typed = decode_request(action, request, plugin_id=self._context.plugin_id, runtime=runtime)
+                    decision = runtime.owner_decision(action, typed)
                 encoded = encode_decision(action, request["request_id"], typed, decision)
                 if encoded is None and decision.selected:
                     runtime.acknowledge_owner(typed.target_id, decision.receipt_id, decision.candidate_ids, None)
@@ -360,7 +361,8 @@ class SupervisionFacade:
         # Owner scope must also match the calling facade; a copied candidate cannot cross profiles.
         if runtime is None or request.revision.profile != self._context._manager.scope_key:
             return OwnerDecisionV1(tuple(c["id"] for c in request.candidates))
-        return runtime.owner_decision(action, request)
+        with runtime.decision_boundary():
+            return runtime.owner_decision(action, request)
 
     def acknowledge_owner(self, acknowledgment):
         from agent.supervision_owner_protocol import OWNERS

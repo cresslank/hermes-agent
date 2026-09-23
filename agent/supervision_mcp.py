@@ -182,12 +182,13 @@ def admit_result(server_name, server, tool, args, typed_result, invoked_session,
         ids = tuple(row[id_key] for row in rows)
         target = "mcp:" + uuid.uuid4().hex
         facts["target_id"] = target
-        request = OwnerRequestV1("mcp", target, runtime.revision, tuple(candidates),
-            runtime.shared_deadline(operation_deadline), required_ids=ids, data_policy=("project_excerpt",),
-            event="retrieval_candidates", requires_ack=True, facts=facts,
-            completeness=Completeness(complete=False, omitted=True),
-            evidence_refs=tuple(c["ref"] for c in candidates))
-        decision = runtime.owner_decision(Action.RANK_CANDIDATES, request, mcp_recipients=recipients)
+        with runtime.decision_boundary():
+            request = OwnerRequestV1("mcp", target, runtime.revision, tuple(candidates),
+                runtime.shared_deadline(operation_deadline), required_ids=ids, data_policy=("project_excerpt",),
+                event="retrieval_candidates", requires_ack=True, facts=facts,
+                completeness=Completeness(complete=False, omitted=True),
+                evidence_refs=tuple(c["ref"] for c in candidates))
+            decision = runtime.owner_decision(Action.RANK_CANDIDATES, request, mcp_recipients=recipients)
         if not decision.selected:
             return baseline
         from agent.supervision_retrieval_presentation import VERSION, annotate, validate
