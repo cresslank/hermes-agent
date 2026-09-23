@@ -127,7 +127,7 @@ def _notification_event_dedup_key(evt: dict) -> tuple:
         if evt.get("task_failure_notice"):
             task_idx = ((evt.get("results") or [{}])[0] or {}).get("task_index", "")
             return (evt.get("delegation_id", ""), evt_type, "task_failure", task_idx)
-        return (evt.get("delegation_id", ""), evt_type)
+        return (evt.get("delegation_id", ""), evt_type, evt.get("finding_id", "final"))
     extra = _DEDUP_EXTRA_FIELDS.get("watch_overflow_" if evt_type.startswith("watch_overflow_") else evt_type, ())
     return (evt.get("session_id", ""), evt_type, *(evt.get(f, 0 if f == "suppressed" else "") for f in extra))
 
@@ -161,6 +161,10 @@ def _notif_log_failure(what: str, exc: BaseException) -> None:
 def _notif_submit(rid: str, sid: str, session: dict, text: str, what: str, **kwargs) -> None:
     """message.start + _run_prompt_submit for a claimed (running=True) turn; releases on failure."""
     try:
+        from agent.completion_admission import valid_hint
+        if not valid_hint(kwargs.get("display_metadata") or {}, session.get("session_key")):
+            _notif_release_turn(session)
+            return
         from gateway.warning_notifications import render_notification
         with _session_profile_runtime_scope(session):
             render_notification(lambda: _emit("message.start", sid), platform="tui",
@@ -460,7 +464,9 @@ def _notif_dispatch_event(sid: str, session: dict, evt: dict, text: str) -> None
     """Run the claimed (running=True) agent turn for one notification event."""
     from tools.async_delegation import claim_event_delivery, complete_event_delivery, release_event_delivery
     try:
-        claim = claim_event_delivery(evt, "tui-poller")
+        claim = evt.pop("_prepared_claim", None)
+        if claim is None:
+            claim = claim_event_delivery(evt, "tui-poller")
     except Exception as exc:  # shared ledger busy/unreadable: the durable row stays pending and replays
         _notif_log_failure("notification delivery claim failed", exc)
         claim = None
@@ -470,8 +476,27 @@ def _notif_dispatch_event(sid: str, session: dict, evt: dict, text: str) -> None
         # from the reaper, keeps its lease, and never reaches its bot mailbox again.
         _notif_release_turn(session)
         return
-    kwargs = ({"display_kind": "async_delegation_complete", "display_metadata": _async_delegation_display_metadata(evt)}
+    from agent.completion_admission import prepare_event, accept_event, delivery_metadata
+    try:
+        if not prepare_event(evt, claim, session.get("session_key", "")).present or not accept_event(evt):
+            _notif_release_turn(session)
+            return
+    except Exception:
+        release_event_delivery(evt, claim)
+        _notif_release_turn(session)
+        return
+    from agent.completion_admission import presentation_text
+    text = presentation_text(evt, text)
+    if evt.get("supervision_delivery_id"):
+        from gateway.warning_notifications import render_notification
+        from agent.notification_presentation import diagnostic_process_event
+        render_notification(lambda: _emit("status.update", sid, {"kind": "process", "text": _async_delegation_display_metadata(evt)["display_text"]}),
+                            platform="tui", diagnostic=diagnostic_process_event(evt))
+    kwargs = ({"display_kind": "async_delegation_complete", "display_metadata": {
+        **_async_delegation_display_metadata(evt), **delivery_metadata(evt)}}
               if evt.get("type") == "async_delegation" else {})
+    if evt.get("type") == "literal_source_change":
+        kwargs = {"display_kind": "literal_source_change", "display_metadata": {}}
     from agent.notification_presentation import diagnostic_process_event
     if diagnostic_process_event(evt):
         kwargs.setdefault("display_metadata", {})["notification_category"] = "diagnostic"
@@ -511,13 +536,35 @@ def _notif_handle_event(sid, session, evt, emitted, registry, fmt, deferred, com
         return True
     if evt_type == "completion" and registry.is_completion_consumed(evt.get("session_id", "")):
         return True
+    if is_delegation:
+        from agent.completion_admission import prepare_event
+        from tools.async_delegation import claim_event_delivery, defer_completion_delivery
+        try:
+            claim = evt.get("_prepared_claim")
+            if claim is None:
+                claim = claim_event_delivery(evt, "tui-preflight")
+            if claim is None:
+                return True
+            prepared = prepare_event(evt, claim, session.get("session_key", ""))
+            if not prepared.present:
+                return True
+            if prepared.delivery_id:
+                evt["_prepared_claim"] = claim
+        except Exception:
+            queue.put(evt)
+            token = evt.pop("_prepared_claim", None) or claim
+            if token:
+                defer_completion_delivery(evt["delegation_id"], token)
+            if deferred is None:
+                time.sleep(0.25)
+            return True
     text = fmt(evt)
     if not text:
         return True
     # Emit once per dedup key: a re-queued completion would otherwise re-emit every 0.5s while the session is busy,
     # while distinct watch_match events from one process must stay visible.
     dedup_key = _notification_event_dedup_key(evt)
-    if dedup_key not in emitted:
+    if dedup_key not in emitted and not evt.get("supervision_delivery_id") and evt_type != "literal_source_change":
         from tools.process_registry_notifications import async_delegation_display_text, process_completion_display_text
         display_text = (async_delegation_display_text(evt) if is_delegation
                         else process_completion_display_text([evt]) if evt_type == "completion" else text)
@@ -714,6 +761,11 @@ def _notification_poller_scoped_loop(stop_event: threading.Event, sid: str, sess
         if now - last_kanban_poll >= _KANBAN_POLL_SECONDS:
             last_kanban_poll = now
             _notif_poll_kanban(sid, session)
+        try:
+            from agent.completion_admission import requeue_due
+            requeue_due(queue, session.get("session_key"))
+        except Exception as exc:
+            _notif_log_failure("durable inbox recovery failed", exc)
         try:
             evt = queue.get(timeout=0.5)
         except Exception:

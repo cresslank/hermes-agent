@@ -72,6 +72,7 @@ class CLITuiRuntimeMixin:
         if isinstance(user_input, tuple):
             user_input, submit_images = user_input
 
+        origin = getattr(user_input, "_supervision_origin", None)
         if isinstance(user_input, str):
             user_input = _strip_leaked_bracketed_paste_wrappers(user_input)
             user_input, _had_mouse_reports = _strip_leaked_terminal_responses_with_meta(user_input)
@@ -120,7 +121,9 @@ class CLITuiRuntimeMixin:
         self._turn_summary_begin()
         self._app.invalidate()
         try:
-            self.chat(notification_preview or user_input, images=submit_images or None, voice_input=is_voice_input)
+            from agent.supervision_context import accepted_origin_scope
+            with accepted_origin_scope(origin):
+                self.chat(notification_preview or user_input, images=submit_images or None, voice_input=is_voice_input)
         finally:
             self._tui_after_turn()
 

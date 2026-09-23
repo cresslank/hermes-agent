@@ -468,7 +468,12 @@ def _prompt_cache_scope_for_agent(agent) -> "str | None":
     fall back to the physical session_id, so a failure never blocks the build)."""
     try:
         from agent.prompt_cache_scope import resolve_prompt_cache_scope_safe
-        return resolve_prompt_cache_scope_safe(agent)
+        scope = resolve_prompt_cache_scope_safe(agent)
+        from agent.supervision_views import SupervisionViews
+        owner = getattr(agent, "_supervision_views", None)
+        if isinstance(owner, SupervisionViews) and owner.cache_identity:
+            return f"{scope or getattr(agent, 'session_id', '')}:view:{owner.cache_identity}"
+        return scope
     except Exception:
         logger.debug("prompt-cache scope resolution failed", exc_info=True)
         return None

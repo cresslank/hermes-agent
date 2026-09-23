@@ -641,7 +641,10 @@ def write_json(obj: dict) -> bool:
         project_room_member_activity(obj, _sessions)
         sid = ((params or {}).get("session_id")) if isinstance(params, dict) else ""
         if sid and (t := (_sessions.get(sid) or {}).get("transport")) is not None:
-            return t.write(obj)
+            from agent.native_emission import guard_emissions
+            session = _sessions[sid]
+            with guard_emissions(lambda: _sessions.get(sid) is session and session.get("transport") is t):
+                return t.write(obj)
     return (current_transport() or _stdio_transport).write(obj)
 
 
@@ -655,7 +658,16 @@ def _emit(event: str, sid: str, payload: dict | None = None) -> bool:
     from agent.notification_presentation import event_presentation_muted
     if event_presentation_muted(event, sid):
         return False
-    return write_json(_event_frame(event, sid, payload))
+    from agent.native_emission import for_agent
+    from agent.supervision_corrections import notice_owner
+    correction = notice_owner((payload or {}).get("text")) if event == "notification.show" else None
+    if correction is not None:
+        if (_sessions.get(sid) or {}).get("agent") is not correction.rt.agent():
+            return False
+        with correction.scope.activate():
+            return write_json(_event_frame(event, sid, payload))
+    with for_agent((_sessions.get(sid) or {}).get("agent")):
+        return write_json(_event_frame(event, sid, payload))
 
 
 from tui_gateway import server_requests as _server_requests  # noqa: E402
@@ -992,6 +1004,11 @@ def _wire_session_agent(sid: str, key: str, agent) -> bool:
         notify_registered = True
         load_permanent_allowlist()
     _wire_callbacks(sid)
+    from agent.supervision_view_binding import bind_presentation_loop
+    with _sessions_lock:
+        transport = (_sessions.get(sid) or {}).get("transport")
+    # WebSocket/TUI owner loop; stdio without a dispatcher keeps immediate baseline.
+    bind_presentation_loop(agent, getattr(transport, "_loop", None))
     with contextlib.suppress(Exception):  # bare agents without the attribute must not break startup
         agent.background_review_callback = lambda message, _sid=sid: _emit("review.summary", _sid, {"text": str(message)})
         agent.memory_notifications = _load_memory_notifications()

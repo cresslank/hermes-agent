@@ -110,6 +110,12 @@ def prepare_iteration(
         from agent.nous_wire import apply_pending_wire_switch
         apply_pending_wire_switch(agent)
 
+    from agent.supervision_policy import runtime_for_agent
+    supervision = runtime_for_agent(agent)
+    if supervision is not None:
+        # No waiting and no history edits. Ready advisories ride the next new tool result.
+        supervision.drain_at_safe_point(allow_advisory=False)
+
     # Fire step_callback for gateway hooks (agent:step event).
     if agent.step_callback is not None:
         try:

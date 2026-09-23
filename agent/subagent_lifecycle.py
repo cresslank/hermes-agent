@@ -58,6 +58,7 @@ class SubagentLaunchRequest:
     correlation_id: Optional[str] = None
     metadata: Mapping[str, Any] = dataclasses.field(default_factory=dict)
     timeout_seconds: Optional[float] = None
+    supervision: Optional[Mapping[str, Any]] = None
 
 
 @dataclasses.dataclass(frozen=True)
@@ -139,7 +140,7 @@ class _Record:
     state: SubagentState
     updated_at: float
     agent: Any = None
-    future: Optional[Future] = None
+    future: Future = dataclasses.field(default_factory=Future)
     started_at: Optional[float] = None
     completed_at: Optional[float] = None
     result: Optional[SubagentResult] = None
@@ -246,38 +247,97 @@ class SubagentLifecycleService:
         parent = self._parent_agent_resolver()
         if parent is None:
             raise SubagentLifecycleError("No active Hermes parent session is available.")
+        from tools.delegate_tool_registry import native_admission
+        with native_admission(parent):
+            return self._launch(request, parent)
+
+    def _launch(self, request, parent):
         self._validate_request(request, parent)
         parent_session_id = _session_id_of(parent)
         if request.parent_session_id and request.parent_session_id != parent_session_id:
             raise SubagentLifecycleError("parent_session_id does not match the active session.")
         correlation_key = (parent_session_id, request.correlation_id or "")
+        reservation = secrets.token_hex(16)
         with _REGISTRY.lock:
             self._cleanup_locked()
             if request.correlation_id and correlation_key in _REGISTRY.correlations:
                 raise SubagentLifecycleError("Duplicate correlation_id for this parent session.")
-        # Lazy: delegate construction stays internal, plugins never import private delegation helpers.
-        from tools.delegate_tool import _build_child_preserving_parent_tools, DEFAULT_MAX_ITERATIONS
-        child = _build_child_preserving_parent_tools(
-            task_index=0, goal=request.goal, context=request.context,
-            toolsets=list(request.allowed_toolsets) if request.allowed_toolsets else None,
-            model=request.model, max_iterations=DEFAULT_MAX_ITERATIONS, task_count=1, parent_agent=parent, role=request.role,
-        )
-        subagent_id = str(getattr(child, "_subagent_id", "") or "")
-        if not subagent_id:
-            raise SubagentLifecycleError("Hermes failed to assign a child identity.")
-        created = time.time()
-        handle = SubagentHandle(
-            PUBLIC_CONTRACT_VERSION, subagent_id, parent_session_id, request.correlation_id, created,
-            getattr(child, "provider", None), getattr(child, "model", None), getattr(child, "_delegate_role", request.role),
-            int(getattr(child, "_delegate_depth", 1) or 1), self._capability(subagent_id, parent_session_id, created),
-        )
-        record = _Record(handle, SubagentState.PENDING, created, agent=child)
-        with _REGISTRY.lock:
-            _REGISTRY.records[subagent_id] = record
             if request.correlation_id:
-                _REGISTRY.correlations[correlation_key] = subagent_id
-        record.future = _EXECUTOR.submit(self._run, record, request.goal, parent)
-        return handle
+                _REGISTRY.correlations[correlation_key] = reservation
+        child = None
+        record = None
+        try:
+            # Reserve BEFORE construction; never hold the registry lock across it.
+            from tools.delegate_tool import _build_child_preserving_parent_tools, DEFAULT_MAX_ITERATIONS
+            child = _build_child_preserving_parent_tools(
+                task_index=0, goal=request.goal, context=request.context,
+                toolsets=list(request.allowed_toolsets) if request.allowed_toolsets else None,
+                model=request.model, max_iterations=DEFAULT_MAX_ITERATIONS, task_count=1, parent_agent=parent, role=request.role,
+            )
+            subagent_id = str(getattr(child, "_subagent_id", "") or "")
+            if not subagent_id:
+                raise SubagentLifecycleError("Hermes failed to assign a child identity.")
+            from agent.owned_delegation import register_launch
+            register_launch(parent, child, dict(request.supervision) if request.supervision is not None else None, goal=request.goal)
+            created = time.time()
+            handle = SubagentHandle(
+                PUBLIC_CONTRACT_VERSION, subagent_id, parent_session_id, request.correlation_id, created,
+                getattr(child, "provider", None), getattr(child, "model", None), getattr(child, "_delegate_role", request.role),
+                int(getattr(child, "_delegate_depth", 1) or 1), self._capability(subagent_id, parent_session_id, created),
+            )
+            # The waitable settlement future exists BEFORE publication. Executor
+            # submission may block or even execute inline; neither opens a wait gap.
+            record = _Record(handle, SubagentState.PENDING, created, agent=child, future=Future())
+            with _REGISTRY.lock:
+                if subagent_id in _REGISTRY.records:
+                    raise SubagentLifecycleError("Duplicate child identity.")
+                _REGISTRY.records[subagent_id] = record
+                if request.correlation_id:
+                    _REGISTRY.correlations[correlation_key] = subagent_id
+            _EXECUTOR.submit(self._run_and_settle, record, request.goal, parent)
+            return handle
+        except BaseException as exc:
+            with _REGISTRY.lock:
+                if request.correlation_id and _REGISTRY.correlations.get(correlation_key) in (
+                        reservation, record.handle.subagent_id if record else reservation):
+                    _REGISTRY.correlations.pop(correlation_key, None)
+                if record and _REGISTRY.records.get(record.handle.subagent_id) is record:
+                    _REGISTRY.records.pop(record.handle.subagent_id, None)
+                    if not record.future.done():
+                        record.future.set_exception(exc)
+            if child is not None:
+                with contextlib.suppress(Exception):
+                    from tools.delegate_tool_child_run import _close_child
+                    _close_child(child, "Failed to close unlaunched lifecycle child")
+            raise
+
+    def list_owned(self, *, limit: int = 64):
+        from agent.owned_delegation import owner_of
+        owner = owner_of(self._parent_agent_resolver())
+        return owner.list_owned(limit=limit) if owner else ()
+
+    def owned_status(self, handle):
+        from agent.owned_delegation import owner_of, ControlDenied
+        owner = owner_of(self._parent_agent_resolver())
+        if owner is None:
+            raise ControlDenied("No owned delegation grant")
+        return owner.status(handle)
+
+    def request_semantic_cancel(self, handle, **kwargs):
+        from agent.owned_delegation import owner_of, ControlDenied
+        owner = owner_of(self._parent_agent_resolver())
+        if owner is None:
+            raise ControlDenied("No owned delegation grant")
+        return owner.request_semantic_cancel(handle, **kwargs)
+
+    def _run_and_settle(self, record, goal, parent):
+        try:
+            self._run(record, goal, parent)
+        except BaseException as exc:
+            record.future.set_exception(exc)
+            raise
+        else:
+            record.future.set_result(None)
 
     def status(self, handle: SubagentHandle) -> SubagentStatus:
         record = self._record(handle)
@@ -312,6 +372,9 @@ class SubagentLifecycleService:
             record.updated_at = time.time()
         accepted = False
         if agent is not None:
+            with contextlib.suppress(Exception):
+                from agent.owned_delegation import seal_explicit_stop
+                seal_explicit_stop(agent)
             with contextlib.suppress(Exception):
                 accepted = request_hard_interrupt(
                     agent, f"Lifecycle cancellation requested: {reason[:500]}", tool_reason="subagent cancellation requested",
@@ -364,7 +427,14 @@ class SubagentLifecycleService:
             record.started_at = record.updated_at = time.time()
         try:
             from tools.delegate_tool import _run_child_lifecycle
-            raw = _run_child_lifecycle(0, goal, record.agent, parent)
+            with _REGISTRY.lock:
+                cancelled_before_start = record.state == SubagentState.CANCEL_REQUESTED
+            if cancelled_before_start:
+                raw = {"status": "interrupted"}
+                from tools.delegate_tool_child_run import _close_child
+                _close_child(record.agent, "Failed to close pre-cancelled lifecycle child")
+            else:
+                raw = _run_child_lifecycle(0, goal, record.agent, parent)
             is_dict = isinstance(raw, dict)
             raw = raw if is_dict else {}
             status = str(raw.get("status", "error"))
@@ -405,6 +475,8 @@ class SubagentLifecycleService:
             raise SubagentLifecycleError("metadata must be JSON-serializable.") from exc
         if metadata_bytes > _MAX_METADATA_BYTES:
             raise SubagentLifecycleError("metadata exceeds 8192 bytes.")
+        from agent.owned_delegation import validate_request
+        validate_request(dict(request.supervision) if request.supervision is not None else None)
         if not request.allowed_toolsets:
             return
         from toolsets import TOOLSETS

@@ -59,3 +59,29 @@ parent-broadening toolsets are rejected, and per-tool blocks, working-directory
 overrides, and per-launch timeouts are explicitly rejected until Hermes can
 support them without weakening isolation. Use `allowed_toolsets` to narrow a
 child; Hermes's existing unsafe-tool block remains enforced.
+
+## Owned read-only delegation accounting
+
+Opted-in native delegation uses the existing canonical control row and CAS owner.
+Optional semantic controls remain zero-wait and use their original deadline.
+Authority reads and transaction admission/commit validate the SessionDB's recorded
+main-file and required WAL/SHM identities without flushing accounting, repairing
+storage, or adopting an unknown sidecar generation.
+
+Mandatory dispatch exits and worker finish are separate from semantic authority.
+Each admitted dispatch has a durable identity; the live owner retains the exact
+exited identities when a zero-wait finalization transaction encounters SQLite
+writer contention. Native finish, dispatch, status, or the host-only
+`OwnedDelegationOwner.reconcile_lifecycle(handle)` retries this accounting with a
+single nonwaiting CAS per ancestor. An exited dispatch is decremented only once;
+worker finish alone never clears other live dispatches or nested handoffs.
+Cleanup may finish after configuration/registration revocation, without restoring
+permission for semantic actions. Completed tool results are not replaced by a
+bookkeeping-contention error.
+
+This is live-owner recovery, not crash recovery or an autonomous retry service.
+If the final finish attempt collides, a later owner status/reconciliation call is
+needed after the writer releases. Process loss loses the in-memory completion
+facts, and database-generation loss, CAS conflict, or ambiguous storage failure
+fences automatic reconciliation. The durable unsettled row remains unknown;
+Hermes does not adopt work, replay tools, or fabricate settlement from it.

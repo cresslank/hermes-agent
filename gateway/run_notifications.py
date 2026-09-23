@@ -166,6 +166,11 @@ class GatewayNotificationsMixin:
         adapter = self._delivery_adapter_for(source)
         if not adapter:
             return
+        from agent.supervision_corrections import notice_owner
+        if notice_owner(content) is not None:
+            from gateway.emission import send_correction_notice
+            await send_correction_notice(adapter, source, content)
+            return
         config = getattr(self, "config", None)
         chat_id = getattr(source, "chat_id", None)
         if config and getattr(source, "platform", None) == Platform.SLACK and _is_slack_ignored_channel(config, chat_id, adapter):
@@ -1175,7 +1180,7 @@ class GatewayNotificationsMixin:
         watch_events = _drain_gateway_watch_events(completion_queue)
         for evt in watch_events:
             async with self._completion_event_scope(evt):
-                if self._load_background_notifications_mode() == "off":
+                if self._load_background_notifications_mode() == "off" and evt.get("type") != "literal_source_change":
                     continue
                 synth_text = _format_gateway_process_notification(evt)
                 if not synth_text:
@@ -1291,6 +1296,8 @@ class GatewayNotificationsMixin:
         from gateway.wake import WakeNotAccepted, adapter_supports_push, admit_internal_event
         source = await asyncio.to_thread(self._build_process_event_source, evt)
         if not source:
+            if evt.get("type") == "literal_source_change":
+                return False  # source facts never use the generic API self-POST wake
             # API-server sessions bind the RAW X-Hermes-Session-Id key, not a structured ``agent:...`` key.
             raw_sid = _raw_process_event_session_id(evt)
             if raw_sid:
@@ -1316,12 +1323,25 @@ class GatewayNotificationsMixin:
         if not adapter:
             return False
         if not adapter_supports_push(adapter):
+            if evt.get("type") == "literal_source_change":
+                return False
             # Non-push adapter (api_server): its chat_id IS the raw session id, so handle_message would
             # key the wake under a build_session_key() that never matches — self-post instead.
             raw_sid = str(evt.get("origin_session_id") or "").strip() or str(source.chat_id or "")
             return await self._self_post_api_server(adapter, synth_text, raw_sid, evt)
+        if evt.get("type") == "literal_source_change":
+            from agent.completion_admission import prepare_event
+            target = str(evt.get("parent_session_id") or "")
+            prepared = await asyncio.to_thread(prepare_event, evt, "", target)
+            if not prepared.present:
+                return None
         try:
             metadata = {}
+            if evt.get("supervision_deliveries"):
+                metadata["supervision_deliveries"] = evt["supervision_deliveries"]
+            elif evt.get("supervision_delivery_id"):
+                from agent.completion_admission import delivery_metadata
+                metadata.update(delivery_metadata(evt))
             session_key = str(evt.get("session_key") or "").strip()
             from agent.notification_presentation import diagnostic_process_event
             if diagnostic_process_event(evt):
@@ -1335,6 +1355,8 @@ class GatewayNotificationsMixin:
                 text=synth_text, message_type=MessageType.TEXT, source=source, internal=True,
                 message_id=str(evt.get("message_id") or "").strip() or None, metadata=metadata,
             )
+            if evt.get("type") == "literal_source_change":
+                synth_event._native_literal_source_event = evt
             logger.info(
                 "Watch pattern notification — injecting for %s chat=%s thread=%s",
                 platform_name, source.chat_id, source.thread_id,
@@ -1363,6 +1385,8 @@ class GatewayNotificationsMixin:
         persisted spawn epoch so a reused ID is a distinct incarnation; legacy events without
         ``started_at`` are delivered undeduplicated rather than risk suppressing a real completion.
         """
+        if evt.get("_supervision_recovery"):
+            return None  # durable inbox/lease, not an evictable in-memory seen set
         evt_type = str(evt.get("type") or "")
         if evt_type == "async_delegation":
             producer_id = str(evt.get("delegation_id") or "")
@@ -1373,7 +1397,7 @@ class GatewayNotificationsMixin:
                 # batch's final result as already delivered, nor a sibling's notice.
                 task_idx = ((evt.get("results") or [{}])[0] or {}).get("task_index", "")
                 return (evt_type, producer_id, f"task_failure:{task_idx}")
-            return (evt_type, producer_id, "")
+            return (evt_type, producer_id, evt.get("finding_id", ""))
         if evt_type == "completion":
             producer_id = str(evt.get("session_id") or "")
             started_at = evt.get("started_at")
@@ -1487,6 +1511,9 @@ class GatewayNotificationsMixin:
         the pipeline after acceptance, falsely acking the durable row. Verifying first gives drops an
         honest durable disposition.
         """
+        prepared_claim = evt.pop("_gateway_prepared_claim", None)
+        if prepared_claim is not None:
+            return prepared_claim
         claim = self._CompletionClaim()
         evt_type = evt.get("type")
         if evt_type == "async_delegation" and not await self._completion_delivery_ready(evt):
@@ -1494,13 +1521,13 @@ class GatewayNotificationsMixin:
             return claim
         # An interim per-task notice shares the batch's delegation_id but is not the durable
         # completion; claiming that row here would acknowledge the FINAL result before it exists.
-        if evt_type == "async_delegation" and not evt.get("task_failure_notice"):
+        if evt_type == "async_delegation" and not (evt.get("task_failure_notice") or evt.get("finding_id")):
             claim.delegation_id = str(evt.get("delegation_id") or "")
             if claim.delegation_id:
                 try:
-                    from tools.async_delegation import claim_completion_delivery
-                    claim.claim_id = f"gateway:{id(self)}:{__import__('uuid').uuid4().hex}"
-                    if not claim_completion_delivery(claim.delegation_id, claim.claim_id):
+                    from tools.async_delegation import claim_event_delivery
+                    claim.claim_id = claim_event_delivery(evt, f"gateway:{id(self)}")
+                    if claim.claim_id is None:
                         claim.proceed = False
                         return claim
                 except Exception as exc:
@@ -1589,6 +1616,18 @@ class GatewayNotificationsMixin:
             claim = await self._preflight_completion_delivery(evt)
             if not claim.proceed:
                 return claim.early_result
+            from agent.completion_admission import prepare_event, delivery_metadata
+            target = str(evt.get("parent_session_id") or evt.get("origin_session_id") or evt.get("session_key") or "")
+            prepared = await asyncio.to_thread(prepare_event, evt, claim.claim_id, target)
+            if not prepared.present:
+                return None
+            if not sibling_claims:
+                from agent.completion_admission import presentation_text
+                synth_text = presentation_text(evt, synth_text)
+            constituents = [delivery_metadata(item) for item, _token in [(evt, claim.claim_id), *sibling_claims]
+                            if item.get("supervision_delivery_id")]
+            if constituents:
+                evt["supervision_deliveries"] = constituents
             if identity is not None:
                 if self._completion_identity_seen(identity, claim=True):
                     return None
@@ -1597,6 +1636,9 @@ class GatewayNotificationsMixin:
             if injection_result is not True:
                 return injection_result
             accepted = True
+            if evt.get("type") == "literal_source_change":
+                from agent.supervision_corrections import accept_source_event
+                accept_source_event(evt)
             if identity is not None:
                 with self._completion_delivery_lock:
                     self._mark_completions_delivered_locked((identity,))
@@ -1806,11 +1848,27 @@ class GatewayNotificationsMixin:
             if not await self._completion_delivery_ready(evt):
                 return False
         from tools.async_delegation import claim_event_delivery
+        from agent.completion_admission import prepare_event
+        eligible = []
+        for item, item_text in deliverable:
+            item_claim = await self._preflight_completion_delivery(item)
+            if not item_claim.proceed:
+                continue
+            target = str(item.get("parent_session_id") or item.get("origin_session_id") or item.get("session_key") or "")
+            prepared = await asyncio.to_thread(prepare_event, item, item_claim.claim_id, target)
+            if prepared.present:
+                item["_gateway_prepared_claim"] = item_claim
+                from agent.completion_admission import presentation_text
+                eligible.append((item, presentation_text(item, item_text)))
+        deliverable = eligible
+        if not deliverable:
+            return None
         primary_evt, primary_text = deliverable[0]
         blocks = [primary_text]
         siblings: list[tuple[dict, str]] = []
         for evt, synth_text in deliverable[1:]:
-            claim_id = claim_event_delivery(evt, f"gateway-batch:{id(self)}")
+            prepared_claim = evt.pop("_gateway_prepared_claim", None)
+            claim_id = prepared_claim.claim_id if prepared_claim is not None else claim_event_delivery(evt, f"gateway-batch:{id(self)}")
             if claim_id is None:
                 # Another consumer owns this row: keep it out of our text so it is never double-injected.
                 continue
@@ -1865,6 +1923,8 @@ class GatewayNotificationsMixin:
         while self._running:
             with _log_suppressed(logging.DEBUG, "Async delegation watcher error: %s"):
                 # Pattern events also need an idle consumer; foreground turns are optional.
+                from agent.completion_admission import requeue_due
+                await asyncio.to_thread(requeue_due, _pr.completion_queue)
                 await self._drain_watch_notifications(_pr.completion_queue)
                 # Process completions remain owned by their per-process watchers.
                 requeue = []

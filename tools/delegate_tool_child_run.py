@@ -46,10 +46,23 @@ def _append_missed_steer(entry: Dict[str, Any], late_steer: Optional[str]) -> No
 
 def _close_child(child: Any, log_message: str) -> None:
     """Best-effort ``child.close()`` (tool sandboxes, browser daemons, httpx clients)."""
+    closed = False
     with _quiet(log_message, exc_info=True):
         close = getattr(child, "close", None)
         if callable(close):
             close()
+        closed = True
+    from agent.owned_delegation import binding_of
+    binding = binding_of(child)
+    if binding:
+        # Storage failure leaves control unsettled; never skip later host cleanup.
+        with _quiet("Failed to persist owned child settlement: %s", exc_info=True):
+            owner, handle = binding
+            if not closed:
+                snapshot = owner.status(handle)
+                owner.reconcile(handle, expected_revision=snapshot['control_revision'],
+                                processes_stopped=False, effects_reconciled=False)
+            owner.finish(handle)
 
 def _with_children_lock(parent_agent: Any, op: str, child: Any) -> None:
     """``parent_agent._active_children.<op>(child)`` under the parent's lock when it has one."""
@@ -93,6 +106,9 @@ def _detach_child(parent_agent: Any, child: Any) -> None:
 def _signal_child_stop(child: Any, *reason: str, tool_reason: str = "parent delegation ended") -> None:
     """Cooperative interrupt so the child's worker thread can exit cleanly. ``tool_reason`` is the
     fixed cause the child's tools see (a pending approval wait reports it instead of a user deny)."""
+    with _quiet(None):
+        from agent.owned_delegation import seal_explicit_stop
+        seal_explicit_stop(child)
     with _quiet(None):
         if (child is not None and not request_hard_interrupt(child, *reason, tool_reason=tool_reason)
                 and hasattr(child, "_interrupt_requested")):
@@ -327,6 +343,9 @@ class _Heartbeat:
                 )
                 # A finite/-Q turn has no gateway watchdog behind this; the wait itself must end (#109749).
                 self.stale_threshold_seconds = stale_cycles * _HEARTBEAT_INTERVAL
+                from agent.supervision_efficiency import observe_native
+                observe_native(parent_agent, "heartbeat_stopped", child, dict(last_seen),
+                               threshold=self.stale_threshold_seconds)
                 self.settled.set()
                 return False
             if child_tool:
@@ -413,7 +432,19 @@ def _defer_close_after_timeout(child: Any, child_future: Any) -> None:
     sweep + one delayed re-sweep for a connection opened in between; a worker that still won't settle keeps its
     resources until process exit.
     """
-    child_future.add_done_callback(lambda _done: _close_child(child, "Failed to close timed-out child after worker exit"))
+    # Normal timeout cleanup detaches/unregisters before the actual worker has
+    # exited. Retain native admission until that worker's deferred close finishes;
+    # an empty live list must not certify absence in this interval.
+    from tools.delegate_tool_registry import native_admission
+    parent_ref = getattr(child, "_delegate_parent_ref", None)
+    pending = native_admission(parent_ref() if callable(parent_ref) else None)
+    pending.__enter__()
+    def close_done(_done):
+        try:
+            _close_child(child, "Failed to close timed-out child after worker exit")
+        finally:
+            pending.__exit__(None, None, None)
+    child_future.add_done_callback(close_done)
     # Bounded drain (#94248 native half): the deferred close above only fires once the abandoned worker
     # unwinds, but that worker is typically parked inside an in-flight OpenSSL read (Codex / httpx). Never
     # hard-close that transport from this thread — releasing FDs under a live SSL read is the #29507/#70773
@@ -855,9 +886,8 @@ class _ChildRun:
             worker_thread_holder["t"] = threading.current_thread()
             from agent.delegation_context import delegated_child_context
             with delegated_child_context(str(getattr(child, "session_id", "") or "")):
-                return child.run_conversation(
-                    user_message=user_message, task_id=self.child_task_id, stream_callback=self.relay_text,
-                )
+                from tools.delegate_context_recipe import run_context
+                return child.run_conversation(**run_context(user_message, self.child_task_id, self.relay_text))
 
         future = executor.submit(contextvars.copy_context().run, _run_with_thread_capture)
         # One wait covers both ways out: the worker finishing, or the heartbeat's stale verdict.

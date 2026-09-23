@@ -780,7 +780,8 @@ def _cmd_steer(rid, params, session, name, arg):
     agent = session.get("agent") if session else None
     if agent and hasattr(agent, "steer"):
         with contextlib.suppress(Exception):
-            if agent.steer(arg):
+            from agent.supervision_context import steer_from_user
+            if steer_from_user(agent, arg, kind="tui"):
                 shown = f"{arg[:80]}{'...' if len(arg) > 80 else ''}"
                 return _exec_out(rid, f"⏩ Steer queued — arrives after the next tool call: {shown}")
     return _ok(rid, {"type": "send", "message": arg})  # no active run: next-turn message

@@ -56,11 +56,6 @@ def _make_fake_ops(content="hello\n", total_lines=1, file_size=6):
     return fake
 
 
-def _make_safe_tempdir(prefix: str) -> str:
-    """Create a temp dir outside macOS system-sensitive /private/var paths."""
-    return tempfile.mkdtemp(prefix=prefix, dir=os.getcwd())
-
-
 # ---------------------------------------------------------------------------
 # Device path blocking
 # ---------------------------------------------------------------------------
@@ -391,7 +386,7 @@ class TestFileDedup(unittest.TestCase):
 
     def setUp(self):
         _read_tracker.clear()
-        self._tmpdir = _make_safe_tempdir("hermes-dedup-")
+        self._tmpdir = tempfile.mkdtemp(prefix="hermes-dedup-")
         self._tmpfile = os.path.join(self._tmpdir, "dedup_test.txt")
         with open(self._tmpfile, "w", encoding="utf-8") as f:
             f.write("line one\nline two\n")
@@ -784,7 +779,7 @@ class TestWriteInvalidatesDedup(unittest.TestCase):
 
     def setUp(self):
         _read_tracker.clear()
-        self._tmpdir = _make_safe_tempdir("hermes-write-dedup-")
+        self._tmpdir = tempfile.mkdtemp(prefix="hermes-write-dedup-")
         self._tmpfile = os.path.join(self._tmpdir, "write_dedup.txt")
         with open(self._tmpfile, "w", encoding="utf-8") as f:
             f.write("original content\n")

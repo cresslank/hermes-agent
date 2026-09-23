@@ -38,12 +38,14 @@ class Recipe:
     port: int | None = None
     readiness_path: str = "/"
     evidence: list[str] = field(default_factory=list)
+    native_checks: list[dict] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "name": self.name, "kind": self.kind, "bootstrap": list(self.bootstrap),
             "build": list(self.build), "test": list(self.test), "start": self.start,
             "port": self.port, "readinessPath": self.readiness_path, "evidence": list(self.evidence),
+            **({"nativeChecks": self.native_checks} if self.native_checks != [] else {}),
         }
 
     @classmethod
@@ -74,6 +76,7 @@ class Recipe:
             build=_as_strings(raw.get("build") or raw.get("buildCommands")),
             test=_as_strings(raw.get("test") or raw.get("testCommands")),
             evidence=_as_strings(raw.get("evidence")),
+            native_checks=raw.get("nativeChecks", []),
         )
 
 

@@ -49,7 +49,8 @@ def run_verify_command(args) -> int:
         skip_start=args.skip_start, port_override=args.port,
     )
 
-    _record_evidence(root, recipe, result, partial=bool(phases or args.skip_start))
+    if not recipe.native_checks or result.phases or result.readiness is not None:
+        _record_evidence(root, recipe, result, partial=bool(phases or args.skip_start))
 
     if args.json:
         payload = result.to_dict()
@@ -119,6 +120,11 @@ def _print_human_report(recipe, source, result) -> None:
             print(f"  {p.phase.ljust(width)}  {status:<7}  {p.duration:6.1f}s  {p.command}")
     else:
         print("  (no phases executed)")
+
+    for check in getattr(result, "checks", ()):
+        print(f"  native  {'PASS' if check.get('ok') else 'FAIL'}")
+        if check.get("advisory"):
+            print(check["advisory"])
 
     if result.readiness is not None:
         r = result.readiness

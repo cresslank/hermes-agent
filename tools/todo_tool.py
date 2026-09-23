@@ -204,11 +204,17 @@ def todo_tool(todos: Optional[List[Dict[str, Any]]] = None, merge: bool = False,
         if not isinstance(todos, list):
             return tool_error(f"todos must be a list, got {type(todos).__name__}")
         items = store.write(todos, merge)
+        from agent.supervision_children import committed_child_plan
+        committed_child_plan(store)
     summary = {"total": len(items)}
     for status in ("pending", "in_progress", "completed", "cancelled"):
         summary[status] = sum(1 for i in items if i["status"] == status)
-    return json.dumps({"todos": items, "revision": store.snapshot()["revision"],
-                       "summary": summary}, ensure_ascii=False)
+    result = {"todos": items, "revision": store.snapshot()["revision"], "summary": summary}
+    from agent.supervision_context import work_map_source_refs
+    source_refs = work_map_source_refs(store)
+    if source_refs is not None:
+        result["work_map_sources"] = source_refs
+    return json.dumps(result, ensure_ascii=False)
 
 
 def check_todo_requirements() -> bool:

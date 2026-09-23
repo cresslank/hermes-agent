@@ -3833,6 +3833,10 @@ class BasePlatformAdapter(ABC):
         """Spawn a background processing task under the session guard; True on success. If
         ``create_task`` is stubbed with a non-Task sentinel (tests), the guard is rolled back
         (False)."""
+        if event.internal:
+            from agent.completion_admission import valid_hint
+            if not valid_hint(event.metadata or {}):
+                return False
         guard = interrupt_event or asyncio.Event()
         self._active_sessions[session_key] = guard
         task = asyncio.create_task(self._process_message_background(event, session_key))
@@ -3955,6 +3959,11 @@ class BasePlatformAdapter(ABC):
         if session_key in self._active_sessions:
             await self._handle_message_while_active(event, session_key)
             return
+        # Reserve the durable inbox before an in-memory scheduling hint escapes.
+        if event.internal:
+            from agent.completion_admission import accept_metadata, accept_native_source_event
+            if not accept_native_source_event(event) or not accept_metadata(event.metadata or {}):
+                return
         # Guard installed synchronously BEFORE the task spawns so a second message can't race in.
         event._gateway_accepted = self._start_session_processing(event, session_key)
 
@@ -4014,6 +4023,10 @@ class BasePlatformAdapter(ABC):
         # (or collapse distinct wakes into one turn). Its caller can retry admission.
         if event.internal and session_key in self._pending_messages:
             return
+        if event.internal:
+            from agent.completion_admission import accept_metadata, accept_native_source_event
+            if not accept_native_source_event(event) or not accept_metadata(event.metadata or {}):
+                return
         # Photo bursts/albums: queue without interrupting; they run after the current task.
         if event.message_type == MessageType.PHOTO:
             logger.debug("[%s] Queuing photo follow-up for session %s without interrupt", self.name, session_key)
@@ -4236,8 +4249,10 @@ class BasePlatformAdapter(ABC):
                     len(text_content), event.source.chat_id)
         obligation_id = await self._record_delivery_obligation(
             event, session_key, text_content, delivery_adapter, is_ephemeral_response)
-        result = await delivery_adapter._send_with_retry(
-            chat_id=event.source.chat_id, content=text_content, reply_to=reply_to, metadata=metadata)
+        from gateway.emission import final_emission_scope
+        with final_emission_scope(self, session_key):
+            result = await delivery_adapter._send_with_retry(
+                chat_id=event.source.chat_id, content=text_content, reply_to=reply_to, metadata=metadata)
         if obligation_id is not None:
             await self._finalize_delivery_obligation(obligation_id, result, event, delivery_adapter)
         return result, delivery_adapter
@@ -4355,6 +4370,9 @@ class BasePlatformAdapter(ABC):
                                "no attachment; delivering recovered original to %s", self.name,
                                len(pre_extract), event.source.chat_id)
                 text_content = _recovered
+        if not (images or local_files or media_files or is_ephemeral_response):
+            from agent.supervision_original_output import unchanged
+            text_content = unchanged(pre_extract, text_content)
         return _ExtractedResponse(
             text_content=text_content, images=images, media_files=media_files,
             local_files=local_files, force_document_attachments=force_document, pre_extract=pre_extract)

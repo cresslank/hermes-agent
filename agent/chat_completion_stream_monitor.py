@@ -4,6 +4,7 @@ import time
 from types import SimpleNamespace
 
 from agent import chat_completion_wait_notice as wn
+from agent.notification_presentation import OptionalProgressText
 from agent.model_metadata import is_local_endpoint
 
 
@@ -24,7 +25,7 @@ class StreamingWaitMonitor:
         if _load_notice is not None:
             m.wait_notice_started_ts = None  # The local loader now owns the display.
             m.wait_notice.reset()
-            self.agent._emit_wait_notice(_load_notice)
+            self.agent._emit_wait_notice(OptionalProgressText(_load_notice, revision="local_load"))
             self.agent._touch_activity("local model loading")
             m.load_notice_shown, m.load_notice_misses, m.last_heartbeat = True, 0, now  # loading IS liveness
             return True
@@ -50,8 +51,8 @@ class StreamingWaitMonitor:
                 self.agent._touch_activity(f"waiting for stream response ({waiting_secs}s, {phase})")
                 return
             self._mon.wait_notice_started_ts = self._mon.last_heartbeat
-            self.agent._emit_wait_notice(wn.wait_notice_text(
-                self.api_kwargs.get('model', 'the provider'), waiting_secs, phase, watchdog))
+            self.agent._emit_wait_notice(OptionalProgressText(wn.wait_notice_text(
+                self.api_kwargs.get('model', 'the provider'), waiting_secs, phase, watchdog), revision=phase))
         else:
             # Chunks are flowing — keep the tracker fresh, leave the display alone.
             self.agent._touch_activity(f"waiting for stream response ({waiting_secs}s, no chunks yet)")

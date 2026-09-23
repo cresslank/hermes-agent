@@ -111,8 +111,17 @@ class StdioTransport:
         line = serialize_frame(obj, "stdio", logger) + "\n"
         with self._lock:
             stream = self._stream_getter()
+            from tui_gateway.emission import prepare_frame, emitted_frame
+            import io
+            # Queue-like/custom stdout proxies can acknowledge only enqueue.
+            if isinstance(stream, io.TextIOBase):
+                from agent.native_emission import guard_emissions
+                with guard_emissions(lambda: self._stream_getter() is stream):
+                    line = prepare_frame(obj, line, stream, "stdio")
+                    if line is None:
+                        return True  # refused correction is not a broken peer
             try:
-                stream.write(line)
+                written = stream.write(line)
             except Exception as e:
                 _raise_unless_peer_gone(e, "write")
                 return False
@@ -124,6 +133,8 @@ class StdioTransport:
                 except Exception as e:
                     _raise_unless_peer_gone(e, "flush")
                     return False
+                if written == len(line) and self._stream_getter() is stream:
+                    emitted_frame(line)
         return True
 
     def close(self) -> None:
@@ -251,7 +262,11 @@ class FanoutTransport:
                     logger.warning("fanout subscriber backlog full; detaching peer")
                     self._remove(peer)
                     continue
-                peer.pending.append((frame, size))
+                from tui_gateway.emission import queued_frame
+                generation = peer.generation
+                observed = queued_frame(frame, obj,
+                    lambda p=peer, g=generation: p.attached and p.generation == g)
+                peer.pending.append((observed, size))
                 peer.pending_bytes += size
                 if not peer.writing:
                     peer.writing = True

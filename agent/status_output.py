@@ -70,15 +70,20 @@ class StatusOutputMixin:
             except Exception:
                 logger.debug("%s error in %s", name, origin, exc_info=True)
 
-    def _emit_status_kind(self, kind: str, message: str, *, origin: str) -> None:
+    def _emit_status_kind(self, kind: str, message: str, *, origin: str, optional_update=None) -> None:
         """Print to the CLI (``_vprint(force=True)``) and forward to ``status_callback(kind, message)``. Never raises."""
-        from gateway.warning_notifications import is_warning_status
-        try:
-            if not is_warning_status(kind, message) or self._warning_presentation_enabled():
-                self._vprint(f"{self.log_prefix}{message}", force=True)
-        except Exception:
-            pass
-        self._call_callback("status_callback", kind, message, origin=origin)
+        from gateway.warning_notifications import is_warning_status, optional_status_metadata
+        from agent.notification_presentation import present_optional
+        warning = is_warning_status(kind, message)
+        def render():
+            try:
+                if not warning or self._warning_presentation_enabled():
+                    self._vprint(f"{self.log_prefix}{message}", force=True)
+            except Exception:
+                pass
+            self._call_callback("status_callback", kind, message, origin=origin)
+        present_optional(self, optional_status_metadata(kind, message, optional_update),
+                         (kind, str(message)), render)
 
     def _warning_presentation_enabled(self) -> bool:
         from gateway.warning_notifications import warning_notifications_enabled
@@ -142,22 +147,39 @@ class StatusOutputMixin:
         """Reset the blocked-overflow warning dedup so it can re-fire on the next blocked turn."""
         self._last_ctx_overflow_warn = None
 
-    def _emit_notice(self, notice) -> None:
+    def _emit_notice(self, notice, *, optional_update=None) -> None:
         """Fire a structured ``AgentNotice`` to the active driver (TUI / CLI)."""
-        self._call_callback("notice_callback", notice, origin="_emit_notice")
+        from agent.notification_presentation import present_optional
+        from gateway.warning_notifications import is_diagnostic_notice
+        # Existing classified warnings always bypass optional deferral.
+        if is_diagnostic_notice(notice):
+            from gateway.warning_notifications import optional_status_metadata
+            optional_update = optional_status_metadata("warn", "", optional_update)
+        present_optional(self, optional_update, repr(notice),
+                         lambda: self._call_callback("notice_callback", notice, origin="_emit_notice"))
 
     def _emit_notice_clear(self, key: str) -> None:
         """Clear a previously-fired sticky notice by ``key`` (e.g. on recovery)."""
+        from agent.notification_presentation import clear_optional
+        clear_optional(self, key)
         self._call_callback("notice_clear_callback", key, origin="_emit_notice_clear")
 
-    def _emit_wait_notice(self, text: str) -> None:
+    def _emit_wait_notice(self, text: str, *, optional_update=None) -> None:
         """Rewrite the live status line (CLI spinner, TUI ``thinking.delta``, gateway activity)
         so long provider waits are not an anonymous spinner."""
         self._touch_activity(text)
-        self._call_callback("thinking_callback", text, origin="_emit_wait_notice")
+        from agent.notification_presentation import present_optional, clear_optional, OptionalProgressText
+        if optional_update is None and isinstance(text, OptionalProgressText):
+            optional_update = text.optional_update
+        if not text:
+            clear_optional(self, "provider_wait")
+        present_optional(self, optional_update if text else None, str(text),
+                         lambda: self._call_callback("thinking_callback", text, origin="_emit_wait_notice"))
 
     def _emit_diagnostic_wait(self, text: str) -> None:
         from gateway.warning_notifications import DiagnosticText
+        from agent.notification_presentation import clear_optional
+        clear_optional(self, "provider_wait")
         self._emit_wait_notice(DiagnosticText(text))
 
     # ── Buffered retry/fallback status: shown only when every retry/fallback is exhausted, dropped on
