@@ -65,6 +65,8 @@ class CLIProcessNotificationsMixin:
                 pending = ProcessNotificationBatch(notifications)
             else:
                 pending = TimelineNotification.for_delegation(text, event) if event.get("type") == "async_delegation" else text
+                if event.get("type") == "literal_source_change":
+                    pending = TimelineNotification(text, "", "literal_source_change")
                 from agent.notification_presentation import diagnostic_process_event
                 if diagnostic_process_event(event) and not isinstance(pending, TimelineNotification):
                     pending = TimelineNotification(text, text, "internal_notification", "diagnostic")

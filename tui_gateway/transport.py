@@ -118,6 +118,8 @@ class StdioTransport:
                 from agent.native_emission import guard_emissions
                 with guard_emissions(lambda: self._stream_getter() is stream):
                     line = prepare_frame(obj, line, stream, "stdio")
+                    if line is None:
+                        return True  # refused correction is not a broken peer
             try:
                 written = stream.write(line)
             except Exception as e:

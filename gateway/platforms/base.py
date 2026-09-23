@@ -3932,8 +3932,8 @@ class BasePlatformAdapter(ABC):
             return
         # Reserve the durable inbox before an in-memory scheduling hint escapes.
         if event.internal:
-            from agent.completion_admission import accept_metadata
-            if not accept_metadata(event.metadata or {}):
+            from agent.completion_admission import accept_metadata, accept_native_source_event
+            if not accept_native_source_event(event) or not accept_metadata(event.metadata or {}):
                 return
         # Guard installed synchronously BEFORE the task spawns so a second message can't race in.
         event._gateway_accepted = self._start_session_processing(event, session_key)
@@ -3995,8 +3995,8 @@ class BasePlatformAdapter(ABC):
         if event.internal and session_key in self._pending_messages:
             return
         if event.internal:
-            from agent.completion_admission import accept_metadata
-            if not accept_metadata(event.metadata or {}):
+            from agent.completion_admission import accept_metadata, accept_native_source_event
+            if not accept_native_source_event(event) or not accept_metadata(event.metadata or {}):
                 return
         # Photo bursts/albums: queue without interrupting; they run after the current task.
         if event.message_type == MessageType.PHOTO:

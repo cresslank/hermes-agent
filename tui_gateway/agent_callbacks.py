@@ -108,6 +108,18 @@ def _agent_thinking_update(sid: str, text: str) -> None:
 
 
 def _agent_notice_update(sid: str, notice) -> None:
+    from agent.supervision_corrections import notice_owner
+    correction = notice_owner(notice.text)
+    if correction is not None:
+        from tui_gateway import server
+        from tui_gateway.transport import StdioTransport
+        session = server._sessions.get(sid) or {}
+        if type(session.get("transport")) is not StdioTransport:
+            return
+        with correction.scope.activate():
+            server._emit("notification.show", sid, {"text": notice.text, "level": notice.level,
+                "kind": notice.kind, "ttl_ms": notice.ttl_ms, "key": notice.key, "id": notice.id})
+        return
     from gateway.warning_notifications import is_diagnostic_notice
     if not _agent_presentation_enabled(sid, diagnostic=is_diagnostic_notice(notice)):
         return

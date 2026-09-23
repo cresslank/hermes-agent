@@ -46,7 +46,28 @@ def save_original(owner, row, *, validate, predecessors, predecessor_records, re
         predecessor_records=predecessor_records, references=references)
 
 
-def _save(runtime, rows, *, validate=None, predecessors=None, predecessor_records=None, references=None):
+def save_correction(owner, row, *, initial=False, guard=None):
+    """Bounded historical join; only the native incident owner, never a generic bypass."""
+    from agent.supervision_corrections import Review, source_for
+    if type(owner) is not Review:
+        return False
+    rt = owner.rt
+    source = source_for(rt)
+    if (not rt.lock._is_owned() or not owner.current() or source is None
+            or source.provider is not owner.provider
+            or owner.provider.correction_custody.get(owner.original['id']) is not owner.custody
+            or row.get('id') != owner.ident or row.get('kind') != 'correction'):
+        return False
+    def validate():
+        return (owner.current() and owner.provider.correction_current(owner.custody, owner)
+                and (guard is None or guard()))
+    return _save(rt, [row], validate=validate, historical_work=owner.work_id, novel_only=initial,
+        predecessors=None if initial else {owner.ident: (owner.row['revision'], owner.row['status'])},
+        predecessor_records=None if initial else {owner.ident: owner.row},
+        references={owner.original['id']: owner.original, owner.claim['id']: owner.claim})
+
+
+def _save(runtime, rows, *, validate=None, predecessors=None, predecessor_records=None, references=None, historical_work=None, novel_only=False):
     try:
         encoded = []
         for row in rows:
@@ -70,7 +91,7 @@ def _save(runtime, rows, *, validate=None, predecessors=None, predecessor_record
                 return False
             encoded.append((row, body))
         rev = runtime.revision
-        key = (rev.profile, rev.lineage, rev.work_id)
+        key = (rev.profile, rev.lineage, historical_work or rev.work_id)
         with writer(runtime) as (conn, session):
             if validate is not None and not validate():
                 return False
@@ -89,6 +110,8 @@ def _save(runtime, rows, *, validate=None, predecessors=None, predecessor_record
             for row, body in encoded:
                 old = conn.execute("SELECT kind,session_id,revision,status,body_json FROM supervision_owner_records WHERE profile=? AND lineage=? AND work_id=? AND record_id=?",
                                    (*key, row["id"])).fetchone()
+                if novel_only and old is not None:
+                    raise sqlite3.IntegrityError("effect_already_recorded")
                 if predecessors is not None and (old is None or old[2:4] != predecessors.get(row["id"])):
                     raise sqlite3.IntegrityError("owner_record_predecessor_changed")
                 if predecessor_records is not None:

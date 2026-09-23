@@ -81,6 +81,10 @@ class LiteralSourceProviderV1(ABC):
     def release_final_source(self, token):
         pass
 
+    def release_correction_sources(self):
+        """Withdraw transient correction custody; retained rows grant no replay."""
+        pass
+
     @abstractmethod
     def resolve_literal_source(self, engine, invocation_id: str, source_ref: str) -> LiteralSourceRecordV1 | None:
         """Revalidate a retained immutable record against its exact native row only."""
@@ -108,12 +112,14 @@ class LiteralSourceInvocationV1:
 
 
 class LiteralSourceRegistration:
-    def __init__(self, facade, engine, provider, recipients, final_policy=None, *, working_recipients=frozenset()):
+    def __init__(self, facade, engine, provider, recipients, final_policy=None, *, working_recipients=frozenset(), correction_policy=None, correction_recipients=frozenset()):
         self.facade, self.engine, self.provider = facade, engine, provider
         self.scope = facade._context._manager.scope_key
         self.generation = uuid.uuid4().hex
         self.recipients = recipients
         self.working_recipients = working_recipients
+        self.correction_policy = correction_policy
+        self.correction_recipients = correction_recipients
         self.active = True
         self.lock = threading.RLock()
         self.pending = {}
@@ -125,6 +131,7 @@ class LiteralSourceRegistration:
         with self.lock:
             self.active = False
             self.final_use.release()
+            self.provider.release_correction_sources()
             for invocation in {p.invocation_id for p, _ in self.records.values()} | set(self.pending):
                 self.provider.release_literal_sources(invocation)
             self.pending.clear()
@@ -298,11 +305,17 @@ def register(facade, *, version, engine, provider):
     if (not isinstance(working_recipients, list) or len(working_recipients) > 16
             or any(type(r) is not str or not 0 < len(r) <= 128 for r in working_recipients)):
         return None
+    semantic = grant.get("correction_semantic", {})
+    correction_recipients = semantic.get("recipients", []) if isinstance(semantic, dict) and semantic.get("version") == "supervision.literal-correction.v1" else []
+    if (not isinstance(correction_recipients, list) or len(correction_recipients) > 16
+            or any(type(r) is not str or not 0 < len(r) <= 128 for r in correction_recipients)):
+        return None
     old = getattr(facade, "_literal_source_registration", None)
     if old is not None:
         old.close()
     registration = LiteralSourceRegistration(facade, engine, provider, frozenset(recipients),
-        final_policy=grant.get("final_use"), working_recipients=frozenset(working_recipients))
+        final_policy=grant.get("final_use"), working_recipients=frozenset(working_recipients),
+        correction_policy=grant.get("correction_review"), correction_recipients=frozenset(correction_recipients))
     facade._literal_source_registration = registration
     context._manager._track_registration(context.manifest, "literal_sources", context.plugin_id, registration.close)
     return registration

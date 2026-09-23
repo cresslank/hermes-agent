@@ -3059,7 +3059,7 @@ def _format_gateway_process_notification(evt: dict) -> "str | None":
         text += "]"
         return text
 
-    if evt_type in ("async_delegation", "heartbeat"):
+    if evt_type in ("async_delegation", "heartbeat", "literal_source_change"):
         from tools.process_registry_notifications import format_process_notification
         return format_process_notification(evt)
 
@@ -3079,7 +3079,7 @@ def _drain_gateway_watch_events(completion_queue) -> "list[dict]":
         evt_type = evt.get("type", "completion")
         if evt_type in {
             "watch_match", "watch_disabled", "watch_overflow_tripped", "watch_overflow_released",
-            "heartbeat"}:
+            "heartbeat", "literal_source_change"}:
             watch_events.append(evt)
         elif evt_type == "async_delegation":
             requeue.append(evt)

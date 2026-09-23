@@ -659,6 +659,13 @@ def _emit(event: str, sid: str, payload: dict | None = None) -> bool:
     if event_presentation_muted(event, sid):
         return False
     from agent.native_emission import for_agent
+    from agent.supervision_corrections import notice_owner
+    correction = notice_owner((payload or {}).get("text")) if event == "notification.show" else None
+    if correction is not None:
+        if (_sessions.get(sid) or {}).get("agent") is not correction.rt.agent():
+            return False
+        with correction.scope.activate():
+            return write_json(_event_frame(event, sid, payload))
     with for_agent((_sessions.get(sid) or {}).get("agent")):
         return write_json(_event_frame(event, sid, payload))
 

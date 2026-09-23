@@ -357,6 +357,10 @@ class SupervisionRuntime:
             facts = action_conflict_facts(self, name, args, proposal.target_id, targets)
             if facts is None or facts["link"]["id"] != link_id:
                 return "stale", "action_link_changed"
+        if proposal.owner == "corrections":
+            from agent.supervision_correction_semantics import valid_proposal
+            if not valid_proposal(self, proposal):
+                return "rejected", "invalid_correction_relation"
         if proposal.owner == "claim_uses" and not self.dependencies.claim_uses.validate(proposal):
             return "rejected", "invalid_dependency_relation"
         if proposal.owner == "planning" and not self.dependencies.planning.validate(proposal):
@@ -897,6 +901,8 @@ class SupervisionRuntime:
             self.lock.release()
 
     def finish_turn(self):
+        from agent.supervision_corrections import drain
+        drain(self)
         optional_reads = getattr(self, "optional_reads", None)
         if optional_reads is not None:
             optional_reads.clear()

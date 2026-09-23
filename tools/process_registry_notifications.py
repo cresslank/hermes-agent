@@ -422,6 +422,8 @@ def format_process_notification(evt: dict) -> "str | None":
     # phantom "process exited (exit code ?)".
     if evt_type in ("watch_disabled", "watch_overflow_tripped", "watch_overflow_released"):
         return f"[IMPORTANT: {evt.get('message', '')}]"
+    if evt_type == "literal_source_change":
+        return "[Native source change for a previously delivered answer. Evidence is provisional; the main owner will review its exact linked sources.]"
     if evt_type == "async_delegation":
         return _format_async_delegation(evt)
     _sid, _cmd = evt.get("session_id", "unknown"), evt.get("command", "unknown")

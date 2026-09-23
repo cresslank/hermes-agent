@@ -48,11 +48,18 @@ def native(tmp_path, monkeypatch, request):
     coverage = getattr(request, 'param', None) == 'coverage'
     if coverage:
         fields.extend('requirements coverage_scope global_coverage continuation_available omitted_requirement_ids'.split())
-    policy = dict(id='claim-fixture', profile=str(home), fields={k: 'synthetic' for k in fields}, sources={}, fixture=True)
+    semantic_correction = getattr(request, 'param', None) == 'correction-semantic'
+    if semantic_correction:
+        fields.append('relation_only')
+    source_grants = {k: 'supervision.literal-correction.v1' for k in ('a', 'b')} if semantic_correction else {}
+    policy = dict(id='claim-fixture', profile=str(home), fields={k: 'synthetic' for k in fields}, sources=source_grants, fixture=True)
     config = {'supervision': {'enabled': True, 'plugins': {
         'hermes-lcm': {'literal_sources': {'version': VERSION, 'recipients': ['fixture-claims']}},
         'fixture-claims': {'grants': ['observe', Action.CONTEST_CLAIM.value, 'update_dependencies', 'continue'],
             'data_policy': ['history_excerpt', 'task_text', 'project_excerpt'], 'egress_policy': policy}}}}
+    if semantic_correction:
+        config['supervision']['plugins']['hermes-lcm']['literal_sources']['correction_semantic'] = {
+            'version': 'supervision.literal-correction.v1', 'recipients': ['fixture-claims']}
     (home / 'config.yaml').write_text(json.dumps(config))
     manager = PluginManager(scope_key=str(home))
     ctx = PluginContext(PluginManifest(name='hermes-lcm'), manager)

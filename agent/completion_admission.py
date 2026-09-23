@@ -65,6 +65,9 @@ def prepare_event(event, claim, target_session_id):
     Policy returns ``(disposition, host_retainable)``; optionality is revalidated
     against linked canonical lifecycle controls inside the writer transaction.
     """
+    if event.get('type') == 'literal_source_change':
+        from agent.supervision_corrections import prepare_source_event
+        return PreparedDelivery(None, 'received' if prepare_source_event(event, target_session_id) else 'consumed')
     if event.get('type') != 'async_delegation' or event.get('task_failure_notice'):
         return PreparedDelivery(None, 'received')
     from tools.async_delegation import _DB_LOCK, _transaction
@@ -146,6 +149,11 @@ def prepare_event(event, claim, target_session_id):
     event['supervision_delivery_id'] = row['delivery_id']
     event['source_object_id'] = row['object_id']
     event['_supervision_claim'] = claim
+    try:
+        from agent.supervision_corrections import admit_completion
+        admit_completion(event, target_session_id)
+    except Exception:
+        pass  # optional correction state must not suppress required/unknown F02 delivery
     if row['view_text'] is not None:
         event['_supervision_view_text'] = row['view_text']
     return PreparedDelivery(row['delivery_id'], row['state'], row['disposition'])
@@ -160,6 +168,9 @@ def presentation_text(event, original):
 
 
 def accept_event(event, *, capacity=256, destination_lease=None):
+    if event.get('type') == 'literal_source_change':
+        from agent.supervision_corrections import accept_source_event
+        return accept_source_event(event)
     delivery_id = event.get('supervision_delivery_id')
     if not delivery_id:
         return True
@@ -175,6 +186,14 @@ def accept_event(event, *, capacity=256, destination_lease=None):
 def delivery_metadata(event):
     keys = ('supervision_delivery_id','supervision_destination_lease','delegation_id','finding_id')
     return {key: event[key] for key in keys if event.get(key)}
+
+
+def accept_native_source_event(event):
+    native = getattr(event, "_native_literal_source_event", None)
+    if native is None:
+        return True
+    from agent.supervision_corrections import accept_source_event
+    return event.internal is True and accept_source_event(native)
 
 
 def accept_metadata(metadata, *, capacity=256):

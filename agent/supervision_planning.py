@@ -68,6 +68,14 @@ class PlanningGraph:
         if self.loaded_work != work:
             self.clear()
             for row in records.load(self.rt):
+                if row["kind"] == "correction":
+                    # Historical adoption remains a fact. The separate native
+                    # contest decision still disables optional support on reload.
+                    if (row.get("suspend_optional_reuse") is True
+                            and row["status"] in {"contested", "selected", "emitted", "source_unavailable"}
+                            and type(row.get("claim_id")) is str):
+                        self.owner.contested_claims.add(row["claim_id"])
+                    continue
                 if (row.get("dimension") == "original_output"
                         or row["kind"] not in {"planning", "research_pass", "gap_obligation", "claim_delivery"}):
                     continue

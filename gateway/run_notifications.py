@@ -166,6 +166,11 @@ class GatewayNotificationsMixin:
         adapter = self._delivery_adapter_for(source)
         if not adapter:
             return
+        from agent.supervision_corrections import notice_owner
+        if notice_owner(content) is not None:
+            from gateway.emission import send_correction_notice
+            await send_correction_notice(adapter, source, content)
+            return
         config = getattr(self, "config", None)
         chat_id = getattr(source, "chat_id", None)
         if config and getattr(source, "platform", None) == Platform.SLACK and _is_slack_ignored_channel(config, chat_id, adapter):
@@ -1175,7 +1180,7 @@ class GatewayNotificationsMixin:
         watch_events = _drain_gateway_watch_events(completion_queue)
         for evt in watch_events:
             async with self._completion_event_scope(evt):
-                if self._load_background_notifications_mode() == "off":
+                if self._load_background_notifications_mode() == "off" and evt.get("type") != "literal_source_change":
                     continue
                 synth_text = _format_gateway_process_notification(evt)
                 if not synth_text:
@@ -1291,6 +1296,8 @@ class GatewayNotificationsMixin:
         from gateway.wake import WakeNotAccepted, adapter_supports_push, admit_internal_event
         source = await asyncio.to_thread(self._build_process_event_source, evt)
         if not source:
+            if evt.get("type") == "literal_source_change":
+                return False  # source facts never use the generic API self-POST wake
             # API-server sessions bind the RAW X-Hermes-Session-Id key, not a structured ``agent:...`` key.
             raw_sid = _raw_process_event_session_id(evt)
             if raw_sid:
@@ -1316,10 +1323,18 @@ class GatewayNotificationsMixin:
         if not adapter:
             return False
         if not adapter_supports_push(adapter):
+            if evt.get("type") == "literal_source_change":
+                return False
             # Non-push adapter (api_server): its chat_id IS the raw session id, so handle_message would
             # key the wake under a build_session_key() that never matches — self-post instead.
             raw_sid = str(evt.get("origin_session_id") or "").strip() or str(source.chat_id or "")
             return await self._self_post_api_server(adapter, synth_text, raw_sid, evt)
+        if evt.get("type") == "literal_source_change":
+            from agent.completion_admission import prepare_event
+            target = str(evt.get("parent_session_id") or "")
+            prepared = await asyncio.to_thread(prepare_event, evt, "", target)
+            if not prepared.present:
+                return None
         try:
             metadata = {}
             if evt.get("supervision_deliveries"):
@@ -1340,6 +1355,8 @@ class GatewayNotificationsMixin:
                 text=synth_text, message_type=MessageType.TEXT, source=source, internal=True,
                 message_id=str(evt.get("message_id") or "").strip() or None, metadata=metadata,
             )
+            if evt.get("type") == "literal_source_change":
+                synth_event._native_literal_source_event = evt
             logger.info(
                 "Watch pattern notification — injecting for %s chat=%s thread=%s",
                 platform_name, source.chat_id, source.thread_id,
@@ -1619,6 +1636,9 @@ class GatewayNotificationsMixin:
             if injection_result is not True:
                 return injection_result
             accepted = True
+            if evt.get("type") == "literal_source_change":
+                from agent.supervision_corrections import accept_source_event
+                accept_source_event(evt)
             if identity is not None:
                 with self._completion_delivery_lock:
                     self._mark_completions_delivered_locked((identity,))

@@ -97,6 +97,9 @@ class CLIStreamMixin:
             self._pending_credit_notices = []
             colors = {"error": "\033[31m", "warn": "\033[33m", "success": "\033[32m", "info": _DIM}
             for level, text in pending:
+                from hermes_cli.cli_emission import correction_notice
+                if correction_notice(text):
+                    continue
                 _cprint(f"  {colors.get(level, _DIM)}{text}{_RST}")
         except Exception:
             pass

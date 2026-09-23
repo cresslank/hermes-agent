@@ -37,13 +37,30 @@ def prepare_frame(obj, line, transport, peer):
         return line
     params = params if isinstance(params, dict) else {}
     # Never certify a history/replay result as a fresh assistant emission.
-    if params.get("type") not in {"message.complete", "message.delta"}:
-        return line
     from agent.supervision_original_output import origin_of, codec, native_text_sink
     original_payload = (obj.get("params") or {}).get("payload") or {}
     original = original_payload.get("text")
     origin = origin_of(original)
     payload = params.get("payload") or {}
+    from agent.supervision_corrections import notice_owner
+    correction = notice_owner(original)
+    if correction is not None:
+        target = (("peer", str(peer)), ("session", str(params.get("session_id", ""))))
+        with restore_context(scope):
+            generation = transport_generation(transport)
+        if (params.get("type") != "notification.show" or peer != "stdio"
+                or not native_text_sink(transport) or not current()
+                or payload.get("text") != original or "rendered" in payload
+                or not correction.reserve("tui", target, generation)):
+            return None
+        with restore_context(scope):
+            pending = prepare(line, surface="tui", target=target, generation=generation,
+                operation="notification.show", frame_id=str(params.get("seq", "")),
+                origin=codec(original, line, "tui.correction.v1", ("params", "payload", "text")),
+                current=current)
+        return WireFrame(line, pending, current)
+    if params.get("type") not in {"message.complete", "message.delta"}:
+        return line
     proof = None
     if (peer == "stdio" and native_text_sink(transport) and origin is not None and "rendered" not in payload
             and payload.get("text") == original

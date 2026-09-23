@@ -112,6 +112,7 @@ class _Attempt:
         self.database = getattr(rt.agent(), "_session_db", None)
         self.declared = copy.deepcopy(selected.node)
         self.claim = self.declared
+        self.source_record = selected.source.record
         self.expected = render_record(selected.source.record)
         self.issued = {}
         self.cli_segments = []
@@ -149,6 +150,9 @@ class _Attempt:
                 predecessors=None if initial else {self.row["id"]: (self.row["revision"], self.row["status"])},
                 predecessor_records=predecessor, references={self.claim["id"]: self.claim}):
             self.row = row
+            if row["status"] == "original_emitted":
+                from agent.supervision_corrections import enroll_original
+                enroll_original(self)
             return True
         return False
 

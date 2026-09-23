@@ -495,6 +495,8 @@ def _notif_dispatch_event(sid: str, session: dict, evt: dict, text: str) -> None
     kwargs = ({"display_kind": "async_delegation_complete", "display_metadata": {
         **_async_delegation_display_metadata(evt), **delivery_metadata(evt)}}
               if evt.get("type") == "async_delegation" else {})
+    if evt.get("type") == "literal_source_change":
+        kwargs = {"display_kind": "literal_source_change", "display_metadata": {}}
     from agent.notification_presentation import diagnostic_process_event
     if diagnostic_process_event(evt):
         kwargs.setdefault("display_metadata", {})["notification_category"] = "diagnostic"
@@ -562,7 +564,7 @@ def _notif_handle_event(sid, session, evt, emitted, registry, fmt, deferred, com
     # Emit once per dedup key: a re-queued completion would otherwise re-emit every 0.5s while the session is busy,
     # while distinct watch_match events from one process must stay visible.
     dedup_key = _notification_event_dedup_key(evt)
-    if dedup_key not in emitted and not evt.get("supervision_delivery_id"):
+    if dedup_key not in emitted and not evt.get("supervision_delivery_id") and evt_type != "literal_source_change":
         from tools.process_registry_notifications import async_delegation_display_text, process_completion_display_text
         display_text = (async_delegation_display_text(evt) if is_delegation
                         else process_completion_display_text([evt]) if evt_type == "completion" else text)

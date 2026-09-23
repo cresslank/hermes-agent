@@ -48,15 +48,19 @@ def consume(facade, request):
         return False
     from agent.supervision_working_premise import current_read, consumption_fence as premise_fence
     premise_read = current_read(runtime, request["target_id"])
+    from agent.supervision_correction_semantics import current_read as correction_read, dispatch_fence as correction_fence
+    correction = correction_read(runtime, request["target_id"])
     with runtime.lock:
         opportunity = runtime.opportunities.get(request["target_id"])
         if opportunity is None:
             return False
         claim_fence = (runtime.dependencies.claim_uses.dispatch_fence(request["target_id"], registration)
             if opportunity["owner"] == "claim_uses" else nullcontext(True))
+        correction_guard = (correction_fence(runtime, request["target_id"], registration, correction)
+            if opportunity["owner"] == "corrections" else nullcontext(True))
         with registration.fence, consumption_fence(opportunity), claim_fence as claim_current, premise_fence(
-                opportunity, registration, premise_read) as premise_current:
-            if not claim_current or not premise_current:
+                opportunity, registration, premise_read) as premise_current, correction_guard as correction_current:
+            if not claim_current or not premise_current or not correction_current:
                 return False
             entry = opportunity.get("dispatch", {}).get(registration.generation)
             if entry is None:

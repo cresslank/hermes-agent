@@ -94,6 +94,27 @@ def final_emission_scope(adapter, session_key):
         yield
 
 
+async def send_correction_notice(adapter, source, text):
+    """Closed original-audience branch. No private fallback, splitting or retry."""
+    from plugins.platforms.telegram.adapter import TelegramAdapter, _escape_mdv2
+    from agent.supervision_corrections import notice_owner
+    owner = notice_owner(text)
+    if owner is None or type(adapter) is not TelegramAdapter or source.thread_id is None:
+        return
+    metadata = {'thread_id': source.thread_id}
+    target = (('chat_id', str(source.chat_id)), ('message_thread_id', str(source.thread_id)))
+    with owner.scope.activate():
+        if not owner.reserve('gateway.telegram', target, transport_generation(adapter._bot)):
+            return
+        payload = _escape_mdv2(text)
+        with telegram_original_format(adapter, text, [payload], source.chat_id, None, metadata):
+            with telegram_completion_gate() as gate:
+                result = await telegram_text_call(adapter, 'send_message', chat_id=source.chat_id,
+                    message_thread_id=int(source.thread_id), text=payload, parse_mode='MarkdownV2')
+                if gate is not None:
+                    gate.finish(success=result is not None and result is not False)
+
+
 async def telegram_text_call(adapter, method, **kwargs):
     """Observe the actual post-format/post-fallback API text and effective routing.
 
