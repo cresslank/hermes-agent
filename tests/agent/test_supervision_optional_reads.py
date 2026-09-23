@@ -171,7 +171,7 @@ def test_late_judgment_preserves_baseline_and_cannot_apply(native, tmp_path):
     import time
     _, request = prepare(native, tmp_path)
     original = read(native, request)
-    native.on_response.append(lambda: time.sleep(.2))
+    native.on_response.append(lambda: time.sleep(1.1))
     second = read(native, {**request, "limit": 2})
     assert original and second and original["source_ref"] != second["source_ref"]
     assert "More synthetic detail" in second["content"]

@@ -1,12 +1,12 @@
-"""Real configured F04 supplier -> canonical append and SessionDB consumption.
+"""Native F04 decisive dispatch, exact bytes and fail-open-to-real-read controls.
 
-Both main reads execute; neither ready strings nor an unlocked census authorize
-advice. Strict transport and public cross-thread native admission are used.
+The real provider/HTTP MockTransport, configured native owner and read_file run;
+only call counting and adversarial interleavings are injected.
 """
 import json
 import threading
 from contextvars import copy_context
-from contextlib import contextmanager, nullcontext
+from contextlib import contextmanager
 
 import pytest
 from tests.agent.test_owned_delegation_planning import (
@@ -14,15 +14,6 @@ from tests.agent.test_owned_delegation_planning import (
 )
 from tests.agent.test_supervision_read_supplier import requests, read
 from tests.agent.test_supervision_efficiency import feature_calls
-
-
-def commit(p, args, ident, result):
-    from agent.tool_executor import _commit_tool_result, _ToolCallRef
-    from tools.budget_config import DEFAULT_BUDGET
-    p.history.pop()
-    return _commit_tool_result(p.a, p.history, _ToolCallRef('read_file', args, 'default', ident, []), result,
-        budget=DEFAULT_BUDGET, tool_duration=0, is_error=False, blocked=False,
-        effect_disposition=None, observed=True)
 
 
 @contextmanager
@@ -58,152 +49,101 @@ def pending_native_launch(p, monkeypatch):
 
 
 
-def lock_probe(p):
-    from tools import delegate_tool_registry as registry
-    observations = []
-    for name, lock in [('runtime', p.rt.lock), ('efficiency', p.native.owner.lock),
-                       ('owner', p.owner._lock), ('native', registry._active_subagents_lock)]:
-        acquired = lock.acquire(blocking=False)
-        observations.append((name, acquired))
-        if acquired:
-            lock.release()
-    assert all(value for _, value in observations), observations
-    return observations
 
-
-@pytest.mark.parametrize('change', [
-    'none', 'source', 'configuration', 'native_admission', 'wrong_call', 'unload',
-    'expiry', 'canonical_write', 'receipt_write', 'busy_config',
+@pytest.mark.parametrize("change", [
+    "none", "source", "source_during_inference", "fresh", "independent", "readback",
+    "missing_capture", "error", "ineligible", "unavailable", "grant", "dispatch_denied",
 ])
-def test_exact_read_advice_only_at_confirmed_canonical_use(factory, monkeypatch, change):
+def test_native_reuse_skips_actual_read_or_executes_once(factory, monkeypatch, change):
     from agent import tool_executor
-    p = factory(); rows = requests(p); p.commit(rows)
-    first, first_bytes = read(p, rows[0])
-    requirements = p.rt.requirements
-    owner_thread = threading.get_ident()
-    inference_locks = []
-    def inference():
-        assert threading.get_ident() != owner_thread
-        inference_locks.extend(lock_probe(p))
-    p.native.on_response.append(inference)
-    args = rows[1]['operation']['arguments']
-    ident, result = p.call('read_file', args, settle=False)
-    assert len(feature_calls(p.native, 'F04')) == 1 and len(inference_locks) == 4
-    candidate = feature_calls(p.native, 'F04')[0]['state']['facts']['candidates'][0]
-    assert candidate['source_ref'] == 'tool:' + first
-    assert candidate['requirement_id'] in {r.id for r in requirements}
-    assert p.native.owner.read_payloads[first] == first_bytes.encode()
-    assert ident != first and 'Synthetic source:' in result
-    # Selection/rendering is not a persisted advisory effect.
-    assert not [r for r in p.rt.receipts.values() if r.status == 'applied']
-    if change == 'source':
-        p.source.write_text('Synthetic source: externally changed before commit.\n')
-    if change == 'configuration':
-        cfg = p.native.rig.config
-        cfg['supervision']['planning']['allow_discretionary_readonly_labels'] = False
-        (p.native.rig.home / 'config.yaml').write_text(json.dumps(cfg))
-        from hermes_cli.config import load_config_readonly
-        load_config_readonly()
-    if change == 'wrong_call':
-        ident += '-different'
-    if change == 'unload':
-        p.native.bridge.close()
-    if change == 'expiry':
-        deadline = p.rt.opportunities[ident]['deadline']
-        threading.Event().wait(max(0, deadline - p.rt.clock()) + 0.01)
-    db = p.a._session_db
-    if change == 'canonical_write':
-        db._conn.execute("""CREATE TRIGGER fail_read_message BEFORE INSERT ON messages
-            WHEN NEW.role='tool' BEGIN SELECT RAISE(ABORT, 'offline canonical write failure'); END""")
-        db._conn.commit()
-    if change == 'receipt_write':
-        db._conn.execute("""CREATE TRIGGER fail_read_receipt BEFORE UPDATE ON supervision_receipts
-            WHEN NEW.status='applied' BEGIN SELECT RAISE(ABORT, 'offline receipt write failure'); END""")
-        db._conn.commit()
-    original_flush = tool_executor._flush_session_db_after_tool_progress
-    flush_probes = []
-    def flush(*a, **kw):
-        assert not [r for r in p.rt.receipts.values() if r.status == 'applied']
-        errors = []
-        def probe():
-            try:
-                flush_probes.extend(lock_probe(p))
-            except BaseException as exc:
-                errors.append(exc)
-        t = threading.Thread(target=probe); t.start(); t.join(3)
-        assert not t.is_alive() and not errors
-        return original_flush(*a, **kw)
-    monkeypatch.setattr(tool_executor, '_flush_session_db_after_tool_progress', flush)
-    scope = pending_native_launch(p, monkeypatch) if change == 'native_admission' else nullcontext()
-    from hermes_cli import config
-    entered, release = threading.Event(), threading.Event()
-    def hold_config():
-        with config._CONFIG_LOCK:
-            entered.set()
-            assert release.wait(3)
-    holder = None
-    if change == 'busy_config':
-        holder = threading.Thread(target=hold_config); holder.start(); assert entered.wait(3)
-    try:
-        with scope:
-            value = commit(p, args, ident, result)
-    finally:
-        release.set()
-        if holder:
-            holder.join(3); assert not holder.is_alive()
-    assert len(flush_probes) == 4
-    assert (value is None) == (change == 'canonical_write')
-    stored = db.get_messages(p.a.session_id)
-    expected_advice = change in {'none', 'receipt_write'}
-    assert ('Task-bound advisory' in str(stored)) == expected_advice
-    receipts = list(p.rt.receipts.values())
-    assert bool([r for r in receipts if r.status == 'applied']) == (change == 'none')
-    durable = db._conn.execute('SELECT status FROM supervision_receipts').fetchall()
-    assert bool([r for r in durable if r[0] == 'applied']) == (change == 'none')
-    if change in {'canonical_write', 'receipt_write'}:
-        assert receipts[0].status == 'unknown'
-    assert p.rt.requirements == requirements and not p.owner.list_owned()
-    assert p.native.owner.read_payloads[first] == first_bytes.encode()
-    assert not p.rt.drain_at_safe_point()  # never reroute the rejected/wrong-call advice
+    from tests.agent.supervision_test_support import accept
+    p = factory()
+    rows = requests(p)
+    p.commit(rows)
+    if change == "error":
+        source = p.source.read_text()
+        p.source.unlink()
+        first, original = p.call("read_file", rows[0]["operation"]["arguments"], settle=False)
+        assert json.loads(original).get("error")
+        from agent.supervision_efficiency import observe_native
+        observe_native(p.a, "tool_result", "read_file", rows[0]["operation"]["arguments"], original,
+                       call_id=first, failed=True)
+        assert first not in p.native.owner.read_payloads
+        p.source.write_text(source)
+    else:
+        first, original = read(p, rows[0])
+        assert p.native.owner.read_payloads[first] == original.encode()
+    evaluations = []
+    def counted(agent, name, run):
+        evaluations.append(name)
+        return run()
+    monkeypatch.setattr(tool_executor, "_run_with_activity_heartbeat", counted)
+    if change == "source":
+        p.source.write_text("Synthetic source: changed snapshot.\n")
+    if change == "source_during_inference":
+        p.native.on_response.append(lambda: p.source.write_text("Synthetic source: changed during decision.\n"))
+    if change in {"fresh", "independent", "readback"}:
+        instruction = {"fresh": "Read the source fresh now.", "independent": "Perform an independent corroborating read.",
+                       "readback": "Read back the source after the external write."}[change]
+        accept(p.a, instruction, continuation=True)
+    if change == "missing_capture":
+        # A failed/unavailable original is never eligible to become a source.
+        p.native.owner.reads.clear()
+        p.native.owner.read_payloads.clear()
+    if change == "ineligible":
+        p.commit([])
+        evaluations.clear()
+    if change == "unavailable":
+        def malformed(answers):
+            answers.clear()
+        p.native.answer_mutators.append(malformed)
+    if change == "grant":
+        def revoke():
+            reg = p.native.bridge.native._registration
+            reg.grants = frozenset(g for g in reg.grants if g != "reuse_candidate")
+        p.native.on_response.append(revoke)
+    if change == "dispatch_denied":
+        from agent.owned_delegation import ControlDenied
+        @contextmanager
+        def denied(*args):
+            raise ControlDenied("fixture-denied")
+            yield
+        monkeypatch.setattr("agent.owned_delegation.dispatch_fence", denied)
+    second, actual = p.call("read_file", rows[1]["operation"]["arguments"], settle=False)
+    if change == "none":
+        assert evaluations == []  # ZERO underlying read invocations
+        envelope = json.loads(actual)
+        assert envelope["executed"] is False and envelope["reused_from"] == "tool:" + first
+        assert envelope["result"] == original
+        assert second not in p.rt.dependencies.planning.returns  # no fake file-owner capture
+        assert second not in p.native.owner.reads
+        assert len(feature_calls(p.native, "F04")) == 1
+        assert any(r.status == "applied" for r in p.rt.receipts.values())
+    elif change == "dispatch_denied":
+        assert evaluations == [] and "denied" in actual
+        assert not any(r.status == "applied" for r in p.rt.receipts.values())
+    else:
+        assert evaluations == ["read_file"]  # exactly one real dispatch
+        assert "reused_from" not in actual and "Synthetic source:" in actual
+        assert not any(r.status == "applied" for r in p.rt.receipts.values())
+    assert not p.rt.drain_at_safe_point()
 
 
-@pytest.mark.parametrize('aba', [False, True])
-def test_public_native_admission_wins_after_last_census(factory, monkeypatch, aba):
-    from agent.owned_delegation_planning import _no_native_workers
+@pytest.mark.parametrize("aba", [False, True])
+def test_native_admission_after_census_vetoes_reuse(factory, monkeypatch, aba):
+    from agent.supervision_read_reuse import ReadReuse
     p = factory(); rows = requests(p); p.commit(rows); read(p, rows[0])
-    args = rows[1]['operation']['arguments']
-    ident, result = p.call('read_file', args, settle=False)
-    graph = p.rt.dependencies.planning
-    original = graph.read_intent
-    scopes, observations = [], []
-    # Arm after ordinary wrapping, immediately before the canonical consumer.
-    original_content = p.a._tool_result_content_for_active_model
-    armed = []
-    def content(*a, **kw):
-        value = original_content(*a, **kw)
-        armed.append(True)
-        return value
-    monkeypatch.setattr(p.a, '_tool_result_content_for_active_model', content)
-    def census_then_competitor(arguments, call_id):
-        view = original(arguments, call_id)
-        if armed and view is not None and not observations:
-            scope = pending_native_launch(p, monkeypatch)
-            scope.__enter__(); scopes.append(scope)
-            assert not _no_native_workers(p.owner, p.a)
-            assert original(arguments, call_id) is None
-            if aba:
-                scopes.pop().__exit__(None, None, None)
-                assert _no_native_workers(p.owner, p.a)
-                assert original(arguments, call_id) == view
-            observations.append(call_id)
-        return view  # actual observed census, not a synthetic currentness result
-    monkeypatch.setattr(graph, 'read_intent', census_then_competitor)
-    try:
-        assert commit(p, args, ident, result) is not None
-        assert observations == [ident]
-        assert not [r for r in p.rt.receipts.values() if r.status == 'applied']
-        assert 'Task-bound advisory' not in str(p.a._session_db.get_messages(p.a.session_id))
-        assert len(feature_calls(p.native, 'F04')) == 1 and 'Synthetic source:' in result
-    finally:
-        for scope in scopes:
-            scope.__exit__(None, None, None)
+    evaluations = []
+    monkeypatch.setattr("agent.tool_executor._run_with_activity_heartbeat",
+                        lambda agent, name, run: evaluations.append(name) or run())
+    original = ReadReuse.consume
+    def interleave(selected, owner):
+        with pending_native_launch(p, monkeypatch):
+            if not aba:
+                return original(selected, owner)
+        return original(selected, owner)  # native epoch catches completed admission too
+    monkeypatch.setattr(ReadReuse, "consume", interleave)
+    _, result = p.call("read_file", rows[1]["operation"]["arguments"], settle=False)
+    assert evaluations == ["read_file"] and "reused_from" not in result
+    assert len(feature_calls(p.native, "F04")) == 1
+    assert not any(r.status == "applied" for r in p.rt.receipts.values())

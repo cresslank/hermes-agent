@@ -8,11 +8,19 @@ import json
 import importlib.metadata
 import socket
 import sqlite3
+import os
+import sys
+from pathlib import Path
 from dataclasses import replace
 from types import SimpleNamespace
 
 import pytest
 
+source = os.environ.get("JEV_SUPERVISOR_SOURCE")
+if source:
+    source = Path(source).resolve() / "src"
+    assert (source / "jev_supervisor" / "__init__.py").is_file()
+    sys.path.insert(0, str(source))
 pytest.importorskip("jev_supervisor")
 from jev_supervisor.config import ENDPOINT
 from jev_supervisor.host_adapter import _ACTION as JEV_NATIVE_ACTIONS
@@ -429,13 +437,13 @@ def test_native_receipt_admission_contract_without_codec_substitution(native, tm
     assert not native.calls  # no claim that this local provider proof is the Jev codec
 
 
-def test_f07_main_check_receives_hint_not_a_replacement_receipt(native, tmp_path, monkeypatch):
+def test_f07_main_check_receives_existing_receipt(native, tmp_path, monkeypatch):
     from agent.verification_evidence import propose_verification_reuse
     receipt = record_native_check(native, tmp_path, monkeypatch)
     pending = check(plugin_owned=False)
     with bind_subagent_parent(native.rig.agent):
         hint = propose_verification_reuse(pending, current=lambda: pending)
-    assert isinstance(hint, str) and "verification:" + str(receipt["id"]) in hint
+    assert hint == receipt
     assert feature_calls(native, "F07")
     with sqlite3.connect(native.rig.home / "verification_evidence.db") as conn:
         assert conn.execute("SELECT id FROM verification_events").fetchall() == [(receipt["id"],)]

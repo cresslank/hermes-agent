@@ -716,16 +716,18 @@ def _dispatch_authorized_once(
 
     from agent.supervision_policy import runtime_for_agent
     supervision = runtime_for_agent(agent)
+    read_reuse = None
     if supervision is not None:
-        if ref.name == "read_file":
-            from agent.supervision_efficiency import observe_native
-            observe_native(agent, "read_proposed", ref.args, ref.call_id)
-        advisory = supervision.prepare_action(ref.name, ref.args, ref.call_id)
-        if advisory:
-            _advance_start_order()
-            state.blocked = True
-            return json.dumps({"error": advisory, "type": "supervision_advisory", "executed": False})
-        supervision.mark_dispatched(ref.call_id)
+        with supervision.decision_boundary():
+            advisory = supervision.prepare_action(ref.name, ref.args, ref.call_id)
+            if advisory:
+                _advance_start_order()
+                state.blocked = True
+                return json.dumps({"error": advisory, "type": "supervision_advisory", "executed": False})
+            if ref.name == "read_file":
+                from agent.supervision_efficiency import observe_native
+                read_reuse = observe_native(agent, "read_proposed", ref.args, ref.call_id)
+            supervision.mark_dispatched(ref.call_id)
 
     from agent.terminal_approval_batch import prepare_current_terminal
     from agent.owned_delegation import dispatch_fence, ControlDenied
@@ -735,6 +737,11 @@ def _dispatch_authorized_once(
         # concurrent and inline (including nested delegate) execution. Denied
         # capabilities must not open a terminal approval prompt either.
         with dispatch_fence(agent, ref.name, ref.args):
+            if read_reuse is not None:
+                reused = read_reuse.consume(getattr(supervision, "efficiency"))
+                if reused is not None:
+                    _advance_start_order()
+                    return reused
             prepare_current_terminal(ref)
             _advance_start_order(lambda: _begin_tool_execution(agent, ref, display_index))
             started = True

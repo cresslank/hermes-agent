@@ -556,7 +556,7 @@ def _consume_supplemental_receipt(conn, receipt, consume):
 
 
 def propose_verification_reuse(check, *, current, exact=False):
-    """Optional check-owner boundary; required checks and absent supervisor run normally."""
+    """Return a current prior receipt or None; never claim a skipped check executed."""
     from agent.subagent_lifecycle import get_active_subagent_parent
     from agent.supervision_efficiency import for_agent
     agent = get_active_subagent_parent()

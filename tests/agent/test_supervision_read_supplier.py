@@ -47,14 +47,17 @@ def read(p, row, *, unchanged=False):
     return ident, result
 
 
-def test_configured_ordinary_read_supplier_consumes_one_advisory(factory):
+def test_configured_ordinary_read_supplier_reuses_exact_recorded_bytes(factory):
     p = factory()
     rows = requests(p)
     p.commit(rows)
     first, first_bytes = read(p, rows[0])
     assert not feature_calls(p.native, "F04")
     assert p.native.owner.read_payloads[first] == first_bytes.encode()
-    second, _ = read(p, rows[1])
+    second, result = read(p, rows[1])
+    reused = json.loads(result)
+    assert reused["executed"] is False and reused["reused_from"] == "tool:" + first
+    assert reused["result"] == first_bytes
     assert len(feature_calls(p.native, "F04")) == 1
     facts = feature_calls(p.native, "F04")[0]["state"]["facts"]
     assert facts["proposed"]["id"] == second
@@ -70,12 +73,12 @@ def test_configured_ordinary_read_supplier_consumes_one_advisory(factory):
     assert "tool:" + first in json.loads(durable[2])
     original = copy.deepcopy(p.history)
     view = assemble(p.a, p.history)
-    assert "Task-bound advisory" in str(view.api_messages)
+    assert "reused_from" in str(view.api_messages)
     assert "tool:" + first in str(view.api_messages)
     assert p.history == original
     assert not p.rt.drain_at_safe_point()  # no second delivery; history remains intact
     stored = p.a._session_db.get_messages(p.a.session_id)
-    assert "Task-bound advisory" in str(stored)
+    assert "reused_from" in str(stored)
     assert not p.owner.list_owned()  # F04 never creates or cancels a child
 
 

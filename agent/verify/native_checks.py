@@ -20,7 +20,7 @@ from agent.supervision_efficiency import VerificationCheck, _pin
 
 VERSION = "hermes.verify-check.v1"
 MAX_BYTES = 65536
-FLAGS = VerificationCheck.protected_fields()
+FLAGS = ("required", "external_write_readback", "acceptance_test", "independent_review", "time_sensitive", "explicit_user_check")
 BASE_KEYS = {"version", "path", "kind", "keys", "description"}
 
 
@@ -57,7 +57,7 @@ def _bytes(path, limit=MAX_BYTES):
 
 def _spec(raw, root):
     if (type(raw) is not dict or not BASE_KEYS <= raw.keys()
-            or not raw.keys() <= BASE_KEYS | set(FLAGS) or raw["version"] != VERSION
+            or not raw.keys() <= BASE_KEYS | set(FLAGS) | {"fresh"} or raw["version"] != VERSION
             or raw["kind"] != "json_object_keys"
             or type(raw["path"]) is not str or not raw["path"]
             or type(raw["description"]) is not str or not 0 < len(raw["description"]) <= 600
@@ -97,7 +97,7 @@ def _evaluate(data, keys):
 def _capture_contract(raw, path, ident, *, plugin_owned):
     data = _bytes(path)
     # Missing/unknown flags remain unknown. Never derive them from names/prose.
-    if any(type(raw.get(k)) is not bool for k in FLAGS):
+    if any(type(raw.get(k)) is not bool for k in FLAGS) or type(raw.get("fresh", False)) is not bool:
         return data, None
     claims = tuple("json:" + _pin((str(path), assertion)) for assertion in
                    ("object", *("key:" + k for k in sorted(raw["keys"]))))
@@ -119,7 +119,7 @@ def _capture_contract(raw, path, ident, *, plugin_owned):
         claim_ids=claims, snapshot=_pin((str(path), hashlib.sha256(data).hexdigest(), scope)),
         input_fingerprint=_pin(("utf-8", str(path), hashlib.sha256(data).hexdigest())),
         dependency_fingerprint=dependency, environment=environment,
-        plugin_owned=plugin_owned, **{k: raw[k] for k in FLAGS})
+        plugin_owned=plugin_owned, fresh=raw.get("fresh", False), **{k: raw[k] for k in FLAGS})
     return data, check
 
 
@@ -131,7 +131,7 @@ def _active():
 
 
 def run_native_checks(root, specs, *, owner=None):
-    """Called by run_verify; main execution is never replaced, including CLI runs."""
+    """Run each check or return its still-valid earlier receipt with provenance."""
     if (type(specs) is not list or len(specs) > 8
             or owner is not None and not isinstance(owner, _OptionalOwner)):
         return [{"ok": False, "error": "invalid_native_checks"}]
@@ -175,10 +175,8 @@ def _run_one(root, raw, owner):
         def reuse_current():
             return current() if owner is None or owner.reuse_allowed() else None
         reuse = propose_verification_reuse(check, current=reuse_current, exact=True)
-    if owner is not None and isinstance(reuse, dict):
-        return {"ok": True, "reused": True, "receipt": reuse}
-    # A main advisory is consumed in this normal runner result, never execution control.
-    advisory = reuse if isinstance(reuse, str) else None
+    if isinstance(reuse, dict):
+        return {"ok": True, "reused": True, "executed": False, "receipt": reuse}
     if owner is not None and not owner.authorized(path, raw):
         return {"ok": False, "error": "native_check_not_authorized"}
     # Recapture after semantic wait: a stale proposal cannot cause stale execution.
@@ -200,8 +198,7 @@ def _run_one(root, raw, owner):
         ok=ok, command="hermes verify native-check", supplemental=True,
         output=json.dumps({"path": str(path), "keys": raw["keys"], "ok": ok}),
         supervision_check=latest)
-    return {"ok": ok, "reused": False, "receipt": receipt,
-            **({"advisory": advisory} if advisory else {})}
+    return {"ok": ok, "reused": False, "receipt": receipt}
 
 
 class _OptionalOwner:

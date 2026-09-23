@@ -94,10 +94,11 @@ class VerificationCheck:
     time_sensitive: bool
     explicit_user_check: bool
     plugin_owned: bool = False
+    fresh: bool = False
 
     def __post_init__(self):
         if (not all(_text(getattr(self, k)) for k in ("id", "text", *self.fingerprint_fields()))
-                or not _ids(self.claim_ids) or any(type(getattr(self, k)) is not bool for k in (*self.protected_fields(), "plugin_owned"))):
+                or not _ids(self.claim_ids) or any(type(getattr(self, k)) is not bool for k in (*self.protected_fields(), "required", "acceptance_test", "explicit_user_check", "plugin_owned"))):
             raise ValueError("invalid_verification_contract")
 
     @staticmethod
@@ -106,7 +107,7 @@ class VerificationCheck:
 
     @staticmethod
     def protected_fields():
-        return ("required", "external_write_readback", "acceptance_test", "independent_review", "time_sensitive", "explicit_user_check")
+        return ("external_write_readback", "independent_review", "time_sensitive", "fresh")
 
     @property
     def protected(self):
@@ -303,7 +304,7 @@ class EfficiencyOwner:
             spans.update((r.id, r.text) for r in work_map["requirement_spans"])
         return {"id": refs[0], "text": spans[refs[0]]} if refs[0] in spans else None
 
-    def _emit(self, event, facts, target, refs, *, routes=(), wait=False, relations=(), valid=None, select_only=False):
+    def _emit(self, event, facts, target, refs, *, routes=(), wait=False, relations=(), valid=None, select_only=False, actions=(Action.ADVISE,)):
         key = (event, target)
         with self.lock:
             if key in self.emitted or len(self.emitted) >= 64:
@@ -318,7 +319,7 @@ class EfficiencyOwner:
         rt = self.runtime
         deadline = rt.shared_deadline() if wait else None
         snapshot = rt.observe(event, facts, target_id=target, evidence_refs=refs,
-                              actions=(Action.ADVISE,), candidates=tuple(r.id for r in routes),
+                              actions=actions, candidates=tuple(r.id for r in routes),
                               owner="efficiency", completeness=OpportunityCompleteness(),
                               relations=relations, deadline=deadline, data_class="project_excerpt")
         if snapshot is None:
@@ -328,7 +329,7 @@ class EfficiencyOwner:
             try:
                 if select_only:
                     with rt.lock:
-                        return rt._take(target, {Action.ADVISE})
+                        return rt._take(target, set(actions))
                 return self.consume(target, routes=routes)
             finally:
                 rt.mark_dispatched(target)
@@ -506,7 +507,7 @@ class EfficiencyOwner:
             valid=still_stalled)
 
     def before_read(self, arguments, call_id):
-        """Recommend prior exact local read receipts, but NEVER suppress main calls."""
+        """Select existing recorded bytes; only final authorized dispatch may reuse."""
         self.runtime._assert_owner(tool_worker=True)
         if not isinstance(arguments, dict) or not _text(call_id):
             return None
@@ -519,7 +520,9 @@ class EfficiencyOwner:
         path = arguments.get("path")
         if intent is None or not isinstance(path, str) or not _text(path):
             return None
-        requirement = {"id": intent["requirement_id"]}
+        requirement = self._requirement("read_file", arguments)
+        if requirement is None or requirement["id"] != intent["requirement_id"]:
+            return None
         try:
             resolved = Path(path).resolve(strict=True)
             stat = resolved.stat()
@@ -529,7 +532,8 @@ class EfficiencyOwner:
             return None
         snapshot = _pin((str(resolved), stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns))
         operation = {"id": call_id, "objective": "Read " + path,
-            "acceptance": "Requested line window " + json.dumps({k: arguments.get(k) for k in ("offset", "limit")}),
+            "acceptance": "Requested line window " + json.dumps({k: arguments.get(k) for k in ("offset", "limit")}) +
+                "; current user obligation: " + requirement["text"],
             "requirement_id": requirement["id"], "task_id": self.runtime.revision.work_id,
             "target": str(resolved), "scope": "file_read", "snapshot": snapshot,
             "cwd": str(resolved.parent), "consumer_ids": [requirement["id"]], "independent_check": False,
@@ -537,7 +541,7 @@ class EfficiencyOwner:
         with self.lock:
             self._sync()
             # A current authenticated consumer census, not the legacy setter,
-            # establishes no corroboration need. Every main read still executes.
+            # establishes no corroboration need. Selection alone suppresses nothing.
             candidates = [v for v in self.reads.values() if v["target"] == str(resolved)
                           and v["snapshot"] == snapshot and v["requirement_id"] == requirement["id"]][-4:]
             if len(self.read_pending) < 32:
@@ -571,13 +575,10 @@ class EfficiencyOwner:
             return None
         selected = self._emit("operation_proposed", {"proposed": operation, "candidates": candidates,
             "exact_reusable": False}, call_id, (requirement["id"], *(c["source_ref"] for c in candidates)),
-            wait=True, valid=current, select_only=True)
+            wait=True, valid=current, select_only=True, actions=(Action.REUSE_CANDIDATE,))
         if selected is not None:
-            from agent.supervision_read_advisory import ReadAdvisory
-            with self.lock:
-                self.read_advisories[call_id] = ReadAdvisory(
-                    *selected, dict(arguments), intent, native_epoch, current)
-        # Selection is neither an applied effect nor a generic drainable hint.
+            from agent.supervision_read_reuse import ReadReuse
+            return ReadReuse(*selected, dict(arguments), intent, native_epoch, current)
         return None
 
     def read_completed(self, call_id, *, failed, result=None):
@@ -661,11 +662,15 @@ class EfficiencyOwner:
         return True
 
     def propose_check(self, pending, *, current, exact=False):
+        with self.runtime.decision_boundary():
+            return self._propose_check(pending, current=current, exact=exact)
+
+    def _propose_check(self, pending, *, current, exact=False):
         """A check-owner API returning a bound prior receipt, never verification success.
 
-        Only plugin-owned OPTIONAL checks may reuse. Main-agent checks receive an
-        advisory separately, and all required checks preserve baseline. current()
-        revalidates the owner's fingerprints at the final consumption boundary.
+        Required/main verification may be satisfied by an already valid receipt.
+        Fresh, independent, time-sensitive and external-write readbacks still run.
+        current() revalidates the entire contract at final consumption.
         """
         self.runtime._assert_owner(tool_worker=True)
         if not isinstance(pending, VerificationCheck) or pending.protected or not callable(current):
@@ -697,7 +702,7 @@ class EfficiencyOwner:
             return None
         # Only an identical owner contract is deterministic; matching command
         # names or partial fingerprints never establish this branch.
-        if exact and pending.plugin_owned and pending.text == prior.text and pending.claim_ids == prior.claim_ids:
+        if exact and pending.text == prior.text and pending.claim_ids == prior.claim_ids:
             from agent.supervision_facade import registrations_for_scope
             def consume_exact():
                 if (owner_current() and not self.runtime.closed
@@ -713,7 +718,7 @@ class EfficiencyOwner:
         rt = self.runtime
         deadline = rt.shared_deadline()
         snapshot = rt.observe("verification_proposed", facts, target_id=pending.id,
-            actions=(Action.REUSE_RECEIPT if pending.plugin_owned else Action.ADVISE,),
+            actions=(Action.REUSE_RECEIPT,),
             evidence_refs=(receipt_id, *pending.claim_ids),
             owner="efficiency.check", completeness=OpportunityCompleteness(),
             deadline=deadline, data_class="project_excerpt")
@@ -741,11 +746,8 @@ class EfficiencyOwner:
                     return "applied"
                 return with_current_verification_receipt(receipt, admit) or "stale"
         try:
-            if pending.plugin_owned:
-                rt.consume_owner_action(pending.id, Action.REUSE_RECEIPT, apply)
-                return result[0] if result else None
-            self.guards[pending.id] = lambda: bool(with_current_verification_receipt(receipt, owner_current))
-            return self.consume(pending.id)
+            rt.consume_owner_action(pending.id, Action.REUSE_RECEIPT, apply)
+            return result[0] if result else None
         finally:
             self.guards.pop(pending.id, None)
             rt.mark_dispatched(pending.id)  # late answers cannot replace the owner's baseline
@@ -764,7 +766,7 @@ def observe_native(agent, event, *args, **kwargs):
         if owner is None:
             return
         if event == "read_proposed":
-            owner.before_read(*args, **kwargs)
+            return owner.before_read(*args, **kwargs)
         elif event == "tool_result":
             name, arguments, result = args
             owner.read_completed(kwargs["call_id"], failed=kwargs["failed"], result=result)

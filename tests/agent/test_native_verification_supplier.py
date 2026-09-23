@@ -111,7 +111,7 @@ def test_exact_repeat_skips_evaluator_without_semantics(native, tmp_path, monkey
     assert not feature_calls(native, "F07")
 
 
-@pytest.mark.parametrize("flag", FLAGS)
+@pytest.mark.parametrize("flag", ["external_write_readback", "independent_review", "time_sensitive", "fresh"])
 def test_protected_checks_execute_even_if_recipe_calls_them_optional(native, tmp_path, monkeypatch, flag):
     prepare(native, tmp_path, monkeypatch, **{flag: True})
     evaluations, runs = track(monkeypatch)
@@ -121,7 +121,7 @@ def test_protected_checks_execute_even_if_recipe_calls_them_optional(native, tmp
     assert not feature_calls(native, "F07")
 
 
-def test_normal_cli_consumes_advisory_but_always_executes_main_checks(native, tmp_path, monkeypatch, capsys):
+def test_normal_cli_reuses_exact_receipt_without_reexecuting_main_check(native, tmp_path, monkeypatch, capsys):
     root, _, _ = prepare(native, tmp_path, monkeypatch, second=False)
     evaluations, runs = track(monkeypatch)
     hook(native)
@@ -129,11 +129,10 @@ def test_normal_cli_consumes_advisory_but_always_executes_main_checks(native, tm
     with bind_subagent_parent(native.rig.agent):
         assert run_verify_command(make_args(root, phase=["test"])) == 0
     payload = json.loads(capsys.readouterr().out)
-    assert len(evaluations) == 2
-    assert not payload["checks"][0]["reused"]
-    assert "Task-bound advisory" in payload["checks"][0]["advisory"]
-    assert len(feature_calls(native, "F07")) == 1
-    assert payload["checks"][0]["receipt"]["id"] != runs[0].checks[0]["receipt"]["id"]
+    assert len(evaluations) == 1
+    assert payload["checks"][0]["reused"] and payload["checks"][0]["executed"] is False
+    assert not feature_calls(native, "F07")  # identical owner contract, no inference
+    assert payload["checks"][0]["receipt"] == runs[0].checks[0]["receipt"]
 
 
 @pytest.mark.parametrize("case", ["source", "dependency", "environment", "unknown_dependency", "ledger_edit", "ledger_failed"])
@@ -226,7 +225,9 @@ def test_unusable_semantic_result_executes_original(native, tmp_path, monkeypatc
     prepare(native, tmp_path, monkeypatch)
     evaluations, runs = track(monkeypatch)
     if case == "expired":
-        native.runtime.round_deadline = native.runtime.clock() - 1
+        # Expire this decision, not an unrelated earlier round's allowance.
+        import time
+        native.on_response.append(lambda: time.sleep(1.1))
     elif case == "error":
         def fail():
             raise RuntimeError("synthetic transport failure")
@@ -285,6 +286,10 @@ def test_stale_main_advisory_cannot_suppress_native_execution(native, tmp_path, 
     root, _, _ = prepare(native, tmp_path, monkeypatch, second=False)
     evaluations, _ = track(monkeypatch)
     hook(native)
+    manifest = root / ".hermes/environment.json"
+    doc = json.loads(manifest.read_text())
+    doc["recipe"]["nativeChecks"][0]["description"] = "Confirm metadata name again"
+    manifest.write_text(json.dumps(doc))
     native.on_response.append(lambda: accept(native.rig.agent, "- New scope.", continuation=True))
     from hermes_cli.verify_cmd import run_verify_command
     with bind_subagent_parent(native.rig.agent):
