@@ -261,6 +261,8 @@ class TurnExplainersMixin:
                     for _p in landed_paths:
                         with suppress(Exception):
                             mgr.record_agent_write(_p)
+        from agent.supervision_context import record_committed_write
+        record_committed_write(self, tool_name, args, result, landed=landed, task_id=task_id)
         if is_error and not landed:
             # Keep the FIRST error per path unless a later success replaces it.
             preview = _extract_error_preview(result)

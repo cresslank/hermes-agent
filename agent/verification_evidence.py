@@ -374,7 +374,8 @@ def _prune_old_events(conn: sqlite3.Connection, *, session_id: str, root: str) -
     """
     cutoff = (datetime.now(timezone.utc) - timedelta(days=_MAX_EVIDENCE_AGE_DAYS)).isoformat()
     conn.execute(
-        "DELETE FROM verification_events WHERE session_id = ? AND root = ? AND id NOT IN ("
+        "DELETE FROM verification_events WHERE session_id = ? AND root = ? "
+        "AND id NOT IN (SELECT last_event_id FROM verification_state WHERE last_event_id IS NOT NULL) AND id NOT IN ("
         " SELECT id FROM verification_events WHERE session_id = ? AND root = ?"
         " ORDER BY id DESC LIMIT ?)",
         (session_id, root, session_id, root, _MAX_EVENTS_PER_SESSION_ROOT),
@@ -465,7 +466,8 @@ def record_terminal_result(
 
 def record_verify_run(
     *, root: str | Path, session_id: str | None = None, ok: bool, command: str = "hermes verify",
-    scope: str = "full", output: str = "",
+    scope: str = "full", output: str = "", supervision_check=None,
+    supplemental: bool = False,
 ) -> Optional[dict[str, Any]]:
     """Record a completed ``hermes verify`` run as verification evidence.
 
@@ -476,13 +478,90 @@ def record_verify_run(
     if not _ledger_enabled():
         return None
     resolved = str(Path(root).resolve())
-    return _insert_evidence(VerificationEvidence(
+    receipt = _insert_evidence(VerificationEvidence(
         command=command, canonical_command="hermes verify", kind="verify",
-        scope=scope if scope in {"full", "targeted"} else "full",
+        scope="supplemental" if supplemental else (scope if scope in {"full", "targeted"} else "full"),
         status="passed" if ok else "failed", exit_code=0 if ok else 1, cwd=resolved,
         root=str((_project_facts(root) or {}).get("root") or resolved),
         session_id=str(session_id or "default"), output_summary=_summarize_output(output),
     ))
+    if supervision_check is not None:
+        from agent.subagent_lifecycle import get_active_subagent_parent
+        from agent.supervision_efficiency import for_agent
+        agent = get_active_subagent_parent()
+        owner = for_agent(agent) if agent is not None else None
+        if owner is not None:
+            owner.record_check(supervision_check, receipt, validated=ok)
+    return receipt
+
+
+def with_current_verification_receipt(receipt, consume):
+    """Bounded optional receipt admission under native and SQLite writer fences.
+
+    Never initialize a DB, wait for its lock, or promote a shell success. A newer
+    result (including a failure), any recorded edit, missing row or busy/unavailable
+    ledger preserves baseline. An immediate transaction also excludes writers on
+    other connections in WAL mode; it makes no data changes. ``consume`` is the
+    synchronous native owner commit, not a plugin callback; it must not perform
+    provider I/O or acquire another owner lock.
+    """
+    if not _ledger_enabled() or not isinstance(receipt, dict) or receipt.get("kind") != "verify":
+        return None
+    if not _DB_LOCK.acquire(blocking=False):
+        return None
+    conn = None
+    try:
+        conn = sqlite3.connect(_db_path().resolve().as_uri() + "?mode=rw", uri=True, timeout=0)
+        conn.row_factory = sqlite3.Row
+        conn.execute("BEGIN IMMEDIATE")
+        if receipt.get("scope") == "supplemental":
+            return _consume_supplemental_receipt(conn, receipt, consume)
+        row = conn.execute(
+            "SELECT e.*, s.last_edit_at FROM verification_events e JOIN verification_state s "
+            "ON s.session_id=e.session_id AND s.root=e.root AND s.last_event_id=e.id "
+            "WHERE e.id=? AND e.session_id=? AND e.root=?",
+            (receipt.get("id"), receipt.get("session_id"), receipt.get("root")),
+        ).fetchone()
+        if (row is None or row["last_edit_at"] is not None or row["status"] != "passed"
+                or row["kind"] != "verify" or row["exit_code"] != 0):
+            return None
+        native = dict(row)
+        native.pop("last_edit_at")
+        if native != receipt:
+            return None
+        return consume()
+    except (OSError, ValueError, sqlite3.Error):
+        return None
+    finally:
+        if conn is not None:
+            conn.close()
+        _DB_LOCK.release()
+
+
+def _consume_supplemental_receipt(conn, receipt, consume):
+    # A supplemental success is never workspace-green. Any later verification or
+    # recorded mutation invalidates it, in addition to the runner's fresh pins.
+    row = conn.execute(
+        "SELECT e.* FROM verification_events e WHERE e.id=? AND e.session_id=? AND e.root=? "
+        "AND NOT EXISTS (SELECT 1 FROM verification_events n WHERE n.session_id=e.session_id "
+        "AND n.root=e.root AND n.id>e.id) "
+        "AND NOT EXISTS (SELECT 1 FROM verification_state s WHERE s.session_id=e.session_id "
+        "AND s.root=e.root AND s.last_edit_at>=e.created_at)",
+        (receipt.get("id"), receipt.get("session_id"), receipt.get("root")),
+    ).fetchone()
+    if (row is None or dict(row) != receipt or row["status"] != "passed"
+            or row["kind"] != "verify" or row["exit_code"] != 0):
+        return None
+    return consume()
+
+
+def propose_verification_reuse(check, *, current, exact=False):
+    """Optional check-owner boundary; required checks and absent supervisor run normally."""
+    from agent.subagent_lifecycle import get_active_subagent_parent
+    from agent.supervision_efficiency import for_agent
+    agent = get_active_subagent_parent()
+    owner = for_agent(agent) if agent is not None else None
+    return owner.propose_check(check, current=current, exact=exact) if owner is not None else None
 
 
 def _insert_evidence(evidence: VerificationEvidence) -> dict[str, Any]:
@@ -501,20 +580,25 @@ def _insert_evidence(evidence: VerificationEvidence) -> dict[str, Any]:
         if cur.lastrowid is None:
             raise RuntimeError("verification event insert did not return an id")
         event_id = int(cur.lastrowid)
-        conn.execute(
-            "INSERT INTO verification_state("
-            " session_id, root, last_event_id, last_edit_at, changed_paths_json"
-            ") VALUES (?, ?, ?, NULL, '[]')"
-            " ON CONFLICT(session_id, root) DO UPDATE SET"
-            " last_event_id = excluded.last_event_id,"
-            " last_edit_at = NULL,"
-            " changed_paths_json = '[]'",
-            (e.session_id, e.root, event_id),
-        )
+        if e.scope != "supplemental":
+            _advance_verification_state(conn, sid=e.session_id, root=e.root, event_id=event_id)
         _prune_old_events(conn, session_id=e.session_id, root=e.root)
         conn.commit()
 
     return {"id": event_id, **e.__dict__, "created_at": created_at}
+
+
+def _advance_verification_state(conn, *, sid, root, event_id):
+    conn.execute(
+        "INSERT INTO verification_state("
+        " session_id, root, last_event_id, last_edit_at, changed_paths_json"
+        ") VALUES (?, ?, ?, NULL, '[]')"
+        " ON CONFLICT(session_id, root) DO UPDATE SET"
+        " last_event_id = excluded.last_event_id,"
+        " last_edit_at = NULL,"
+        " changed_paths_json = '[]'",
+        (sid, root, event_id),
+    )
 
 
 def mark_workspace_edited(

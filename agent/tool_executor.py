@@ -714,10 +714,43 @@ def _dispatch_authorized_once(
     elif ref.name == "skill_manage":
         agent._iters_since_skill = 0
 
+    from agent.supervision_policy import runtime_for_agent
+    supervision = runtime_for_agent(agent)
+    if supervision is not None:
+        if ref.name == "read_file":
+            from agent.supervision_efficiency import observe_native
+            observe_native(agent, "read_proposed", ref.args, ref.call_id)
+        advisory = supervision.prepare_action(ref.name, ref.args, ref.call_id)
+        if advisory:
+            _advance_start_order()
+            state.blocked = True
+            return json.dumps({"error": advisory, "type": "supervision_advisory", "executed": False})
+        supervision.mark_dispatched(ref.call_id)
+
     from agent.terminal_approval_batch import prepare_current_terminal
-    prepare_current_terminal(ref)
-    _advance_start_order(lambda: _begin_tool_execution(agent, ref, display_index))
-    return _run_with_activity_heartbeat(agent, ref.name, lambda: execute(ref.args))
+    from agent.owned_delegation import dispatch_fence, ControlDenied
+    started = False
+    try:
+        # Last boundary AFTER plugin/Relay argument rewrites, shared by sequential,
+        # concurrent and inline (including nested delegate) execution. Denied
+        # capabilities must not open a terminal approval prompt either.
+        with dispatch_fence(agent, ref.name, ref.args):
+            prepare_current_terminal(ref)
+            _advance_start_order(lambda: _begin_tool_execution(agent, ref, display_index))
+            started = True
+            from agent.supervision_tool_attempts import run_attempt
+            from agent.supervision_planning import run_capture
+            return _run_with_activity_heartbeat(agent, ref.name,
+                lambda: run_capture(agent, ref.name, ref.args, ref.call_id,
+                    lambda: run_attempt(agent, ref.name, ref.args, ref.call_id, ref.task_id, lambda: execute(ref.args))))
+    except ControlDenied:
+        if not started:
+            _advance_start_order()
+        state.blocked = True
+        return _blocked_tool_result(
+            agent, ref, block_message="Owned child dispatch denied by control/effect policy",
+            block_error_type="owned_delegation_fence", guardrail_decision=None,
+        )
 
 
 def _run_agent_tool_execution_middleware(
@@ -1084,6 +1117,13 @@ def _commit_tool_result(
             env=get_active_env(effective_task_id),
             config=budget,
         )
+    # Single canonical result boundary for direct, deferred, inline, execute_code,
+    # connector and concurrent calls; never transform each dispatch route twice.
+    from agent.supervision_views import canonical_result_view
+    persisted_result = canonical_result_view(
+        agent, function_result, persisted_result, tool_name=function_name, call_id=tool_call_id,
+        env=get_active_env(effective_task_id), budget=budget,
+    )
     _record_persisted_path_for_stub(agent, tool_call_id, persisted_result)
 
     subdir_hints = agent._subdirectory_hints.check_tool_call(function_name, function_args)
@@ -1097,9 +1137,28 @@ def _commit_tool_result(
     # Multimodal dicts become an OpenAI-style content list; text-only servers get a
     # string-safe fallback so a rejected image result never poisons history.
     _tool_content = agent._tool_result_content_for_active_model(function_name, persisted_result)
+    from agent.supervision_policy import runtime_for_agent
+    supervision = runtime_for_agent(agent)
+    if supervision is not None and isinstance(_tool_content, str):
+        advisory = supervision.drain_at_safe_point()
+        if advisory:
+            _tool_content += "\n\n" + advisory[0]
     tool_message = make_tool_result_message(function_name, _tool_content, tool_call_id, effect_disposition=effect_disposition)
-    messages.append(tool_message)
-    if not _flush_session_db_after_tool_progress(agent, messages, stage=f"tool result {function_name}"):
+    from agent.supervision_read_advisory import append_at_tool_result, acknowledge_tool_result
+    read_advisory = None
+    if supervision is not None:
+        tool_message, read_advisory = append_at_tool_result(
+            supervision, messages, tool_message, name=function_name, arguments=function_args,
+            call_id=tool_call_id, result=function_result, failed=is_error or blocked,
+        )
+    if read_advisory is None:
+        messages.append(tool_message)
+    persisted = False
+    try:
+        persisted = _flush_session_db_after_tool_progress(agent, messages, stage=f"tool result {function_name}")
+    finally:
+        acknowledge_tool_result(supervision, read_advisory, tool_message, persisted=persisted)
+    if not persisted:
         return None
 
     if not blocked:
@@ -1147,6 +1206,10 @@ def _finalize_tool_batch(agent, messages: list, effective_task_id: str, num_tool
     steer marker is never truncated/discarded when enforcement replaces a result."""
     if num_tools <= 0:
         return
+    from agent.supervision_policy import runtime_for_agent
+    supervision = runtime_for_agent(agent)
+    if supervision is not None:
+        supervision.committed_batch(messages)
     enforce_turn_budget(messages[-num_tools:], env=get_active_env(effective_task_id), config=budget)
     agent._apply_pending_steer_to_tool_results(messages, num_tools)
 

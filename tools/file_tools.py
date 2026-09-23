@@ -656,7 +656,9 @@ def read_file_tool(path: str, offset: int = 1, limit: int = DEFAULT_READ_LIMIT, 
         resolved_str = str(_resolved)
         cached_not_found = _check_not_found_cache("read", resolved_str, task_id)
         if cached_not_found is not None:
-            return cached_not_found
+            from agent.supervision_tool_attempts import publish_file_failure
+            return publish_file_failure(cached_not_found,
+                                        ("not_found", "unicode_recovery_and_similar_files", True))
 
         # Dedup: identical (path, offset, limit) on an unchanged file returns a
         # lightweight stub instead of re-sending the content.
@@ -683,7 +685,9 @@ def read_file_tool(path: str, offset: int = 1, limit: int = DEFAULT_READ_LIMIT, 
         if isinstance(_err, str) and _err.startswith("File not found:"):
             _record_not_found("read", resolved_str, task_id, json.dumps(result_dict, ensure_ascii=False))
         if _err or result_dict.get("is_binary"):
-            return json.dumps(result_dict, ensure_ascii=False)
+            from agent.supervision_tool_attempts import publish_file_failure
+            return publish_file_failure(json.dumps(result_dict, ensure_ascii=False),
+                                        getattr(result, "_attempt_failure", None))
 
         # Char budget on the FORMATTED content (what enters context), BEFORE
         # redaction (skip the regex pass on huge content); truncate gracefully
@@ -743,6 +747,9 @@ def read_file_tool(path: str, offset: int = 1, limit: int = DEFAULT_READ_LIMIT, 
                 f"You have read this exact file region {count} times consecutively. "
                 "The content has not changed since your last read. Use the information you already have. "
                 "If you are stuck in a loop, stop reading and proceed with writing or responding.")
+        from agent.supervision_context import record_file_owner_read
+        record_file_owner_read(path, result_dict, offset=offset, redacted=redacted,
+                               snapshot=getattr(result, "_snapshot", None))
         return json.dumps(result_dict, ensure_ascii=False)
     except Exception as e:
         return tool_error(str(e))
@@ -907,6 +914,8 @@ def write_file_tool(path: str, content: str, task_id: str = "default",
                     # Own write = current whole-file content: consecutive
                     # same-task writes stay unblocked. patch never does this.
                     _mark_full_write_baseline(_resolved, task_id, getattr(result, "_content_sha256", None))
+                    from agent.supervision_context import record_file_owner_commit
+                    record_file_owner_commit("write_file", _resolved, task_id=task_id, source_ref=path)
                 _note_edited(task_id, [path], path_to_resolved, session_id)
         return json.dumps(result_dict, ensure_ascii=False)
     except Exception as e:
@@ -1003,6 +1012,10 @@ def patch_tool(mode: str = "replace", path: str = None, old_string: str = None,
                 if len(_resolved_modified) == 1:
                     result_dict["resolved_path"] = _resolved_modified[0]
                 _note_edited(task_id, _paths_to_check, _path_to_resolved, session_id)
+                from agent.supervision_context import record_file_owner_commit
+                for _original_path, _committed_path in list(_path_to_resolved.items())[:8]:
+                    if _committed_path:
+                        record_file_owner_commit("patch", _committed_path, task_id=task_id, source_ref=_original_path)
                 # Clear failure counters so a future miss starts a fresh count.
                 _reset_patch_failures(task_id, [_r for _r in _path_to_resolved.values() if _r])
         # old_string-not-found hint. Failure escalation is tracked for replace

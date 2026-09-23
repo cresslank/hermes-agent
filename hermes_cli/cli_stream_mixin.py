@@ -7,6 +7,8 @@ never imports ``cli`` at module load time (import cycle).
 
 from __future__ import annotations
 
+from agent.native_emission import observe_agent_output
+
 import json
 import re
 import shutil
@@ -95,6 +97,9 @@ class CLIStreamMixin:
             self._pending_credit_notices = []
             colors = {"error": "\033[31m", "warn": "\033[33m", "success": "\033[32m", "info": _DIM}
             for level, text in pending:
+                from hermes_cli.cli_emission import correction_notice
+                if correction_notice(text):
+                    continue
                 _cprint(f"  {colors.get(level, _DIM)}{text}{_RST}")
         except Exception:
             pass
@@ -391,6 +396,7 @@ class CLIStreamMixin:
                 self._stream_prefilt = self._stream_prefilt[-_MAX_CLOSE_TAG_LEN:]
             return
 
+    @observe_agent_output
     def _emit_stream_line(self, printed_line: str) -> None:
         """Print one response line with the skin's true-color text escape (if any)."""
         from cli import _RST, _STREAM_PAD, _cprint

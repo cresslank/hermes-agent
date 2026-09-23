@@ -15,6 +15,19 @@ def is_warning_status(event_type: str, message: str) -> bool:
     return event_type == "warn" or isinstance(message, DiagnosticText)
 
 
+def optional_status_metadata(event_type, message, metadata):
+    """Existing warning classification outranks optional-progress proposals.
+
+    Metadata is provided by the status producer, never inferred from its prose.
+    Legacy unclassified events keep their ordinary presentation path.
+    """
+    if is_warning_status(event_type, message):
+        from dataclasses import replace
+        from agent.notification_presentation import OptionalUpdate
+        return replace(metadata, optional=False) if isinstance(metadata, OptionalUpdate) else None
+    return metadata
+
+
 def is_diagnostic_notice(notice) -> bool:
     """Out-of-band ``AgentNotice`` classification shared by the gateway, TUI and CLI sinks.
 

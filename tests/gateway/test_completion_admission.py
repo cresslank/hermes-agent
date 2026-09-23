@@ -120,3 +120,119 @@ async def test_unavailable_raw_route_is_quiet_without_hiding_invalid_routes(tmp_
         assert not api._background_tasks and not caplog.records
     finally:
         db.close()
+
+
+@pytest.mark.asyncio
+async def test_durable_gateway_fifo_consumes_each_sibling_at_normal_turn(owner, monkeypatch):
+    from hermes_state import AsyncSessionDB
+    from types import SimpleNamespace
+    from agent.turn_context import _stage_turn_user_message
+    runner = GatewayRunner(GatewayConfig())
+    runner._session_db = AsyncSessionDB(owner)
+    adapter = DiscordAdapter(PlatformConfig(enabled=True, typing_indicator=False))
+    runner.adapters = {Platform.DISCORD: adapter}
+    origin = SessionSource(platform=Platform.DISCORD, chat_type='dm', chat_id='42', user_id='42')
+    key = build_session_key(origin)
+    events = []
+    for i in range(2):
+        event = {'type':'async_delegation','delegation_id':f'durable-{i}', 'session_key':key,
+                 'parent_session_id':'target','dispatched_at':time.time(),'summary':f'result-{i}','status':'completed'}
+        delegation._persist_dispatch(event)
+        delegation._persist_completion(event, {'summary':event['summary']})
+        events.append(event)
+    observed = []
+    async def handler(event):
+        observed.append(event)
+        agent = SimpleNamespace(_session_db=owner, session_id='target')
+        metadata = event.metadata
+        _stage_turn_user_message(agent, event.text, None, None, None, None, metadata)
+    adapter.set_message_handler(handler)
+    try:
+        assert await runner._deliver_async_delegation_group(events) is True
+        await drain(adapter)
+        assert len(observed) == 1
+        assert len(observed[0].metadata['supervision_deliveries']) == 2
+        assert len(owner.get_messages('target')) == 1
+        for event in events:
+            assert delegation.get_durable_delegation(event['delegation_id'])['delivery_state'] == 'delivered'
+    finally:
+        await drain(adapter)
+        await runner._cancel_process_completion_batch_tasks()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('batch_size', [1, 2])
+async def test_durable_api_consumes_without_wake_and_retention_precedes_handler(owner, monkeypatch, batch_size):
+    from hermes_state import AsyncSessionDB
+    from gateway.platforms.api_server import APIServerAdapter
+    from agent import completion_admission as admission
+    from tests.agent.test_supervision_store import launch, optional
+    runner = GatewayRunner(GatewayConfig())
+    runner._session_db = AsyncSessionDB(owner)
+    api = APIServerAdapter(PlatformConfig())
+    api._ensure_session_db = lambda: owner
+    runner.adapters = {Platform.API_SERVER:api}
+    events = [launch(f'api-{i}', origin_session_id='target') for i in range(batch_size)]
+    for event in events:
+        delegation._persist_completion(event, {'summary':'api evidence'})
+    try:
+        assert await runner._deliver_async_delegation_group(events) is True
+        # API deliberately persists separate units, unlike one-turn messaging groups.
+        assert len(owner.get_messages('target')) == batch_size
+        for event in events:
+            assert delegation.get_durable_delegation(event['delegation_id'])['delivery_state'] == 'delivered'
+        assert not api._background_tasks
+        retained = launch('optional-api', origin_session_id='target')
+        delegation._persist_completion(retained, {'summary':'optional'})
+        optional(retained)
+        monkeypatch.setattr(admission, '_policy', lambda *_: ('retain_without_wake',True))
+        await runner._deliver_async_delegation_group([retained])
+        assert len(owner.get_messages('target')) == batch_size
+        assert delegation.get_durable_delegation('optional-api')['delivery_state'] == 'retained'
+        assert not api._background_tasks
+    finally:
+        await runner._cancel_process_completion_batch_tasks()
+
+
+@pytest.mark.asyncio
+async def test_durable_busy_queue_reserves_only_after_capacity_and_never_acks_early(owner):
+    from hermes_state import AsyncSessionDB
+    from agent import supervision_store as store
+    runner = GatewayRunner(GatewayConfig())
+    runner._session_db = AsyncSessionDB(owner)
+    adapter = DiscordAdapter(PlatformConfig(enabled=True, typing_indicator=False))
+    runner.adapters = {Platform.DISCORD: adapter}
+    origin = SessionSource(platform=Platform.DISCORD, chat_type='dm', chat_id='42', user_id='42')
+    key = build_session_key(origin)
+    event = {'type':'async_delegation','delegation_id':'busy-durable','session_key':key,
+             'parent_session_id':'target','dispatched_at':time.time(),'summary':'required','status':'completed'}
+    delegation._persist_dispatch(event)
+    delegation._persist_completion(event, {'summary':'required'})
+    release, started = asyncio.Event(), asyncio.Event()
+    async def handler(message):
+        started.set()
+        await release.wait()
+    try:
+        assert await runner._deliver_async_delegation_group([event]) is False
+        assert delegation.get_durable_delegation('busy-durable')['delivery_state'] == 'pending'
+        adapter.set_message_handler(handler)
+        await adapter.handle_message(MessageEvent(text='active human', source=origin))
+        await started.wait()
+        await adapter.handle_message(MessageEvent(text='pending human', source=origin))
+        adapter.set_busy_session_handler(runner._handle_active_session_busy_message)
+        runner._BUSY_QUEUE_MAX_PENDING = 1
+        assert await runner._deliver_async_delegation_group([event]) is False
+        assert delegation.get_durable_delegation('busy-durable')['delivery_state'] == 'pending'
+        runner._BUSY_QUEUE_MAX_PENDING = 4
+        assert await runner._deliver_async_delegation_group([event]) is True
+        with delegation._transaction() as conn:
+            assert store.get_admission(conn,event['supervision_delivery_id'])['state'] == 'accepted'
+        assert delegation.get_durable_delegation('busy-durable')['delivery_state'] == 'transferred'
+        assert not owner.get_messages('target')
+    finally:
+        release.set()
+        await drain(adapter)
+        await runner._cancel_process_completion_batch_tasks()
+
+
+from tests.agent.test_supervision_store import owner

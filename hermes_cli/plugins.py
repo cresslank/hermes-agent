@@ -389,6 +389,12 @@ class PluginContext:
         return self._llm
 
     @cached_property
+    def supervision(self):
+        """Versioned, profile-granted silent supervision; absent grants preserve baseline."""
+        from agent.supervision_facade import SupervisionFacade
+        return SupervisionFacade(self)
+
+    @cached_property
     def subagent_lifecycle(self) -> Any:
         """Plugin-safe subagent lifecycle service: serializable handles and immutable snapshots,
         never a live agent or private registry."""

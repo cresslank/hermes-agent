@@ -26,6 +26,10 @@ from hermes_state_common import (
 logger = logging.getLogger("hermes_state")
 
 
+class ControlGenerationContended(RuntimeError):
+    """The nonwaiting generation probe could not acquire its tracking mutex."""
+
+
 def workspace_key(row: Dict[str, Any]) -> Optional[str]:
     """Workspace grouping key: git repo root, else cwd, else None (branch excluded: a checkout must not
     fragment history)."""
@@ -770,6 +774,66 @@ class SessionSessionsMixin:
     def session_yolo_enabled(session_meta: Optional[Dict[str, Any]]) -> bool:
         """Persisted YOLO flag; False on any parse failure (resume must never enable the bypass)."""
         return bool(_parse_model_config((session_meta or {}).get("model_config")).get("yolo_mode"))
+
+    def control_generation_available(self, *, deadline=None):
+        """Pure, non-adopting generation check for optional control connections.
+
+        Unlike the ordinary writer detector, unknown WAL identity is a denial,
+        not permission to inspect descriptors, capture, repair or adopt sidecars.
+        A replaced sidecar must fence controls before any writer sets the sticky
+        loss flag. Recheck this at transaction admission AND before commit.
+        """
+        from hermes_state_common import stat_db_file_identity
+        recorded = self._db_sidecar_identity or {}
+        if (self._wal_active and any(recorded.get(s) is None for s in ("-wal", "-shm"))):
+            return False
+        return ((deadline is None or time.monotonic() < deadline)
+                and self.read_only is False and self._conn is not None
+                and not self._read_conns_closed and not self._db_replaced
+                and not self._db_wal_generation_lost and self._db_file_identity is not None
+                and stat_db_file_identity(self.db_path) == self._db_file_identity
+                and all(ident is not None and stat_db_file_identity(str(self.db_path) + suffix) == ident
+                        for suffix, ident in recorded.items()))
+
+    def control_session_generation(self, session_id: str, *, deadline=None, connection=None,
+                                   raise_on_contention=False):
+        """Current active membership for optional controls, never an accounting read.
+
+        Do not use the pooled reader's writer-lock fallback or reopen a closed DB.
+        A zero-wait connection bounds contention even for deadline-free producers;
+        a supplied control transaction observes revocation after writer admission.
+        No schema, repairs, token flushes or second authority store belong here.
+        Storage-only callers may distinguish mutex contention from a missing or
+        changed generation; optional controls retain the default None denial.
+        """
+        from hermes_cli.sqlite_safe_read import _live_lock
+        def available():
+            return self.control_generation_available(deadline=deadline)
+        # The ordinary tracked opener/closer holds this registry mutex. Take it
+        # without waiting and retain it through close so cleanup cannot outwait
+        # the action. Inspect application_id through SQL, not the raw-header
+        # probe (which has its own unrelated mutex).
+        if not _live_lock.acquire(blocking=False):
+            if raise_on_contention:
+                raise ControlGenerationContended("Session generation tracking mutex is busy")
+            return None
+        try:
+            if not available():
+                return None
+            conn = connection if connection is not None else self._connect_read_only(timeout=0)
+            try:
+                application_id = conn.execute("PRAGMA application_id").fetchone()[0]
+                if self._db_file_application_id and application_id != self._db_file_application_id:
+                    return None
+                row = conn.execute(
+                    "SELECT started_at FROM sessions WHERE id=? AND ended_at IS NULL "
+                    "AND COALESCE(expiry_finalized, 0)=0", (session_id,)).fetchone()
+                return (application_id, row[0]) if row is not None and available() else None
+            finally:
+                if connection is None:
+                    conn.close()
+        finally:
+            _live_lock.release()
 
     def get_session(self, session_id: str) -> Optional[Dict[str, Any]]:
         """Get a session by ID (drains queued token deltas first so cost readers see exact totals)."""
@@ -1560,11 +1624,21 @@ class SessionSessionsMixin:
         """Delete *session_id* only if it has no messages, no title and no children; check and delete
         share one transaction so a concurrent flush can't be lost."""
         def _do(conn):
+            from agent.supervision_store import UNSETTLED_CONTROL_SQL
             cursor = conn.execute(
-                """
+                f"""
                 DELETE FROM sessions
                 WHERE id = ?
                   AND title IS NULL
+                  AND NOT EXISTS (SELECT 1 FROM supervision_owner_records o WHERE o.session_id=sessions.id
+                      AND o.status IN ('open','settled','proposed','advised','claim_declared','adopted','contested','original_pending','original_observed','original_emitted'))
+                  AND NOT EXISTS (SELECT 1 FROM supervision_receipts r WHERE r.session_id=sessions.id
+                      AND r.status IN ('accepted','selected','unknown'))
+                  AND NOT EXISTS (SELECT 1 FROM delegation_controls c WHERE c.parent_session_id=sessions.id
+                      AND ({UNSETTLED_CONTROL_SQL}))
+                  AND NOT EXISTS (SELECT 1 FROM delegation_result_objects o WHERE o.session_id=sessions.id
+                      AND (o.settled_at IS NULL OR o.effect_pending=1 OR o.object_id IN
+                           (SELECT object_id FROM supervision_admissions WHERE state!='consumed')))
                   AND NOT EXISTS (
                       SELECT 1 FROM messages WHERE messages.session_id = sessions.id
                   )

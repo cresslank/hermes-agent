@@ -146,21 +146,35 @@ def _run_children_parallel(batch: _Batch, results: list, *, honor_parent_interru
     # it interrupted and returns, then the join hangs forever. Shutdown without
     # waiting on the interrupt path instead (same shape as moa_loop).
     interrupted = False
+    from agent.owned_delegation_wait import ChildControlWait
+    controls = ChildControlWait(batch) if honor_parent_interrupt else None
     try:
-        futures = {executor.submit(contextvars.copy_context().run, batch.run_child, i, t, child): i for i, t, child in batch.children}
+        from agent.supervision_children import scheduling_priority
+        # A reversible two-rank submission order, not preemption or an extra
+        # wait. Unowned/required children have the original rank. Running work,
+        # worker limits, future ownership and normal result delivery are unchanged.
+        ordered = sorted(batch.children, key=lambda row: scheduling_priority(row[2]))
+        futures = {executor.submit(contextvars.copy_context().run, batch.run_child, i, t, child): i for i, t, child in ordered}
         pending = set(futures)
+        if controls is not None and controls.runtime is not None:
+            for future in futures:
+                future.add_done_callback(controls.notify)
         while pending:
             if honor_parent_interrupt and getattr(parent_agent, "_interrupt_requested", False) is True:
                 results.extend(_entry_of(f, futures[f]) for f in pending)
                 interrupted = True
                 break
-            done, pending = _cf_wait(pending, timeout=0.5, return_when=FIRST_COMPLETED)
+            if controls is not None and controls.runtime is not None:
+                done, pending = controls.wait(pending)
+            else:
+                done, pending = _cf_wait(pending, timeout=0.5, return_when=FIRST_COMPLETED)
             for future in done:
                 entry = _entry_of(future, futures[future])
                 results.append(entry)
                 # Detached unit: a crash before the join must not lose children that already finished.
                 _record_finished_child(batch, entry, honor_parent_interrupt)
-                _report_child_done(parent_agent, spinner_ref, entry, _tag, task_labels, n_tasks, n_here - len(results))
+                if n_here > 1:  # owned single-child safe points add no new presentation
+                    _report_child_done(parent_agent, spinner_ref, entry, _tag, task_labels, n_tasks, n_here - len(results))
                 if (not honor_parent_interrupt and batch.unit_id and entry.get("status") in SUBAGENT_FAILURE_STATUSES
                         and len(results) < n_here):
                     # Detached unit, a sibling is still running: tell the parent NOW, not when the last one finishes.
@@ -172,6 +186,8 @@ def _run_children_parallel(batch: _Batch, results: list, *, honor_parent_interru
                         push_task_failure_notice(
                             batch.unit_id, {**entry, **({"live_transcript": _live} if _live else {})}, n_tasks=n_tasks)
     finally:
+        if controls is not None:
+            controls.close()
         # Abandoned workers unwind on their own (daemon threads, and the
         # child-run layer already applies the deferred-close transport drain).
         executor.shutdown(wait=not interrupted, cancel_futures=interrupted)
@@ -184,7 +200,8 @@ def _execute_and_aggregate(batch: _Batch, *, honor_parent_interrupt: bool = True
     record (retention pruning happens on future dispatches)."""
     from tools.delegation_live_log import update_manifest_statuses
     results: list = []
-    if len(batch.children) == 1:
+    from agent.owned_delegation_wait import has_configured_children
+    if len(batch.children) == 1 and not (honor_parent_interrupt and has_configured_children(batch)):
         results.append(batch.run_child(*batch.children[0]))
         # A one-child unit has no join to wait on, but everything after the child returns — host-owned finalize,
         # transcript, manifest, then the durable write — is still owner-lifetime: record before any of it (#116000).
@@ -395,6 +412,7 @@ def _dispatch_unit(unit: _Batch, unit_id: Optional[str], slot_key: Optional[str]
         goals=[t["goal"] for t in unit.task_list], context=unit.context,
         toolsets=None,  # metadata for the completion block only; subagents inherit the parent's toolsets
         role=unit.top_role, model=unit.creds["model"],
+        control_children=child_agents,
         runner=lambda: _execute_and_aggregate(unit, honor_parent_interrupt=False),
         interrupt_fn=_interrupt, delegation_id=unit_id, slot_key=slot_key,
         task_indexes=[i for (i, _, _) in unit.children] if len(unit.children) < len(unit.task_list) else None,

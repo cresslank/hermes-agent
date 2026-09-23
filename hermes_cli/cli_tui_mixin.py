@@ -1520,6 +1520,8 @@ class CLITuiMixin:
         images = list(self._attached_images)
         self._attached_images.clear()
         event.app.invalidate()
+        from agent.supervision_context import AcceptedInputText
+        text = AcceptedInputText(text)
         payload = (text, images) if images else text
         # A bang command is treated like a slash command while the agent is busy: it must never
         # be routed into steer/redirect (injecting `!git status` into the model's context as a
@@ -1580,7 +1582,8 @@ class CLITuiMixin:
                 accepted = False
                 try:
                     if self.agent is not None and hasattr(self.agent, "steer"):
-                        accepted = bool(self.agent.steer(text))
+                        from agent.supervision_context import steer_from_user
+                        accepted = bool(steer_from_user(self.agent, text))
                 except Exception as exc:
                     _cprint(f"  {_DIM}Steer failed ({exc}) — queued for next turn.{_RST}")
                     accepted = False
@@ -1600,7 +1603,8 @@ class CLITuiMixin:
                         self.agent is not None
                         and getattr(self.agent, "_supports_active_turn_redirect", False) is True
                         and hasattr(self.agent, "redirect")):
-                        redirected = bool(self.agent.redirect(text))
+                        from agent.supervision_context import steer_from_user
+                        redirected = bool(steer_from_user(self.agent, text, redirect=True))
                 except Exception:
                     redirected = False
             if redirected:

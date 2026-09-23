@@ -118,7 +118,8 @@ class GatewayStreamConsumer(StreamTransportMixin, StreamFallbackMixin, StreamThi
         on_new_message: Optional[callable] = None,
         on_before_finalize: Optional[Callable[[], Any]] = None,
         initial_reply_to_id: Optional[str] = None,
-        run_still_current: Optional[Callable[[], bool]] = None):
+        run_still_current: Optional[Callable[[], bool]] = None,
+        emission_agent: Optional[Callable[[], Any]] = None):
         self.adapter = adapter
         self.chat_id = chat_id
         self.cfg = config or StreamConsumerConfig()
@@ -131,6 +132,7 @@ class GatewayStreamConsumer(StreamTransportMixin, StreamFallbackMixin, StreamThi
         self._turn_id = str(uuid.uuid4())  # keys send_stream_frame() per concurrent consumer
         # Returns False after /new or /stop; run() then abandons the stream.
         self._run_still_current = run_still_current or (lambda: True)
+        self._emission_agent = emission_agent or (lambda: None)
         # Whether this consumer is fed the final reply's stream deltas. A consumer built only to
         # relay interim commentary (text streaming off, ``display.interim_assistant_messages`` on)
         # never receives the final's deltas, so the duplicate-risk diagnostic in
@@ -553,49 +555,51 @@ class GatewayStreamConsumer(StreamTransportMixin, StreamFallbackMixin, StreamThi
                     return
                 tick = self._drain_queue()
 
-                # Boundary produces its own finalize and resets state, so it must
-                # run before got_done/segment_break processing.
-                if tick.approval_boundary is not None:
-                    await self._handle_approval_boundary(*tick.approval_boundary)
-                    continue
-                if tick.got_reopen_seed:
-                    await self._eager_reopen_seed()
-                    continue
+                from agent.native_emission import for_agent, guard_emissions
+                with for_agent(self._emission_agent()), guard_emissions(self._run_still_current):
+                    # Boundary produces its own finalize and resets state, so it must
+                    # run before got_done/segment_break processing.
+                    if tick.approval_boundary is not None:
+                        await self._handle_approval_boundary(*tick.approval_boundary)
+                        continue
+                    if tick.got_reopen_seed:
+                        await self._eager_reopen_seed()
+                        continue
 
-                if tick.got_done:
-                    self._flush_think_buffer()
-                    # A bare intentional-silence marker (NO_REPLY / [SILENT]): the
-                    # gateway's whole-response filter runs too late for a streamed
-                    # preview, so retract it here instead of finalizing.
-                    if _is_intentional_silence_response(self._clean_for_display(self._accumulated)):
-                        await self._suppress_silence_marker()
+                    if tick.got_done:
+                        self._flush_think_buffer()
+                        # A bare intentional-silence marker (NO_REPLY / [SILENT]): the
+                        # gateway's whole-response filter runs too late for a streamed
+                        # preview, so retract it here instead of finalizing.
+                        if _is_intentional_silence_response(self._clean_for_display(self._accumulated)):
+                            await self._suppress_silence_marker()
+                            return
+
+                    if self._should_edit(tick) and (
+                        self._accumulated or (self._use_native_streaming and self._tool_progress_active)
+                    ):
+                        # Overflow split.  Native streaming bypasses this: the adapter
+                        # truncates against the stream protocol's own limit.
+                        if not self._use_native_streaming and self._first_send_overflows():
+                            if await self._split_first_send(tick):
+                                return
+                            continue
+                        await self._seal_overflow_heads()
+                        await self._push_update(tick)
+
+                    if tick.got_done:
+                        await self._finalize_turn(tick)
                         return
 
-                if self._should_edit(tick) and (
-                    self._accumulated or (self._use_native_streaming and self._tool_progress_active)
-                ):
-                    # Overflow split.  Native streaming bypasses this: the adapter
-                    # truncates against the stream protocol's own limit.
-                    if not self._use_native_streaming and self._first_send_overflows():
-                        if await self._split_first_send(tick):
-                            return
-                        continue
-                    await self._seal_overflow_heads()
-                    await self._push_update(tick)
+                    if tick.commentary_text is not None:
+                        await self._deliver_commentary(tick.commentary_text)
+                    if tick.got_segment_break:
+                        await self._end_segment(tick)
 
-                if tick.got_done:
-                    await self._finalize_turn(tick)
-                    return
-
-                if tick.commentary_text is not None:
-                    await self._deliver_commentary(tick.commentary_text)
-                if tick.got_segment_break:
-                    await self._end_segment(tick)
-
-                # Done last so the waiter unblocks only once everything queued
-                # before the barrier is on screen.
-                if tick.got_flush:
-                    self._signal_flush(tick.flush_event)
+                    # Done last so the waiter unblocks only once everything queued
+                    # before the barrier is on screen.
+                    if tick.got_flush:
+                        self._signal_flush(tick.flush_event)
 
                 await asyncio.sleep(0.05)  # Small yield to not busy-loop
 

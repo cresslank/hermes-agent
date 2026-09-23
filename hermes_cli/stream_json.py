@@ -7,6 +7,8 @@ envelope (exit code, final text, token stats). Diagnostics and ``session_id`` st
 
 from __future__ import annotations
 
+from agent.native_emission import observe_agent_output
+
 import json
 import sys
 import time
@@ -46,6 +48,7 @@ class StreamJsonEmitter:
     def attach(self, agent) -> "StreamJsonEmitter":
         """Route the agent's streaming/tool callbacks into this emitter (``init`` was already written at
         construction, before credentials/agent init, so a failed start still yields init + result)."""
+        self.agent = agent
         agent.stream_delta_callback = self.on_text_delta
         agent.tool_progress_callback = self.on_tool_progress
         return self
@@ -95,9 +98,12 @@ class StreamJsonEmitter:
         print(f"\nsession_id: {session_id or self._session_id}", file=sys.stderr)  # same stderr contract as -Q
         return exit_code
 
+    @observe_agent_output
     def _emit(self, obj: dict) -> None:
         try:
-            sys.stdout.write(json.dumps({**obj, "timestamp": _now_ms()}, ensure_ascii=False) + "\n")
-            sys.stdout.flush()
+            from agent.native_emission import observed_stream
+            stream = observed_stream(sys.stdout, surface="cli.json", operation=str(obj.get("type", "event")))
+            stream.write(json.dumps({**obj, "timestamp": _now_ms()}, ensure_ascii=False) + "\n")
+            stream.flush()
         except (BrokenPipeError, OSError):
             pass  # consumer closed the pipe — nothing left to report to

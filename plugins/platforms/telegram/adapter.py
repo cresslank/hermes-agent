@@ -66,11 +66,15 @@ async def _await_with_thread_deadline(
     detached best-effort ``on_abandon`` cleanup so an abandoned initialize() can't leak an httpx pool per
     retry attempt, and off-loop stack-dump diagnostics when the loop never processes the expiry.
     """
-    result = await run_bounded_async(
-        awaitable, timeout, label=label, on_abandon=on_abandon, dump_on_blocked_loop=dump_on_blocked_loop)
-    if result.timed_out:
-        raise asyncio.TimeoutError(f"timed out after {timeout:.0f}s ({label})")
-    return result.value
+    from gateway.emission import telegram_completion_gate
+    with telegram_completion_gate() as emission_gate:
+        result = await run_bounded_async(
+            awaitable, timeout, label=label, on_abandon=on_abandon, dump_on_blocked_loop=dump_on_blocked_loop)
+        if result.timed_out:
+            raise asyncio.TimeoutError(f"timed out after {timeout:.0f}s ({label})")
+        if emission_gate is not None:
+            emission_gate.finish(success=True)
+        return result.value
 
 
 def _iter_exception_graph(error: BaseException) -> "Iterator[BaseException]":
@@ -1550,7 +1554,7 @@ class TelegramAdapter(BasePlatformAdapter):
             # Raw Bot API result: return_type=Message would make PTB deserialize a 10.1 shape it doesn't
             # fully model; a post-delivery parse error ≠ send failure.
             msg = await _await_with_thread_deadline(
-                self._bot.do_api_request("sendRichMessage", api_kwargs=payload),
+                self._observed_rich_request("sendRichMessage", payload),
                 timeout=_TEXT_SEND_DEADLINE, label="telegram-send", dump_on_blocked_loop=False)
         except Exception as exc:
             if self._rich_rejected(exc, "sendRichMessage", "MarkdownV2"):
@@ -1596,7 +1600,7 @@ class TelegramAdapter(BasePlatformAdapter):
         payload = {**self._rich_payload_base(chat_id, content), "message_id": int(message_id)}
         try:
             await _await_with_thread_deadline(
-                self._bot.do_api_request("editMessageText", api_kwargs=payload),
+                self._observed_rich_request("editMessageText", payload),
                 timeout=_TEXT_SEND_DEADLINE, label="telegram-send", dump_on_blocked_loop=False)
         except Exception as exc:
             # "Message is not modified" = successful no-op; skip the redundant legacy edit.
@@ -2699,7 +2703,7 @@ class TelegramAdapter(BasePlatformAdapter):
                 # Seed message: Telegram's client hides empty topics until they contain one.
                 try:
                     await _await_with_thread_deadline(
-                        self._bot.send_message(
+                        self._send_observed_text(
                             chat_id=normalize_telegram_chat_id(chat_id), message_thread_id=thread_id, text=f"\U0001f4cc {topic_name}"),
                         timeout=_TEXT_SEND_DEADLINE, label="telegram-send", dump_on_blocked_loop=False)
                 except Exception as seed_err:
@@ -3455,17 +3459,25 @@ class TelegramAdapter(BasePlatformAdapter):
             _TimedOut = None  # type: ignore[assignment,misc]
         return _NetErr, _BadReq, _TimedOut
 
+    async def _observed_rich_request(self, endpoint, payload):
+        from gateway.emission import telegram_text_call
+        return await telegram_text_call(self, "do_api_request", endpoint=endpoint, api_kwargs=payload)
+
+    async def _send_observed_text(self, **kwargs):
+        from gateway.emission import telegram_text_call
+        return await telegram_text_call(self, "send_message", **kwargs)
+
     async def _send_chunk_markdown_or_plain(self, chunk: str, send_kwargs: Dict[str, Any]):
         """MarkdownV2 first; on a parse/markdown rejection resend as stripped plain text."""
         try:
             return await _await_with_thread_deadline(
-                self._bot.send_message(text=chunk, parse_mode=ParseMode.MARKDOWN_V2, **send_kwargs),
+                self._send_observed_text(text=chunk, parse_mode=ParseMode.MARKDOWN_V2, **send_kwargs),
                 timeout=_TEXT_SEND_DEADLINE, label="telegram-send", dump_on_blocked_loop=False)
         except Exception as md_error:
             if "parse" in str(md_error).lower() or "markdown" in str(md_error).lower():
                 logger.warning("[%s] MarkdownV2 parse failed, falling back to plain text: %s", self.name, md_error)
                 return await _await_with_thread_deadline(
-                    self._bot.send_message(text=_strip_mdv2(chunk), parse_mode=None, **send_kwargs),
+                    self._send_observed_text(text=_strip_mdv2(chunk), parse_mode=None, **send_kwargs),
                     timeout=_TEXT_SEND_DEADLINE, label="telegram-send", dump_on_blocked_loop=False)
             raise
 
@@ -3675,7 +3687,9 @@ class TelegramAdapter(BasePlatformAdapter):
                     _separate_chunk_indicator_from_fence(re.sub(r" \((\d+)/(\d+)\)$", r" \\(\1/\2\\)", chunk))
                     for chunk in chunks
                ]
-            return await self._send_chunks(chat_id, chunks, delivered, reply_to, metadata, error_types)
+            from gateway.emission import telegram_original_format
+            with telegram_original_format(self, content, chunks, chat_id, reply_to, metadata):
+                return await self._send_chunks(chat_id, chunks, delivered, reply_to, metadata, error_types)
         except Exception as e:
             classified = self._classify_send_exception(e, error_types)
             return self._with_partial_send(classified, chunks[len(delivered):], delivered, tail_certain=classified.retryable)
@@ -3709,9 +3723,13 @@ class TelegramAdapter(BasePlatformAdapter):
         requested_thread_id = self._message_thread_id_for_send(thread_id)
         used_thread_fallback = False
         prior = len(delivered)
-        for chunk in chunks:
-            outcome = await self._send_chunk_with_retries(
-                chat_id, chunk, len(delivered), reply_to, metadata, thread_id, used_thread_fallback, error_types)
+        from agent.native_emission import segment_scope
+        import uuid
+        batch_id = uuid.uuid4().hex
+        for index, chunk in enumerate(chunks):
+            with segment_scope(batch_id, index, len(chunks), chunk):
+                outcome = await self._send_chunk_with_retries(
+                    chat_id, chunk, len(delivered), reply_to, metadata, thread_id, used_thread_fallback, error_types)
             if isinstance(outcome, SendResult):
                 # Every SendResult returned here is a DEFINITE non-delivery (flood cap, DM-topic refusal);
                 # ambiguous timeouts raise instead, so the remainder is safe to resume from.
@@ -3793,8 +3811,9 @@ class TelegramAdapter(BasePlatformAdapter):
         kwargs: Dict[str, Any] = {"chat_id": normalize_telegram_chat_id(chat_id), "message_id": int(message_id), "text": text}
         if parse_mode is not None:
             kwargs["parse_mode"] = parse_mode
+        from gateway.emission import telegram_text_call
         await _await_with_thread_deadline(
-            self._bot.edit_message_text(**kwargs), timeout=_TEXT_SEND_DEADLINE, label="telegram-send", dump_on_blocked_loop=False)
+            telegram_text_call(self, "edit_message_text", **kwargs), timeout=_TEXT_SEND_DEADLINE, label="telegram-send", dump_on_blocked_loop=False)
 
     async def _edit_markdown_or_plain(self, chat_id: str, message_id: str, formatted: str, plain: str, warn_fmt: str) -> bool:
         """MarkdownV2 edit with plain-text fallback. Returns True on a "not modified" no-op (caller may
@@ -3963,7 +3982,7 @@ class TelegramAdapter(BasePlatformAdapter):
                     # Degrade to stripped text on finalize (raw ** / ``` would render literally); previews stay raw.
                     text = _strip_mdv2(chunk) if finalize else chunk
                 return await _await_with_thread_deadline(
-                    self._bot.send_message(
+                    self._send_observed_text(
                     chat_id=normalize_telegram_chat_id(chat_id), text=text, parse_mode=ParseMode.MARKDOWN_V2 if use_markdown else None,
                     reply_to_message_id=reply_to_id, **thread_kwargs, **base),
                     timeout=_TEXT_SEND_DEADLINE, label="telegram-send", dump_on_blocked_loop=False)
@@ -3975,7 +3994,7 @@ class TelegramAdapter(BasePlatformAdapter):
                         else self._thread_kwargs_for_send(chat_id, thread_id, metadata, reply_to_message_id=None))
                     try:
                         return await _await_with_thread_deadline(
-                            self._bot.send_message(
+                            self._send_observed_text(
                             chat_id=normalize_telegram_chat_id(chat_id), text=_strip_mdv2(chunk) if finalize else chunk,
                             **retry_thread_kwargs, **base),
                             timeout=_TEXT_SEND_DEADLINE, label="telegram-send", dump_on_blocked_loop=False)
@@ -3998,13 +4017,17 @@ class TelegramAdapter(BasePlatformAdapter):
         if len(chunks) <= 1:
             chunks = [content]  # defensive: a single chunk just edits normally
         first_chunk = chunks[0]
+        from agent.native_emission import segment_scope
+        import uuid
+        batch_id = uuid.uuid4().hex
         try:
-            if finalize:
-                await self._edit_markdown_or_plain(
-                    chat_id, message_id, _separate_chunk_indicator_from_fence(self.format_message(first_chunk)), _strip_mdv2(first_chunk),
-                    "[%s] Overflow split: MarkdownV2 first-chunk edit failed, falling back to plain text: %s")
-            else:
-                await self._edit_text(chat_id, message_id, first_chunk)
+            with segment_scope(batch_id, 0, len(chunks), first_chunk):
+                if finalize:
+                    await self._edit_markdown_or_plain(
+                        chat_id, message_id, _separate_chunk_indicator_from_fence(self.format_message(first_chunk)), _strip_mdv2(first_chunk),
+                        "[%s] Overflow split: MarkdownV2 first-chunk edit failed, falling back to plain text: %s")
+                else:
+                    await self._edit_text(chat_id, message_id, first_chunk)
         except Exception as e:
             if "not modified" not in str(e).lower():  # identical first chunk still sends continuations
                 logger.error("[%s] Overflow split: first-chunk edit failed: %s", self.name, _redact_telegram_error_text(e), exc_info=True)
@@ -4014,10 +4037,11 @@ class TelegramAdapter(BasePlatformAdapter):
         delivered_chunks = [first_chunk]
         prev_id = message_id
         thread_id = self._metadata_thread_id(metadata)
-        for chunk in chunks[1:]:
+        for index, chunk in enumerate(chunks[1:], 1):
             reply_to_id = int(prev_id) if prev_id else None
             thread_kwargs = self._thread_kwargs_for_send(chat_id, thread_id, metadata, reply_to_message_id=reply_to_id)
-            sent_msg = await self._send_overflow_continuation(chat_id, chunk, reply_to_id, thread_kwargs, thread_id, metadata, finalize)
+            with segment_scope(batch_id, index, len(chunks), chunk):
+                sent_msg = await self._send_overflow_continuation(chat_id, chunk, reply_to_id, thread_kwargs, thread_id, metadata, finalize)
             if sent_msg is None:
                 # Partial delivery: do NOT report success — the consumer would treat it as final delivery.
                 logger.warning("[%s] Overflow split: stopped at %d/%d chunks delivered", self.name, 1 + len(continuation_ids), len(chunks))
@@ -4117,7 +4141,7 @@ class TelegramAdapter(BasePlatformAdapter):
         message_thread_id = kwargs.get("message_thread_id")
         try:
             return await _await_with_thread_deadline(
-                self._bot.send_message(**kwargs), timeout=_TEXT_SEND_DEADLINE, label="telegram-send", dump_on_blocked_loop=False)
+                self._send_observed_text(**kwargs), timeout=_TEXT_SEND_DEADLINE, label="telegram-send", dump_on_blocked_loop=False)
         except Exception as send_err:
             if (message_thread_id is not None and self._is_bad_request_error(send_err) and self._is_thread_not_found_error(send_err)):
                 logger.warning(
@@ -4127,7 +4151,7 @@ class TelegramAdapter(BasePlatformAdapter):
                 retry_kwargs = dict(kwargs)
                 retry_kwargs.pop("message_thread_id", None)
                 return await _await_with_thread_deadline(
-                    self._bot.send_message(**retry_kwargs), timeout=_TEXT_SEND_DEADLINE, label="telegram-send", dump_on_blocked_loop=False)
+                    self._send_observed_text(**retry_kwargs), timeout=_TEXT_SEND_DEADLINE, label="telegram-send", dump_on_blocked_loop=False)
             raise
 
     async def _send_control_message(

@@ -6,6 +6,8 @@ inside each method — importing ``cli`` at module load time would be a cycle.
 
 from __future__ import annotations
 
+from agent.native_emission import observe_agent_output
+
 import logging
 import os
 import queue
@@ -239,9 +241,15 @@ class CLIChatTurnMixin:
             if isinstance(message, TimelineNotification):
                 staged_user_message.update(content=str(message), display_kind=message.display_kind,
                                            display_metadata={"display_text": message.display_text,
-                                                             "notification_category": message.notification_category})
+                                                             "notification_category": message.notification_category,
+                                                             **getattr(message, "supervision_metadata", {})})
             agent._pending_cli_user_message = staged_user_message
             self.conversation_history.append(staged_user_message)
+        from agent.supervision_view_binding import bind_presentation_loop
+        bind_presentation_loop(agent, getattr(getattr(self, "_app", None), "loop", None))
+        from agent.supervision_context import accept_pending_input
+        # Only a scope bound by the real submission owner grants authentic origin.
+        accept_pending_input(agent)
 
     def _chat_setup_turn_audio(self, turn, message, voice_input):
         """Arm the full-duplex listener and the streaming-TTS pipeline for this turn (voice mode only)."""
@@ -661,6 +669,7 @@ class CLIChatTurnMixin:
                     display_reasoning = reasoning.strip()
                 _cprint(f"\n{r_top}\n{_DIM}{display_reasoning}{_RST}\n{r_bot}")
 
+    @observe_agent_output
     def _chat_print_response_panel(self, turn, response):
         """Response box (close TTS-drawn box / post-stream transform / Rich Panel), then billing CTA."""
         from cli import (

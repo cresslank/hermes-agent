@@ -193,7 +193,8 @@ def assemble_api_request(
     # Build the request-local cache sections LAST, after every transcript mutation;
     # the canonical tool registry stays undecorated. Marked ``content`` becomes text
     # blocks the whitespace pass skips, so the same row's bytes vary across turns.
-    tools_for_api = agent.tools
+    from agent.supervision_views import request_views
+    api_messages, tools_for_api = request_views(agent, api_messages, agent.tools)
     if agent._use_prompt_caching and agent.provider != "moa":
         from agent.prompt_caching import envelope_tool_part_cache_markers_supported
 
@@ -260,6 +261,8 @@ def assemble_api_request(
         request_pressure_tokens = _pressure_with_real_floor(
             agent.context_compressor, request_pressure_tokens
         )
+    from agent.supervision_history import capture_visibility
+    capture_visibility(agent, api_messages)
     return AssembledRequest(
         "fallthrough", api_messages, tools_for_api, _moa_prepared_request,
         pending_moa_prepared_request, approx_tokens, request_pressure_tokens, approx_tokens * 4,

@@ -73,16 +73,19 @@ class VerifyResult:
     recipe_name: str
     phases: list[PhaseResult] = field(default_factory=list)
     readiness: ReadinessResult | None = None
+    checks: list[dict] = field(default_factory=list)
 
     @property
     def ok(self) -> bool:
-        return all(p.ok for p in self.phases) and (self.readiness is None or self.readiness.ready)
+        return (all(p.ok for p in self.phases) and all(c.get("ok") is True for c in self.checks)
+                and (self.readiness is None or self.readiness.ready))
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "recipe": self.recipe_name, "ok": self.ok,
             "phases": [p.to_dict() for p in self.phases],
             "readiness": self.readiness.to_dict() if self.readiness else None,
+            **({"checks": self.checks} if self.checks else {}),
         }
 
 
@@ -211,6 +214,7 @@ def run_verify(
     phase_timeout: float = DEFAULT_PHASE_TIMEOUT, ready_timeout: float = DEFAULT_READY_TIMEOUT,
     skip_start: bool = False, port_override: int | None = None, stop_on_failure: bool = True,
     on_output: Callable[[str], None] | None = None,
+    native_only: bool = False, supervision_owner=None,
 ) -> VerifyResult:
     """Run the selected command phases sequentially, then (unless ``skip_start`` or a
     phase failed) boot ``recipe.start``, poll readiness, and tear the process group down.
@@ -225,6 +229,11 @@ def run_verify(
     root = Path(root)
     selected = tuple(phases) if phases else PHASE_ORDER + ("start",)
     result = VerifyResult(recipe_name=recipe.name)
+
+    if native_only:
+        from agent.verify.native_checks import run_native_checks
+        result.checks = run_native_checks(root, recipe.native_checks, owner=supervision_owner)
+        return result
 
     mutating = ("build" in selected) or ("start" in selected and not skip_start)
     if recipe.kind == "compose" and mutating:
@@ -250,6 +259,10 @@ def run_verify(
             if not phase_result.ok and stop_on_failure:
                 return result
 
-    if not skip_start and "start" in selected and recipe.start and all(p.ok for p in result.phases):
+    if "test" in selected and recipe.native_checks != []:
+        from agent.verify.native_checks import run_native_checks
+        result.checks = run_native_checks(root, recipe.native_checks)
+
+    if not skip_start and "start" in selected and recipe.start and result.ok:
         result.readiness = _run_start_phase(recipe, root, ready_timeout, port_override)
     return result

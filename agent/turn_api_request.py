@@ -102,6 +102,8 @@ def build_api_request(
     )
 
     agent._reset_stream_delivery_tracking()
+    from agent.supervision_original_output import begin_attempt
+    begin_attempt(agent)
     # Per-attempt first-chunk timestamp so a stale value never leaks into post_api_request.
     agent._last_api_first_chunk_at = None
     # api_messages was built for the primary; a fallback (DeepSeek / Kimi / MiMo) may

@@ -2170,20 +2170,24 @@ class GatewayTurnMixin:
             # Admission/typing is not execution. All routing, authorization and
             # turn preparation gates have passed when the agent runner is entered.
             event._heartbeat_execution_started = True
-            agent_result = await self._run_agent(
-                message=message_text, context_prompt=prepared.context_prompt, history=history, source=source,
-                session_id=_run_start_session_id, session_key=session_key,
-                run_generation=run_generation, event_message_id=self._reply_anchor_for_event(event),
-                inbound_message_id=str(event.message_id) if event.message_id else None,
-                channel_prompt=event.channel_prompt, moa_config=getattr(event, "_moa_config", None),
-                persist_user_message=prepared.persist_user_message,
-                persist_user_timestamp=prepared.persist_user_timestamp,
-                persist_user_display_kind=prepared.persist_user_display_kind,
-                persist_user_display_metadata={
-                    "gateway_input_owner": prepared.persistence_owner, **diagnostic_metadata(event)},
-                message_type=event.message_type,
-                scheduled_heartbeat=bool(getattr(event, "_heartbeat_session_id", None)),
-            )
+            from agent.supervision_context import accepted_origin_scope
+            with accepted_origin_scope(getattr(event, "_supervision_origin", None)):
+                agent_result = await self._run_agent(
+                    message=message_text, context_prompt=prepared.context_prompt, history=history, source=source,
+                    session_id=_run_start_session_id, session_key=session_key,
+                    run_generation=run_generation, event_message_id=self._reply_anchor_for_event(event),
+                    inbound_message_id=str(event.message_id) if event.message_id else None,
+                    channel_prompt=event.channel_prompt, moa_config=getattr(event, "_moa_config", None),
+                    persist_user_message=prepared.persist_user_message,
+                    persist_user_timestamp=prepared.persist_user_timestamp,
+                    persist_user_display_kind=prepared.persist_user_display_kind,
+                    persist_user_display_metadata={
+                        "gateway_input_owner": prepared.persistence_owner, **diagnostic_metadata(event),
+                        **({"supervision_deliveries": event.metadata["supervision_deliveries"]}
+                           if event.internal and (event.metadata or {}).get("supervision_deliveries") else {})},
+                    message_type=event.message_type,
+                    scheduled_heartbeat=bool(getattr(event, "_heartbeat_session_id", None)),
+                )
             _turn_seconds = time.monotonic() - _turn_started_monotonic
 
             # A queued (/queue) chain answered the LAST message of the chain, so the outer final
@@ -3863,16 +3867,21 @@ class GatewayTurnMixin:
         try:
             await self._refresh_agent_cache_message_count(session_key, session_id)
 
-            followup_result = await self._run_agent(
-                message=next_message, context_prompt=turn_ctx.context_prompt, history=updated_history,
-                source=next_source, session_id=session_id, session_key=next_session_key,
-                run_generation=run_generation, _interrupt_depth=_interrupt_depth + 1,
-                event_message_id=next_message_id, inbound_message_id=next_inbound_id,
-                channel_prompt=next_channel_prompt, message_type=next_message_type,
-                persist_user_message=next_persist_message,
-                persist_user_display_kind=next_display_kind,
-                persist_user_display_metadata=diagnostic_metadata(pending_event) or None,
-            )
+            from agent.supervision_context import accepted_origin_scope
+            with accepted_origin_scope(getattr(pending_event, "_supervision_origin", None)):
+                followup_result = await self._run_agent(
+                    message=next_message, context_prompt=turn_ctx.context_prompt, history=updated_history,
+                    source=next_source, session_id=session_id, session_key=next_session_key,
+                    run_generation=run_generation, _interrupt_depth=_interrupt_depth + 1,
+                    event_message_id=next_message_id, inbound_message_id=next_inbound_id,
+                    channel_prompt=next_channel_prompt, message_type=next_message_type,
+                    persist_user_message=next_persist_message,
+                    persist_user_display_kind=next_display_kind,
+                    persist_user_display_metadata={**diagnostic_metadata(pending_event),
+                        **({"supervision_deliveries": pending_event.metadata["supervision_deliveries"]}
+                           if pending_event is not None and pending_event.internal
+                           and (pending_event.metadata or {}).get("supervision_deliveries") else {})} or None,
+                )
         except asyncio.CancelledError:
             await _run_followup_processing_hook(
                 _hook_adapter, pending_event, "on_processing_complete", _followup_cancel_outcome(_hook_adapter))

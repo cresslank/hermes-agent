@@ -259,6 +259,20 @@ def _db_flush_write(agent, batch_rows: List[Dict[str, Any]], batch_msgs: List[Di
     """One transaction for the turn's new rows: on failure nothing lands and no markers are stamped."""
     if not batch_rows:
         return
+    # The CLI close/crash safety net may run before turn staging. Use the same
+    # identity-aware owner, never append an unconsumed queue hint as a second row.
+    remaining_rows, remaining_msgs = [], []
+    for row, msg in zip(batch_rows, batch_msgs):
+        metadata = row.get("display_metadata") or {}
+        if metadata.get("supervision_delivery_id") or metadata.get("supervision_deliveries"):
+            from agent.completion_admission import consume_metadata
+            msg["_row_id"] = consume_metadata(agent._session_db, agent.session_id, row["content"], metadata,
+                turn_lease_holder=getattr(agent, "_active_session_turn_lease_holder", None))
+            msg[_DB_PERSISTED_MARKER] = True
+        else:
+            remaining_rows.append(row)
+            remaining_msgs.append(msg)
+    batch_rows, batch_msgs = remaining_rows, remaining_msgs
     agent._session_db.append_messages_batch(
         session_id=agent.session_id, messages=batch_rows,
         compression_lock_holder=getattr(agent, "_active_compression_lock_holder", None),
