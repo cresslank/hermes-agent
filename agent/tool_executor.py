@@ -1142,8 +1142,21 @@ def _commit_tool_result(
         if advisory:
             _tool_content += "\n\n" + advisory[0]
     tool_message = make_tool_result_message(function_name, _tool_content, tool_call_id, effect_disposition=effect_disposition)
-    messages.append(tool_message)
-    if not _flush_session_db_after_tool_progress(agent, messages, stage=f"tool result {function_name}"):
+    from agent.supervision_read_advisory import append_at_tool_result, acknowledge_tool_result
+    read_advisory = None
+    if supervision is not None:
+        tool_message, read_advisory = append_at_tool_result(
+            supervision, messages, tool_message, name=function_name, arguments=function_args,
+            call_id=tool_call_id, result=function_result, failed=is_error or blocked,
+        )
+    if read_advisory is None:
+        messages.append(tool_message)
+    persisted = False
+    try:
+        persisted = _flush_session_db_after_tool_progress(agent, messages, stage=f"tool result {function_name}")
+    finally:
+        acknowledge_tool_result(supervision, read_advisory, tool_message, persisted=persisted)
+    if not persisted:
         return None
 
     if not blocked:

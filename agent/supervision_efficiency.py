@@ -7,6 +7,7 @@ advice cannot cancel children, waive checks, close requirements or execute a rou
 from __future__ import annotations
 
 from collections import OrderedDict, deque
+from contextlib import ExitStack
 from dataclasses import dataclass
 import hashlib
 import json
@@ -189,6 +190,7 @@ class EfficiencyOwner:
         self.reads = OrderedDict()
         self.read_pending = {}
         self.read_payloads = {}
+        self.read_advisories = {}
         self.checks = OrderedDict()
         self.passes = deque(maxlen=3)
         self.emitted = OrderedDict()
@@ -213,6 +215,7 @@ class EfficiencyOwner:
             self.reads.clear()
             self.read_pending.clear()
             self.read_payloads.clear()
+            self.read_advisories.clear()
             self.checks.clear()
             self.passes.clear()
             self.emitted.clear()
@@ -253,7 +256,7 @@ class EfficiencyOwner:
         if self.hints:
             return self.hints.popleft()
         for target, opportunity in tuple(self.runtime.opportunities.items()):
-            if opportunity["owner"] == "efficiency":
+            if opportunity["owner"] == "efficiency" and target not in self.read_advisories:
                 advisory = self.consume(target)
                 if advisory:
                     return advisory
@@ -300,7 +303,7 @@ class EfficiencyOwner:
             spans.update((r.id, r.text) for r in work_map["requirement_spans"])
         return {"id": refs[0], "text": spans[refs[0]]} if refs[0] in spans else None
 
-    def _emit(self, event, facts, target, refs, *, routes=(), wait=False, relations=(), valid=None):
+    def _emit(self, event, facts, target, refs, *, routes=(), wait=False, relations=(), valid=None, select_only=False):
         key = (event, target)
         with self.lock:
             if key in self.emitted or len(self.emitted) >= 64:
@@ -323,6 +326,9 @@ class EfficiencyOwner:
         if wait:
             rt._wait_for(target, snapshot.deadline, snapshot.revision)
             try:
+                if select_only:
+                    with rt.lock:
+                        return rt._take(target, {Action.ADVISE})
                 return self.consume(target, routes=routes)
             finally:
                 rt.mark_dispatched(target)
@@ -505,6 +511,10 @@ class EfficiencyOwner:
         if not isinstance(arguments, dict) or not _text(call_id):
             return None
         graph = self.runtime.dependencies.planning
+        from agent.owned_delegation_planning import native_idle_fence
+        with native_idle_fence(self.runtime, self.runtime.agent()) as native_epoch:
+            if native_epoch is None:
+                return None
         intent = graph.read_intent(arguments, call_id)
         path = arguments.get("path")
         if intent is None or not isinstance(path, str) or not _text(path):
@@ -533,21 +543,42 @@ class EfficiencyOwner:
             if len(self.read_pending) < 32:
                 self.read_pending[call_id] = (operation, dict(arguments), intent)
         def current():
+            from agent.owned_delegation import owner_of
+            from agent.owned_delegation_policy import ConfiguredDelegationOwner
             try:
                 info = resolved.stat()
-                return (graph.read_intent(arguments, call_id) == intent and
-                        _pin((str(resolved), info.st_dev, info.st_ino, info.st_size,
-                              info.st_mtime_ns, info.st_ctime_ns)) == snapshot and
-                        all(self.reads.get(c["id"]) == c for c in candidates))
             except OSError:
                 return False
+            if _pin((str(resolved), info.st_dev, info.st_ino, info.st_size,
+                     info.st_mtime_ns, info.st_ctime_ns)) != snapshot:
+                return False
+            native = owner_of(self.runtime.agent())
+            if not isinstance(native, ConfiguredDelegationOwner):
+                return False
+            # The optional final proof must not wait behind a native/control
+            # owner. Nested preflight acquisitions are reentrant; config and
+            # canonical generation readers already fail cold/busy without waits.
+            with ExitStack() as stack:
+                for lock in (self.runtime.lock, native.registration.fence, native._lock, self.lock):
+                    if not lock.acquire(blocking=False):
+                        return False
+                    stack.callback(lock.release)
+                return (graph.read_intent(arguments, call_id) == intent and
+                        all(self.reads.get(c["id"]) == c for c in candidates))
         # Identical native read requests already have a deterministic file-owner
         # reuse path. Semantic work is only for differing requested windows.
         if not candidates or any(c["acceptance"] == operation["acceptance"] for c in candidates):
             return None
-        return self._emit("operation_proposed", {"proposed": operation, "candidates": candidates,
+        selected = self._emit("operation_proposed", {"proposed": operation, "candidates": candidates,
             "exact_reusable": False}, call_id, (requirement["id"], *(c["source_ref"] for c in candidates)),
-            wait=True, valid=current)
+            wait=True, valid=current, select_only=True)
+        if selected is not None:
+            from agent.supervision_read_advisory import ReadAdvisory
+            with self.lock:
+                self.read_advisories[call_id] = ReadAdvisory(
+                    *selected, dict(arguments), intent, native_epoch, current)
+        # Selection is neither an applied effect nor a generic drainable hint.
+        return None
 
     def read_completed(self, call_id, *, failed, result=None):
         # Match consumption's runtime -> efficiency lock order.
@@ -733,9 +764,7 @@ def observe_native(agent, event, *args, **kwargs):
         if owner is None:
             return
         if event == "read_proposed":
-            hint = owner.before_read(*args, **kwargs)
-            if hint:
-                owner.hints.append(hint)
+            owner.before_read(*args, **kwargs)
         elif event == "tool_result":
             name, arguments, result = args
             owner.read_completed(kwargs["call_id"], failed=kwargs["failed"], result=result)
