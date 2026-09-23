@@ -208,16 +208,27 @@ def clarify_tool(question: str, choices: Optional[List[str]] = None, multi_selec
         if error:
             return tool_error(error)
         if normalized:
-            # A batch is suppressible only when EVERY question has an independently
-            # authorized owner default; never silently answer a material remainder.
+            # Resolve ordinary finite preferences before UI. A material remainder
+            # still reaches the existing form, without re-asking resolved slots.
+            from agent.supervision_views import SupervisionViews
+            identity = supervision.clarification_identity() if isinstance(supervision, SupervisionViews) else None
             resolved = [_owner_default(supervision, e["question"], e["choices_offered"], e["multi_select"])
                         for e in normalized]
+            if isinstance(supervision, SupervisionViews) and supervision.clarification_identity() != identity:
+                resolved = [None] * len(normalized)
+            for entry, result in zip(normalized, resolved):
+                if isinstance(result, dict) and entry["id"]:
+                    result["id"] = entry["id"]
             if all(r is not None for r in resolved):
                 return json.dumps({"responses": resolved}, ensure_ascii=False)
             if callback is None:
                 return tool_error(_UNAVAILABLE)
             try:
-                return _run_batch(normalized, callback, str(question or "").strip())
+                remaining = [e for e, r in zip(normalized, resolved) if r is None]
+                result = json.loads(_run_batch(remaining, callback, str(question or "").strip()))
+                answers = iter(result["responses"])
+                result["responses"] = [r if r is not None else next(answers) for r in resolved]
+                return json.dumps(result, ensure_ascii=False)
             except Exception as exc:
                 return tool_error(f"Failed to get user input: {exc}")
         # Empty questions array → fall through to the single-question path.

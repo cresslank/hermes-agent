@@ -135,7 +135,13 @@ class SupervisionViews:
         self.cache_identity = fingerprint((self.scope, catalog.revision, result))
         return result
 
+    def clarification_identity(self):
+        """Invalidate batched answers if accepted sources change between slots."""
+        snapshot = getattr(self.facade, 'clarification_identity', None)
+        return snapshot() if callable(snapshot) else self.scope
+
     def clarify(self, question: str, choices, *, multi_select=False):
+        """Return an exact owner-selected answer, never an invented user response."""
         default = self.defaults.get(question)
         if default is None:
             handler = getattr(self.facade, "clarify_slot", None)

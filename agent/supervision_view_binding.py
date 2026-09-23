@@ -646,14 +646,17 @@ class NativeViewsBinding:
         return None
 
     def clarify_slot(self, question, choices, *, multi_select=False):
-        """Only the accepted finite presentation slot; no model-supplied source grants.
+        """Resolve finite ordinary questions from current accepted instructions.
 
-        retrieve reads one pinned, already accepted source in this runtime. ask
-        admits only the existing literal question/UI; neither route generates text,
-        executes a tool, expands history, or invokes an extra main-model turn.
+        Keep the exact local format/default route; otherwise Jev selects an exact
+        offered identity in one semantic decision. No generated answer, permission
+        grant, generic retrieval executor, or second main-model selector.
         """
         slot = self.clarification_slot
-        if (slot is None or slot['scope'] != self.views.scope or multi_select or
+        if slot is None or question != 'Output format?':
+            with self.runtime.decision_boundary():
+                return self._semantic_clarification(question, choices, multi_select=multi_select)
+        if (slot['scope'] != self.views.scope or multi_select or
                 question != 'Output format?' or not isinstance(choices, list) or
                 len(choices) != 3 or any(type(c) is not str for c in choices) or
                 set(choices) != {'markdown', 'plain_text', 'json'}):
@@ -667,6 +670,70 @@ class NativeViewsBinding:
                 return {'question': question, 'choices_offered': choices, 'user_response': '',
                         'resolution': 'retrieved', 'resolved_value': value, 'evidence_ref': slot['source_ref']}
         return None
+
+    def clarification_identity(self):
+        with self.runtime.lock:
+            # A lazy view-scope refresh is not a change to the accepted context.
+            return (self.runtime.revision, tuple(self.runtime.sources.items()))
+
+    def _semantic_clarification(self, question, choices, *, multi_select=False):
+        if (self.closed or self.runtime.closed or multi_select
+                or not isinstance(question, str) or not 0 < len(question) <= 1200
+                or not isinstance(choices, list) or not 2 <= len(choices) <= 4
+                or any(type(c) is not str or not 0 < len(c) <= 1200 for c in choices)
+                or len(set(choices)) != len(choices)):
+            return None
+        # Secret/approval tools own those flows, not clarify's semantic shortcut.
+        # This lexical deny is only a conservative mechanical floor; Jev also
+        # classifies nonliteral permission/commitment/material boundaries.
+        protected = re.compile(
+            r'\b(password|passcode|otp|2fa|mfa|cvc|cvv|secret|token|api[ _-]?key|'
+            r'verification[ -]code|one[ -]time[ -]code|approv\w*|authoriz\w*|permission|'
+            r'consent|confirm\w*|pay\w*|purchas\w*|buy|credit[ -]card)\b', re.I)
+        if protected.search(' '.join([question, *choices])):
+            return None
+        runtime = self.runtime
+        with runtime.lock:
+            expected = runtime.revision
+            sources = tuple(runtime.sources.items())
+            if (not sources or runtime.completeness.omitted
+                    or any(not isinstance(t, str) or not 0 < len(t) <= 1200 for _, t in sources)
+                    or sum(len(t) for _, t in sources) > 6000
+                    or any(re.search(r'\b(password|passcode|otp|2fa|mfa|cvc|cvv|secret|token|api[ _-]?key|'
+                                     r'verification[ -]code|one[ -]time[ -]code)\b', t, re.I)
+                           for _, t in sources)):
+                return None
+        offered = tuple(choices)
+        refs = tuple(ref for ref, _ in sources)
+        rows = [{'id': f'c{i}', 'text': text} for i, text in enumerate(offered)]
+        by_id = {r['id']: r['text'] for r in rows}
+        facts = dict(clarification_contract='supervision.clarification.v1', slot=question,
+            accepted_history=[{'ref': ref, 'text': text} for ref, text in sources],
+            interpretations=rows, permission_ui=False, secret_ui=False, authorization_missing=False)
+        revision = fingerprint((project(expected), question, offered, sources))
+        def current():
+            return (runtime.revision == expected and tuple(runtime.sources.items()) == sources
+                    and tuple(choices) == offered and not self.closed and not runtime.closed)
+        def validate(proposal):
+            meta = project(proposal.metadata)
+            ids = proposal.candidate_ids
+            if (not current() or proposal.feature_id != 'F19'
+                    or proposal.evidence_refs != refs or len(ids) != 1 or ids[0] not in by_id
+                    or meta != {'feature_action': 'use_authorized_default', 'selected_ids': list(ids),
+                                'resolution': meta.get('resolution')}
+                    or meta.get('resolution') not in {'already_stated', 'default_defined'}):
+                return None
+            return {'question': question, 'choices_offered': list(offered), 'user_response': '',
+                    'resolution': 'already_stated' if meta['resolution'] == 'already_stated' else 'safe_default',
+                    'resolved_value': by_id[ids[0]], 'evidence_refs': list(refs)}
+        result = self._request('clarification_proposed', facts, action=Action.CLARIFY_DEFAULT,
+            refs=refs, candidates=tuple(by_id), revision=revision, validate=validate)
+        # _request validates under the registration/runtime fences. Recheck the
+        # exact source and offered identities at the return boundary as well.
+        if not isinstance(result, dict) or not current():
+            return None
+        result.pop('revision', None)
+        return result
 
     def accept_defaults(self, origin):
         """Explicit user-only presentation contract; tool arguments cannot add defaults.
