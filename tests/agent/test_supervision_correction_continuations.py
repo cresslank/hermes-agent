@@ -241,12 +241,26 @@ def continue_gateway(o, event, output):
                     state = conn.execute('SELECT state FROM supervision_admissions WHERE launch_id=?',
                                          (event['delegation_id'],)).fetchone()[0]
                 assert state == 'accepted'  # adapter acceptance is not turn consumption
-            # This is the native main conversation, not an ACK-only handler.
-            o.n.agent.notice_callback = output.notice
+            # Preserve the production callback boundary, including queued native notices.
+            from gateway.run_turn_runner import TurnRunner
+            from gateway.turn_context import TurnContext
+            ctx = TurnContext(source=output.source, user_config={}, mute_notification_reply=False,
+                _status_adapter=output.adapter, _run_still_current=lambda: True,
+                _loop_for_step=asyncio.get_running_loop())
+            turn = TurnRunner(runner, ctx)
+            scheduled = []
+            native_schedule = turn._schedule
+            def track_schedule(*args, **kwargs):
+                future = native_schedule(*args, **kwargs)
+                scheduled.append(future)
+                return future
+            turn._schedule = track_schedule
+            o.n.agent.notice_callback = turn._notice_callback_sync
             result = await asyncio.to_thread(o.n.agent.run_conversation, message.text,
                 persist_user_display_metadata=message.metadata,
                 persist_user_display_kind='literal_source_change' if event['type'] == 'literal_source_change' else 'async_delegation_complete')
             assert not result.get('failed'), result
+            await asyncio.gather(*(asyncio.wrap_future(f) for f in scheduled))
         output.adapter.set_message_handler(handler)
         try:
             if event['type'] == 'literal_source_change':

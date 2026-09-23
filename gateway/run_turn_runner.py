@@ -1181,7 +1181,11 @@ class TurnRunner:
         diagnostic = is_diagnostic_notice(notice)
         def present():
             try:
-                line = render_notice_line(notice)
+                from agent.supervision_corrections import notice_owner
+                text = getattr(notice, "text", None)
+                # Keep the native owner through scheduling. Generic rendering would
+                # turn a correction into an unchecked ordinary platform notice.
+                line = text if notice_owner(text) is not None else render_notice_line(notice)
             except Exception:
                 logger.debug("render_notice_line failed", exc_info=True)
                 return
