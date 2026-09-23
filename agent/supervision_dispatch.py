@@ -70,7 +70,7 @@ def consume(facade, request):
                     not registration.active or registration.scope != revision.profile or
                     runtime.revision != revision or snapshot.revision != revision or
                     getattr(runtime.agent(), "session_id", "") != runtime.session_id or
-                    (runtime.closed and snapshot.owner != "completion_admission") or
+                    (runtime.closed and not runtime._owner_survives_turn(snapshot.owner)) or
                     request["target_id"] in runtime.closed_targets or
                     not runtime.clock() < deadline <= snapshot.deadline or
                     "observe" not in registration.grants or

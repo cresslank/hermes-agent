@@ -474,6 +474,8 @@ class OwnedDelegationOwner:
             # Retain the installed fence even after an invalidating change.
             if live.snapshot['effect_policy_id']:
                 if name == 'delegate_task':
+                    if live.snapshot.get('direct_control'):
+                        raise ControlDenied('Direct parent-only workers cannot delegate')
                     if not isinstance(args, dict) or args.get('action', 'spawn') not in ('spawn', ''):
                         raise ControlDenied('Read-only children may only use owned nested spawn')
                 elif not self._policy.permits(name, args):
@@ -504,6 +506,8 @@ class OwnedDelegationOwner:
                 if notify:
                     live.milestone_pending = False
             bridge = getattr(self, '_relevance_bridge', None)
+            if live.snapshot.get('supervisor_control') and live.snapshot['cancel_requested']:
+                self.signal_semantic_cancel(handle)
             if notify and bridge is not None:
                 bridge.changed('child_milestone', handle)
 
@@ -514,6 +518,9 @@ class OwnedDelegationOwner:
         # Unknown/legacy work requires an explicit owner reconciliation receipt.
         if s['settled'] and s['effect_class'] == 'read_only' and not s['cleanup_pending']:
             s['processes_stopped'] = s['effects_reconciled'] = True
+            control = s.get('supervisor_control')
+            if control and control['state'] not in {'stopped', 'already_finished'}:
+                control['state'] = 'stopped' if control.get('signal_delivered') else 'already_finished'
 
     def finish(self, handle, *, worker_finished=True):
         with self._lock:
@@ -594,10 +601,17 @@ class OwnedDelegationOwner:
                 return self._receipt(s, False, 'deadline_expired')
             if s['control_revision'] != expected_revision:
                 return self._receipt(s, False, 'stale_control_revision')
-            if (not self.semantic_authorized(handle, deadline=deadline) or s['cancel_requested'] or s['settled'] or s['obligation'] != 'optional' or
+            from agent.owned_delegation_direct import VERSION as DIRECT, qualifies
+            direct = s.get('direct_control') == DIRECT
+            eligible_obligation = (s['obligation'] in {'required', 'optional'} if direct else s['obligation'] == 'optional')
+            consumer_veto = any(c['obligation'] == 'unknown' or c['requires_effects'] or c['requires_cleanup']
+                or (not direct and (c['obligation'] != 'optional' or c['requires_result'] or c.get('requires_corroboration', True)))
+                for c in s['consumers'])
+            if (not self.semantic_authorized(handle, deadline=deadline) or s['cancel_requested'] or s['settled']
+                    or s['worker_finished'] or live.finish_pending or not eligible_obligation or
                     not s['consumer_set_closed'] or not s['consumers'] or s['effect_class'] != 'read_only' or
                     s['handoffs'] or s['cleanup_pending'] or not self._grant.allow_optional_readonly or
-                    any(c['obligation'] != 'optional' or c['requires_result'] or c['requires_effects'] or c['requires_cleanup'] or c.get('requires_corroboration', True) for c in s['consumers'])):
+                    consumer_veto):
                 return self._receipt(s, False, 'ineligible')
             revision = self._revision()
             if (not isinstance(evidence, SemanticEvidence) or evidence.revision != revision or
@@ -612,14 +626,24 @@ class OwnedDelegationOwner:
                       evidence.relation in ('no_remaining_consumer', 'superseded') and
                       prob(evidence.probability) and evidence.probability >= .97 and
                       prob(evidence.confidence) and evidence.confidence >= .90)
+            if direct:
+                strong = (len(values) == len(evidence.contributions) and set(values) == {c['ref'] for c in s['consumers']}
+                    and all(prob(v) for v in values.values()) and prob(evidence.probability) and prob(evidence.confidence)
+                    and qualifies(s, evidence))
             previous = s['candidate']
-            accepted = bool(strong and previous is not None and tuple(previous) != revision and
-                            all(a <= b for a, b in zip(previous, revision)))
+            accepted = bool(strong and (direct or (previous is not None and tuple(previous) != revision and
+                            all(a <= b for a, b in zip(previous, revision)))))
             reason = 'cancel_requested' if accepted else 'await_distinct_revision' if strong else 'contribution_or_uncertainty'
             def change(new):
                 new['candidate'] = list(revision) if strong else None
                 if accepted:
                     new['cancel_requested'] = True
+                    if direct:
+                        new['result_applicability'] = 'invalidated'
+                        new['obligation_state'] = 'open'
+                        new['supervisor_control'] = dict(actor=self._grant.plugin_id, feature_id=feature_id,
+                            action='cancel_child', reason_code=evidence.relation, decision_id=idempotency_key,
+                            policy_version=DIRECT, state='pending_stop', signal_delivered=False, signal_attempts=0)
                 receipt = dataclasses.asdict(self._receipt({**new, 'control_revision': new['control_revision'] + 1}, accepted, reason))
                 # Bound receipt growth without evicting an uncertain accepted command.
                 if len(new['receipts']) >= 128:
@@ -639,6 +663,11 @@ class OwnedDelegationOwner:
         return receipt
 
     def signal_semantic_cancel(self, handle):
+        with self._lock:
+            direct = bool(self._get(handle).snapshot.get('supervisor_control'))
+        if direct:
+            from agent.owned_delegation_stop import signal
+            return signal(self, handle)
         # Only signal already-sealed work, outside the control lock. Native joins
         # can defer this until their enclosing compare/commit critical section ends.
         with self._lock:
@@ -706,6 +735,19 @@ def seal_explicit_stop(child):
     binding = binding_of(child)
     if binding:
         return binding[0].request_explicit_stop(binding[1])
+
+
+def supervisor_control_for_child(child):
+    """Bounded durable native attribution; no restored-worker adoption or prose inference."""
+    binding = binding_of(child)
+    if binding is None:
+        return None
+    from agent.owned_delegation_direct import control_projection
+    import sqlite3
+    try:
+        return control_projection(binding[0].status(binding[1]))
+    except (ValueError, OSError, sqlite3.Error):
+        return None
 
 
 def finish_child(child, *, worker_finished=True):

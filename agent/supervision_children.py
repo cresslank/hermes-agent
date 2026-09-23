@@ -67,6 +67,10 @@ class ChildRelevanceOwner:
         self.launches = {}
         self.targets = {}
         self.last_task = None
+        self.direct = None
+        if getattr(owner, "direct_enabled", False):
+            from agent.supervision_children_direct import RecurringChildControl
+            self.direct = RecurringChildControl(self)
 
     def launched(self, handle):
         # A launch alone does not manufacture a semantic task change.
@@ -76,6 +80,8 @@ class ChildRelevanceOwner:
                 self.last_task = next(reversed(self.runtime.sources.values()))
             self.runtime.revision = replace(self.runtime.revision,
                 control_revision=self.runtime.revision.control_revision + 1)
+            if self.direct is not None:
+                self.direct.start()
 
     def _snapshot(self, handle, scope, plugin_generation):
         with self.owner._lock:
@@ -90,6 +96,12 @@ class ChildRelevanceOwner:
             return self.owner.status(handle)
 
     def changed(self, event, handle=None):
+        if self.direct is not None:
+            # Recurring observations coalesce changed facts at their next bounded
+            # tick, without cancelling another child's in-flight inference.
+            with self.runtime.ready:
+                self.runtime.ready.notify_all()
+            return
         runtime = self.runtime
         from hermes_constants import hermes_home_key
         with runtime.lock:
@@ -157,6 +169,8 @@ class ChildRelevanceOwner:
                     completeness=ChildCompleteness(scope="enumerated_items", complete=True))
 
     def drain(self):
+        if self.direct is not None:
+            self.direct.drain()
         for target in tuple(self.targets):
             for action in (Action.REPRIORITIZE_CHILD, Action.CANCEL_CHILD):
                 self.runtime.consume_owner_action(target, action, self.apply)

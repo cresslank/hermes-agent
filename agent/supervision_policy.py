@@ -242,6 +242,12 @@ class SupervisionRuntime:
         from agent.supervision_facade import registrations_for_scope
         return registrations_for_scope(self.revision.profile)
 
+    def _owner_survives_turn(self, owner):
+        if owner == "completion_admission":
+            return True
+        from agent.supervision_children_direct import active
+        return owner == "owned_delegation" and active(self)
+
     def observe(self, event, facts, *, target_id=None, actions=(), evidence_refs=(),
                 deadline=None, completeness=None, origin_kind="owner", data_class="task_text",
                 owner="agent", candidates=(), required_ids=(), relations=(), required_data_classes=(),
@@ -253,7 +259,7 @@ class SupervisionRuntime:
                 and set(required_data_classes) <= r.data_policy]
         if owner == "mcp":
             regs = [r for r in regs if recipient_authorized(mcp_recipients, r)]
-        if not regs or (self.closed and owner != "completion_admission") or (deadline is not None and deadline <= self.clock()):
+        if not regs or (self.closed and not self._owner_survives_turn(owner)) or (deadline is not None and deadline <= self.clock()):
             return None
         with self.lock:
             if expected_revision is not None and self.revision != expected_revision:
@@ -324,7 +330,7 @@ class SupervisionRuntime:
         return receipt
 
     def _validate(self, proposal, registration, *, acknowledging=False):
-        if (self.closed and proposal.owner != "completion_admission") or not registration.active or proposal.plugin_generation != registration.generation:
+        if (self.closed and not self._owner_survives_turn(proposal.owner)) or not registration.active or proposal.plugin_generation != registration.generation:
             return "rejected", "revoked"
         if proposal.expected != self.revision or getattr(self.agent(), "session_id", "") != self.session_id:
             return "stale", "revision_changed"
@@ -469,12 +475,12 @@ class SupervisionRuntime:
             out = []
             from agent.supervision_delivery import drain_findings
             drain_findings(self)
-            if not allow_advisory:
-                self._take("", set())  # only settle invalidated/expired proposals
-                return ()
             children = getattr(self, 'children', None)
             if children is not None:
                 children.drain()
+            if not allow_advisory:
+                self._take("", set())  # only settle invalidated/expired proposals
+                return ()
             self.dependencies.drain()
             efficiency = getattr(self, "efficiency", None)
             if efficiency is not None:
@@ -919,6 +925,10 @@ class SupervisionRuntime:
         record_work(self)
 
     def revoke(self):
+        self.control_revoked = True
+        children = getattr(self, "children", None)
+        if children is not None and children.direct is not None:
+            children.direct.stop.set()
         optional_reads = getattr(self, "optional_reads", None)
         if optional_reads is not None:
             optional_reads.clear()

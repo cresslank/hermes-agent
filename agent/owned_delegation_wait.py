@@ -45,6 +45,8 @@ class ChildControlWait:
             bridge = getattr(rt, "children", None)
             if bridge is not None and any(p.owner == "owned_delegation" and p.target_id in self.targets for p, _ in rt.pending):
                 # No advisory/main-agent work is drained from a synchronous tool.
+                if bridge.direct is not None:
+                    bridge.direct.drain()
                 for target in self.targets:
                     if target in bridge.targets:
                         from agent.supervision_types import Action
