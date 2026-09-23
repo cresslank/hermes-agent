@@ -3656,7 +3656,9 @@ class TelegramAdapter(BasePlatformAdapter):
                     _separate_chunk_indicator_from_fence(re.sub(r" \((\d+)/(\d+)\)$", r" \\(\1/\2\\)", chunk))
                     for chunk in chunks
                ]
-            return await self._send_chunks(chat_id, chunks, delivered, reply_to, metadata, error_types)
+            from gateway.emission import telegram_original_format
+            with telegram_original_format(self, content, chunks, chat_id, reply_to, metadata):
+                return await self._send_chunks(chat_id, chunks, delivered, reply_to, metadata, error_types)
         except Exception as e:
             classified = self._classify_send_exception(e, error_types)
             return self._with_partial_send(classified, chunks[len(delivered):], delivered, tail_certain=classified.retryable)

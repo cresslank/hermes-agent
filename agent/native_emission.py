@@ -8,7 +8,7 @@ capacity, failure, cancellation and unsupported transports all remain unknown.
 """
 from __future__ import annotations
 
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from contextvars import ContextVar
 from dataclasses import dataclass, replace
 import hashlib
@@ -54,6 +54,9 @@ class EmittedPayload:
     segment_index: int = 0
     segment_count: int = 1
     source_sha256: str = ""
+    # Private native codec proof; never populated from wire JSON or plugin fields.
+    origin: object = None
+    current: object = None
 
 
 class NativeEmissionScope:
@@ -72,10 +75,14 @@ class NativeEmissionScope:
         self._lock = threading.RLock()
         self._remaining = MAX_OBSERVATIONS
         self._closed = False
+        self._owner_fence = None
 
     def close(self):
-        with self._lock:
-            self._closed = True
+        # Installed runtime leases close under the same fence as canonical
+        # commits. Generic embedding scopes have no runtime authority fence.
+        with self._owner_fence or nullcontext():
+            with self._lock:
+                self._closed = True
 
     @contextmanager
     def activate(self):
@@ -85,17 +92,29 @@ class NativeEmissionScope:
         finally:
             _scope.reset(token)
 
-    def _reserve(self):
+    def current(self):
+        # Never call runtime predicates with the scope lock held. Runtime owners
+        # close scopes under their own fence; the opposite order deadlocks.
         with self._lock:
-            if self._closed or self._remaining <= 0 or not self._current():
+            live = not self._closed
+        return live and self._current()
+
+    def _reserve(self):
+        if not self.current():
+            return False
+        with self._lock:
+            if self._closed or self._remaining <= 0:
                 return False
             self._remaining -= 1
             return True
 
     def _publish(self, receipt):
         with self._lock:
-            if not self._closed and self._current():
-                self._callback(receipt)
+            callback = None if self._closed else self._callback
+        if callback is not None and self.current():
+            # Canonical consumers authenticate/recheck the installed lease at
+            # their final commit, not merely here before entering their fence.
+            callback(receipt)
 
 
 _scope: ContextVar[NativeEmissionScope | None] = ContextVar("native_emission_scope", default=None)
@@ -183,7 +202,7 @@ class _PendingEmission:
             return
 
 
-def prepare(payload, *, surface, target, generation, operation, frame_id=""):
+def prepare(payload, *, surface, target, generation, operation, frame_id="", origin=None, current=None):
     scope = _scope.get()
     if scope is None or not generation or not isinstance(payload, str):
         return None
@@ -199,9 +218,12 @@ def prepare(payload, *, surface, target, generation, operation, frame_id=""):
                        for v in (surface, generation, operation, frame_id))
                 or not scope._reserve()):
             return None
+        guards = _guards.get()
+        def still_current():
+            return all(check() for check in guards) and (current is None or current())
         receipt = EmittedPayload(scope.identity, uuid.uuid4().hex, surface, target,
                                  generation, operation, frame_id or uuid.uuid4().hex,
-                                 raw, hashlib.sha256(raw).hexdigest(), 0, len(raw))
+                                 raw, hashlib.sha256(raw).hexdigest(), 0, len(raw), origin=origin, current=still_current)
         segment = _segment.get()
         if segment is not None:
             receipt = replace(receipt, batch_id=segment[0], segment_index=segment[1],
@@ -217,8 +239,9 @@ class ObservedTextIO:
     A local renderer wrapper, not a global stdout replacement. At most one bounded
     payload is held until flush; oversize/multiple failed writes invalidate it.
     """
-    def __init__(self, stream, *, surface, operation):
+    def __init__(self, stream, *, surface, operation, origin=None):
         self._stream = stream
+        self._origin = origin
         self._surface, self._operation = surface, operation
         self._generation = transport_generation(stream)
         self._parts = []
@@ -226,7 +249,19 @@ class ObservedTextIO:
         self._valid = True
 
     def __getattr__(self, name):
-        return getattr(self._stream, name)
+        value = getattr(self._stream, name)
+        if name == "buffer":
+            return _ObservedBinary(value, self)
+        return value
+
+    def _written(self, text, written):
+        if self._generation and self._valid:
+            self._size += len(text)
+            if written != len(text) or self._size > MAX_PAYLOAD_BYTES or len(self._parts) >= MAX_OBSERVATIONS:
+                self._valid = False
+                self._parts.clear()
+            elif text:
+                self._parts.append(text)
 
     def write(self, text):
         try:
@@ -235,13 +270,7 @@ class ObservedTextIO:
             self._valid = False
             self._parts.clear()
             raise
-        if self._generation and self._valid:
-            self._size += len(text)
-            if written != len(text) or self._size > MAX_PAYLOAD_BYTES or len(self._parts) >= MAX_OBSERVATIONS:
-                self._valid = False
-                self._parts.clear()
-            elif text:
-                self._parts.append(text)
+        self._written(text, written)
         return written
 
     def flush(self):
@@ -254,7 +283,7 @@ class ObservedTextIO:
         if self._valid and self._parts:
             pending = prepare("".join(self._parts), surface=self._surface,
                               target=(("stream", "stdout"),), generation=self._generation,
-                              operation=self._operation)
+                              operation=self._operation, origin=self._origin)
             if pending:
                 pending.succeeded()
         self._parts.clear()
@@ -262,12 +291,38 @@ class ObservedTextIO:
         return result
 
 
-def observed_stream(stream, *, surface, operation):
+class _ObservedBinary:
+    """prompt_toolkit prefers stdout.buffer; observe that real native byte sink."""
+    def __init__(self, stream, owner):
+        self._stream, self._owner = stream, owner
+
+    def __getattr__(self, name):
+        return getattr(self._stream, name)
+
+    def write(self, data):
+        owner = self._owner
+        try:
+            written = self._stream.write(data)
+            try:
+                text = data.decode("utf-8")
+            except UnicodeError:
+                owner._valid = False
+                owner._parts.clear()
+            else:
+                owner._written(text, len(text) if written == len(data) else -1)
+            return written
+        except BaseException:
+            owner._valid = False
+            owner._parts.clear()
+            raise
+
+
+def observed_stream(stream, *, surface, operation, origin=None):
     import io
     # A queue-like stdout proxy can acknowledge enqueue, not write/flush.
     if _scope.get() is None or not isinstance(stream, io.TextIOBase):
         return stream
-    return ObservedTextIO(stream, surface=surface, operation=operation)
+    return ObservedTextIO(stream, surface=surface, operation=operation, origin=origin)
 
 
 def exact_emitted_span(receipt, literal: bytes, *, identity, target, generation):
@@ -331,9 +386,12 @@ def install_for_runtime(runtime, callback):
         # revoke/reset advance the revision; sealing alone is not sink closure.
         return bool(a is not None and r is not None
                     and r.revision == revision and getattr(a, "_supervision_runtime", None) is r
-                    and getattr(a, "_current_turn_id", None) == turn)
+                    and getattr(a, "_current_turn_id", None) == turn
+                    and getattr(a, "session_id", None) == r.session_id
+                    and not getattr(a, "_interrupt_requested", False))
     scope = NativeEmissionScope(EmissionIdentity(revision.profile, revision.lineage,
         revision.work_id, revision.run_generation, turn), callback, current=current)
+    scope._owner_fence = runtime.lock
     prior = getattr(runtime, "_native_emission_scope", None)
     if type(prior) is NativeEmissionScope:
         prior.close()

@@ -703,6 +703,7 @@ def _sanitize_gateway_final_response(platform: Any, text: str) -> str:
     # Raw-text/programmatic surfaces above keep passthrough — their JSON consumers escape surrogates safely.
     from agent.message_sanitization import _sanitize_surrogates
 
+    original = text
     text = _sanitize_surrogates(str(text))
 
     # Some OpenAI-compatible providers leak their exact end-of-sequence control token into
@@ -722,7 +723,8 @@ def _sanitize_gateway_final_response(platform: Any, text: str) -> str:
     redacted = _redact_gateway_user_facing_secrets(str(text))
     if _looks_like_gateway_provider_error(redacted):
         return _gateway_provider_error_reply(redacted)
-    return redacted
+    from agent.supervision_original_output import unchanged
+    return unchanged(original, redacted)
 
 
 def _prepare_gateway_status_message(platform: Any, event_type: str, message: str) -> Optional[str]:

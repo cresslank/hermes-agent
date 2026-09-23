@@ -563,6 +563,10 @@ def finalize_turn(
     if isinstance(final_response, str):
         final_response = _sanitize_surrogates(final_response)
 
+    from agent.supervision_original_output import finalized
+    final_response = finalized(agent, final_response,
+        eligible=bool(completed and not interrupted and not failed))
+
     result = {
         "final_response": final_response,
         "last_reasoning": _last_turn_reasoning(messages),

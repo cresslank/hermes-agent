@@ -32,7 +32,11 @@ class StreamDeliveryMixin:
 
     def _deliver_to_stream_callbacks(self, text: str) -> bool:
         """Send ``text`` to the display + TTS delta callbacks; True if at least one accepted it."""
-        results = [self._call_quietly(cb, text) for cb in (self.stream_delta_callback, self._stream_callback)]
+        from agent.supervision_original_output import stream_text
+        from agent.native_emission import for_agent
+        text = stream_text(self, text)
+        with for_agent(self):
+            results = [self._call_quietly(cb, text) for cb in (self.stream_delta_callback, self._stream_callback)]
         return any(results)
 
     def _enqueue_stream_hook(self, event: str, *, label: str | None = None, **fields: Any) -> None:

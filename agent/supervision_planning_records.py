@@ -20,6 +20,33 @@ TERMINAL = frozenset({"superseded", "withdrawn_by_parent", "disposition_committe
 def save(runtime, rows, *, validate=None, predecessors=None, predecessor_records=None):
     """Atomically replace the named graph records. Fail closed on storage/capacity."""
     runtime._assert_owner(tool_worker=True)
+    return _save(runtime, rows, validate=validate, predecessors=predecessors,
+                 predecessor_records=predecessor_records)
+
+
+def save_original(owner, row, *, validate, predecessors, predecessor_records, references):
+    """Only this runtime's installed native attempt may write from a sink thread.
+
+    No global owner bypass and no fabricated tool-worker context. The callback
+    owner computes the fixed original-output row; this entry point cannot write
+    adoption, planning, source authority or corrections.
+    """
+    from agent.supervision_original_output import _Attempt
+    if type(owner) is not _Attempt:
+        return False
+    rt = owner.rt
+    if (getattr(rt, "_original_output_attempt", None) is not owner
+            or owner.scope is not getattr(rt, "_native_emission_scope", None)
+            or getattr(owner.scope._callback, "__self__", None) is not owner
+            or not rt.lock._is_owned() or not owner.current()
+            or row.get("id") != owner.row["id"] or row.get("kind") != "claim_delivery"
+            or row.get("dimension") != "original_output"):
+        return False
+    return _save(rt, [row], validate=validate, predecessors=predecessors,
+        predecessor_records=predecessor_records, references=references)
+
+
+def _save(runtime, rows, *, validate=None, predecessors=None, predecessor_records=None, references=None):
     try:
         encoded = []
         for row in rows:
@@ -47,6 +74,12 @@ def save(runtime, rows, *, validate=None, predecessors=None, predecessor_records
         with writer(runtime) as (conn, session):
             if validate is not None and not validate():
                 return False
+            for ident, expected_row in (references or {}).items():
+                expected = json.dumps(expected_row, sort_keys=True, separators=(",", ":"), allow_nan=False)
+                reference = conn.execute("SELECT session_id,revision,status,body_json FROM supervision_owner_records WHERE profile=? AND lineage=? AND work_id=? AND record_id=?",
+                    (*key, ident)).fetchone()
+                if reference != (session, expected_row["revision"], expected_row["status"], expected):
+                    raise sqlite3.IntegrityError("owner_reference_changed")
             _work(conn, runtime, session)
             existing = {r[0] for r in conn.execute("SELECT record_id FROM supervision_owner_records WHERE profile=? AND lineage=? AND work_id=?", key)}
             novel = {r["id"] for r, _ in encoded} - existing
@@ -76,6 +109,8 @@ def save(runtime, rows, *, validate=None, predecessors=None, predecessor_records
                     DO UPDATE SET revision=excluded.revision,status=excluded.status,
                     body_json=excluded.body_json,updated_at=excluded.updated_at""",
                     (*key, row["id"], row["kind"], session, row["revision"], row["status"], body, time.time()))
+            if validate is not None and not validate():
+                raise sqlite3.IntegrityError("owner_commit_invalidated")
         return True
     except (OSError, sqlite3.Error, ValueError, TypeError):
         return False

@@ -193,6 +193,11 @@ class NativeFinalUse:
                         predecessors={row["id"]: (selected.node["revision"], selected.node["status"])},
                         predecessor_records={row["id"]: selected.node}):
                     uses.graph.nodes[row["id"]] = row
+                    try:
+                        from agent.supervision_original_output import adopted
+                        adopted(rt.agent(), row)
+                    except Exception:
+                        logger.debug("optional original-output adoption join unavailable")
         finally:
             phase.live = False
             if permission is not None:

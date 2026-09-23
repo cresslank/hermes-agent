@@ -39,11 +39,23 @@ def prepare_frame(obj, line, transport, peer):
     # Never certify a history/replay result as a fresh assistant emission.
     if params.get("type") not in {"message.complete", "message.delta"}:
         return line
-    with restore_context(scope):
+    from agent.supervision_original_output import origin_of, codec, native_text_sink
+    original_payload = (obj.get("params") or {}).get("payload") or {}
+    original = original_payload.get("text")
+    origin = origin_of(original)
+    payload = params.get("payload") or {}
+    proof = None
+    if (peer == "stdio" and native_text_sink(transport) and origin is not None and "rendered" not in payload
+            and payload.get("text") == original
+            and params.get("type") == ("message.complete" if origin.stage == "final" else "message.delta")
+            and json.dumps(wire, ensure_ascii=False) + "\n" == line):
+        proof = codec(original, line, "tui.stdio-text.v1", ("params", "payload", "text"))
+    from agent.native_emission import capture_guards
+    with restore_context(scope, guards=capture_guards()):
         pending = prepare(line, surface="tui", generation=transport_generation(transport),
                           target=(("peer", str(peer)), ("session", str(params.get("session_id", "")))),
                           operation=str(params["type"]),
-                          frame_id=str(params.get("seq", "")))
+                          frame_id=str(params.get("seq", "")), origin=proof, current=current)
     return WireFrame(line, pending, current)
 
 

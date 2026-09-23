@@ -641,7 +641,10 @@ def write_json(obj: dict) -> bool:
         project_room_member_activity(obj, _sessions)
         sid = ((params or {}).get("session_id")) if isinstance(params, dict) else ""
         if sid and (t := (_sessions.get(sid) or {}).get("transport")) is not None:
-            return t.write(obj)
+            from agent.native_emission import guard_emissions
+            session = _sessions[sid]
+            with guard_emissions(lambda: _sessions.get(sid) is session and session.get("transport") is t):
+                return t.write(obj)
     return (current_transport() or _stdio_transport).write(obj)
 
 

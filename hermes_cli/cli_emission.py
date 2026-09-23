@@ -22,7 +22,11 @@ def print_ansi(text):
     local = copy(output)
     local.stdout = stream
     local._buffer = []
-    return _pt_print(_PT_ANSI(text), output=local)
+    from hermes_cli.cli_origin import map_prompt_output
+    from agent.native_emission import guard_emissions
+    map_prompt_output(local, stream, text)
+    with guard_emissions(lambda: get_app_session().output is output and output.stdout is stream._stream):
+        return _pt_print(_PT_ANSI(text), output=local)
 
 
 def print_fallback(text):

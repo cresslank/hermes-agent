@@ -115,7 +115,9 @@ class StdioTransport:
             import io
             # Queue-like/custom stdout proxies can acknowledge only enqueue.
             if isinstance(stream, io.TextIOBase):
-                line = prepare_frame(obj, line, stream, "stdio")
+                from agent.native_emission import guard_emissions
+                with guard_emissions(lambda: self._stream_getter() is stream):
+                    line = prepare_frame(obj, line, stream, "stdio")
             try:
                 written = stream.write(line)
             except Exception as e:

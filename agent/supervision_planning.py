@@ -68,7 +68,8 @@ class PlanningGraph:
         if self.loaded_work != work:
             self.clear()
             for row in records.load(self.rt):
-                if row["kind"] not in {"planning", "research_pass", "gap_obligation", "claim_delivery"}:
+                if (row.get("dimension") == "original_output"
+                        or row["kind"] not in {"planning", "research_pass", "gap_obligation", "claim_delivery"}):
                     continue
                 if row["declaration"]["type"] == "delegation_candidate":
                     d = row["declaration"]

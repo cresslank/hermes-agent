@@ -168,9 +168,73 @@ unchanged, and ordinary representable numbers, booleans and Unicode stay distinc
 The separate [native local final-use purpose](native-claim-use-contests.md#native-local-final-use)
 can now record exact whole-final adoption after ordinary batch completion. The
 same-window claim/contest join is also documented there. Neither changes v1
-publication lifetime or grants egress. Still open: mandatory-answer relevance,
-adopted-claim contest/correction delivery joins, and actual original/correction
-emission and durable receipts. Source publication alone closes none of these.
+publication lifetime or grants egress. The original-output prerequisite below
+joins native original emission to adoption. Still open: mandatory-answer
+relevance, post-original evidence ingress, adopted-claim contest/correction
+joins, and once-only correction delivery. This is not full F22 completion.
+
+## Native original-output receipts (local prerequisite)
+
+`agent/supervision_original_output.py` installs one private native observation
+lease **before each API attempt**, after flushing the previous stream tail.
+It requires exactly one eligible native final-use selection and this separate
+profile-local metadata policy (off by default):
+
+```yaml
+supervision:
+  enabled: true
+  original_output:
+    version: supervision.original-output.v1
+    enabled: true
+```
+
+The existing literal-source registration and `literal_sources.final_use` grant
+are still required; this policy does not grant either, enable an external
+supervisor, authorize provider disclosure, or permit correction delivery.
+This is a configuration contract, not live activation clearance.
+
+An early native observation is **not adoption**. The ordinary accepted-final
+consumer commits adoption, then the actual post-hook finalizer must retain the
+exact whole rendering. Only those two facts plus a complete native sink
+observation can set `original_emitted`. A hook rewrite, replacement final,
+retry, extra streamed content, or superseded writer cannot retroactively adopt
+matching text. Fragmented provider streams are not buffered or reconstructed;
+the first complete matching native segment or the final response can carry
+private origin identity. String copies, serialization and arbitrary transforms
+lose that identity. Known native no-op sanitation/media-extraction transforms
+preserve it only when the complete text is unchanged and no media is involved.
+
+Supported native projections:
+
+| Surface | Qualified output | Remains unknown (ordinary delivery unchanged) |
+| --- | --- | --- |
+| CLI | Final response panel, `display.final_response_markdown: strip` (the default) when stripping changes nothing, or `raw`; native Rich literal segments through prompt_toolkit PlainTextOutput/VT100 to a descriptor-backed UTF-8 stream. Ordered soft-wrapped lines qualify at normal terminal widths. | `render` Markdown, changed strip output, controls, truncation, unsupported renderers, queued stdout proxies, history replay, incomplete/failed line groups. |
+| Telegram Gateway | One escape-only MarkdownV2 `send_message` to a forum `message_thread_id`, no reply anchor, unchanged bot and routing; ordinary sanitation, extraction and `send_final_ledgered` finalization. | Rich messages, splits, edits, root/private/direct-message-topic variants, reply anchors, altered formatting/routing, failed/cancelled/ambiguous sends. No rich-disable setting is required for plain content that naturally uses MarkdownV2. |
+| TUI | Descriptor-backed stdio `message.delta` or `message.complete`, exact native JSON text field and current session/transport; real write and flush. | WebSocket/enqueue acknowledgments, alternate `rendered` fields, detached/replaced transports, short writes, failed writes/flushes, oversized frames. This proves backend emission, not client rendering or user reading. |
+
+Rich wrapping is proven from the renderer's marked segments, including exact
+source offsets and space elisions, before writes. Each native line is observed
+separately; only a complete ordered group on one origin/transport qualifies.
+At most 32 compact line receipts are retained, without buffering output bodies.
+The renderer remains capped at 16,384 characters, each native payload at 16 KiB,
+and the existing 16 KiB
+canonical record cap can refuse large receipt groups. Partial groups never
+produce a whole-original receipt. The observation's `segments` holds each line's
+actual payload hash/byte count; the top-level payload fields identify its final
+line, not a fabricated concatenated transport write.
+
+Facts persist as `kind=claim_delivery`, `dimension=original_output` in the existing
+`supervision_owner_records` family, separate from the declaration/adoption row.
+They retain exact source/adoption/attempt and sink hashes/identities, not source
+bodies. There is no new DDL, generic callback setter, correction queue, transcript
+rewrite, send retry or second ledger. Canonical writes recheck the installed
+lease, current runtime/session/DB identity, exact predecessor bodies, declaration
+or adoption reference and current sink under the existing fences. Cross-thread
+callbacks use a nonblocking runtime lock and zero-wait SQLite writer: contention,
+deletion, reset, revocation or persistence failure leave delivery unknown without
+changing ordinary output. Automatic retention preserves unresolved original
+records; explicit session deletion/reset remains authoritative. Restart readback
+recovers historical facts only, never origin capabilities or replay authority.
 
 ## Verification workflow
 

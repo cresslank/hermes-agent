@@ -4341,6 +4341,9 @@ class BasePlatformAdapter(ABC):
                                "no attachment; delivering recovered original to %s", self.name,
                                len(pre_extract), event.source.chat_id)
                 text_content = _recovered
+        if not (images or local_files or media_files or is_ephemeral_response):
+            from agent.supervision_original_output import unchanged
+            text_content = unchanged(pre_extract, text_content)
         return _ExtractedResponse(
             text_content=text_content, images=images, media_files=media_files,
             local_files=local_files, force_document_attachments=force_document, pre_extract=pre_extract)
