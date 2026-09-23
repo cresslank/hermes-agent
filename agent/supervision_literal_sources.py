@@ -18,6 +18,7 @@ from agent.supervision_types import Revision
 
 VERSION = "supervision.literal-sources.v1"
 SCHEMA = "lcm.literal-record.v1"
+WORKING_PREMISE_VERSION = "supervision.working-premise.v1"
 MAX_RECORDS = 64
 MAX_PUBLICATION = 8
 
@@ -67,6 +68,14 @@ class LiteralSourceProviderV1(ABC):
     def resolve_literal_source(self, engine, invocation_id: str, source_ref: str) -> LiteralSourceRecordV1 | None:
         """Revalidate a retained immutable record against its exact native row only."""
 
+    def working_literal_source(self, engine, exact_ref):
+        """Read one already-selected whole record for a current retrieval use.
+
+        Separate from v1 publication lookup: never renew or publish old handles.
+        Older native owners abstain. No search, inference, or graph locks here.
+        """
+        return None
+
     @abstractmethod
     def release_literal_sources(self, invocation_id: str) -> None:
         pass
@@ -82,11 +91,12 @@ class LiteralSourceInvocationV1:
 
 
 class LiteralSourceRegistration:
-    def __init__(self, facade, engine, provider, recipients):
+    def __init__(self, facade, engine, provider, recipients, working_recipients=frozenset()):
         self.facade, self.engine, self.provider = facade, engine, provider
         self.scope = facade._context._manager.scope_key
         self.generation = uuid.uuid4().hex
         self.recipients = recipients
+        self.working_recipients = working_recipients
         self.active = True
         self.lock = threading.RLock()
         self.pending = {}
@@ -263,10 +273,15 @@ def register(facade, *, version, engine, provider):
     if (not isinstance(recipients, list) or not 1 <= len(recipients) <= 16
             or any(type(r) is not str or not 0 < len(r) <= 128 for r in recipients)):
         return None
+    working = policy.get("working_premises", {})
+    working_recipients = working.get("recipients", []) if isinstance(working, dict) and working.get("version") == WORKING_PREMISE_VERSION else []
+    if (not isinstance(working_recipients, list) or len(working_recipients) > 16
+            or any(type(r) is not str or not 0 < len(r) <= 128 for r in working_recipients)):
+        return None
     old = getattr(facade, "_literal_source_registration", None)
     if old is not None:
         old.close()
-    registration = LiteralSourceRegistration(facade, engine, provider, frozenset(recipients))
+    registration = LiteralSourceRegistration(facade, engine, provider, frozenset(recipients), frozenset(working_recipients))
     facade._literal_source_registration = registration
     context._manager._track_registration(context.manifest, "literal_sources", context.plugin_id, registration.close)
     return registration

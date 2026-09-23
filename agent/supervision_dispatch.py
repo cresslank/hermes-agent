@@ -46,14 +46,17 @@ def consume(facade, request):
             type(request["capability"]) is not str or type(deadline) not in (int, float) or
             not math.isfinite(deadline)):
         return False
+    from agent.supervision_working_premise import current_read, consumption_fence as premise_fence
+    premise_read = current_read(runtime, request["target_id"])
     with runtime.lock:
         opportunity = runtime.opportunities.get(request["target_id"])
         if opportunity is None:
             return False
         claim_fence = (runtime.dependencies.claim_uses.dispatch_fence(request["target_id"], registration)
             if opportunity["owner"] == "claim_uses" else nullcontext(True))
-        with registration.fence, consumption_fence(opportunity), claim_fence as claim_current:
-            if not claim_current:
+        with registration.fence, consumption_fence(opportunity), claim_fence as claim_current, premise_fence(
+                opportunity, registration, premise_read) as premise_current:
+            if not claim_current or not premise_current:
                 return False
             entry = opportunity.get("dispatch", {}).get(registration.generation)
             if entry is None:

@@ -244,7 +244,7 @@ class SupervisionRuntime:
                 deadline=None, completeness=None, origin_kind="owner", data_class="task_text",
                 owner="agent", candidates=(), required_ids=(), relations=(), required_data_classes=(),
                 required_obligations=(), deadline_issued_at=None, recipient=None, expected_revision=None,
-                mcp_recipients=()):
+                mcp_recipients=(), working_premise=None):
         from agent.supervision_mcp import recipient_authorized
         regs = [r for r in self._registrations() if (recipient is None or r is recipient)
                 and "observe" in r.grants and data_class in r.data_policy
@@ -272,6 +272,7 @@ class SupervisionRuntime:
                 "required_ids": tuple(required_ids), "relations": tuple(relations),
                 "data_classes": frozenset((data_class, *required_data_classes)),
                 "mcp_recipients": tuple(mcp_recipients) if owner == "mcp" else (),
+                "working_premise": working_premise,
             }
             while len(self.opportunities) > 64:
                 self.opportunities.popitem(last=False)
@@ -742,12 +743,18 @@ class SupervisionRuntime:
         facts = project(request.facts) if request.event else {"candidates": project(request.candidates),
             "required_ids": request.required_ids, "critical_spans": request.critical_spans,
             "relations": request.relations}
+        from agent.supervision_working_premise import prepare, CLASSES
+        premise = prepare(self, action, request, deadline)
+        if premise is not None:
+            facts["premise"] = premise.record.source_bytes.decode("utf-8")
         snapshot = self.observe(request.event or action.value, facts,
             target_id=request.target_id, actions=(action,),
             evidence_refs=refs, deadline=deadline, completeness=request.completeness,
             owner=request.owner, candidates=ids, required_ids=request.required_ids,
             relations=request.relations, data_class=request.data_policy[0],
-            required_data_classes=request.data_policy, required_obligations=request.required_ids,
+            required_data_classes=tuple(set(request.data_policy) | CLASSES) if premise else request.data_policy,
+            required_obligations=request.required_ids, working_premise=premise,
+            recipient=premise.recipient if premise else None,
             mcp_recipients=mcp_recipients, expected_revision=request.revision)
         if snapshot is None:
             return baseline
@@ -821,6 +828,8 @@ class SupervisionRuntime:
         seam; it is neither a second receipt database nor an external-effect claim.
         """
         self._assert_owner(tool_worker=True)
+        from agent.supervision_working_premise import current_read, consumption_fence as premise_fence
+        premise_read = current_read(self, target_id)
         with self.lock:
             entry = self.owner_selections.get(receipt_id)
             if entry is None or entry[0].target_id != target_id:
@@ -832,7 +841,11 @@ class SupervisionRuntime:
             read_started = receipt_id in self.owner_reads
             self.owner_reads.discard(receipt_id)
             from agent.supervision_mcp import consumption_fence
-            with registration.fence, consumption_fence(self.opportunities.get(target_id)):
+            opportunity = self.opportunities.get(target_id)
+            with registration.fence, consumption_fence(opportunity), premise_fence(
+                    opportunity, registration, premise_read) as premise_current:
+                if not premise_current:
+                    return self._settle(proposal, "rejected", "owner_postvalidation")
                 failure = self._validate(proposal, registration, acknowledging=True)
                 if failure:
                     return self._settle(proposal, *failure)
