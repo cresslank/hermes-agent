@@ -153,7 +153,10 @@ def _persist_dispatch(record: Dict[str, Any]) -> None:
     except OSError:
         pass
     with _DB_LOCK, _transaction() as conn:
-        from agent.supervision_store import AdmissionError
+        from agent.supervision_store import AdmissionError, generation
+        if (runtime is not None and conn.execute('SELECT 1 FROM sessions WHERE id=?',
+                (record["parent_session_id"],)).fetchone()):
+            task_payload["supervision_parent_generation"] = generation(conn, record["parent_session_id"])
         source_session = record.get("parent_session_id") or record.get("origin_session_id") or record.get("session_key", "")
         if conn.execute("SELECT 1 FROM supervision_generations WHERE session_id=? AND revoked=1", (source_session,)).fetchone():
             raise AdmissionError("launch session revoked")
@@ -905,7 +908,9 @@ def _push_completion_event(record: Dict[str, Any], result: Dict[str, Any], statu
     else:
         payload = {
             "summary": result.get("summary"), "error": result.get("error"), "api_calls": result.get("api_calls", 0),
-            "duration_seconds": result.get("duration_seconds", round(completed_at - dispatched_at, 2))}
+            "duration_seconds": result.get("duration_seconds", round(completed_at - dispatched_at, 2)),
+            **{key: result[key] for key in ("supervisor_control", "handed_off_processes", "orphaned_processes",
+                                           "unread_completions", "cleanup_pending", "worktree", "truncated") if key in result}}
     evt = {
         "type": "async_delegation", "delegation_id": record.get("delegation_id"),
         # session_key routes back to the originating gateway session; "" => CLI.

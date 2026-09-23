@@ -175,8 +175,8 @@ def persist_admission(conn, *, event, claim, target_session_id, disposition='del
     prior = get_admission(conn, delivery)
     if prior:
         saved = json.loads(prior['event_json'])
-        for key in ('summary','results','status','error','source_receipt','verified'):
-            if key in event and event[key] != saved.get(key):
+        for key in ('summary','results','status','error','source_receipt','verified','supervisor_control'):
+            if event.get(key) != saved.get(key):
                 raise AdmissionError('immutable delivery payload changed')
         if prior['state'] == 'persisted':
             row = conn.execute('SELECT delivery_claim FROM async_delegations WHERE delegation_id=?', (launch,)).fetchone()
@@ -191,8 +191,8 @@ def persist_admission(conn, *, event, claim, target_session_id, disposition='del
         raise AdmissionError('final source not committed')
     if subtype == 'final' and row['event_json']:
         saved = json.loads(row['event_json'])
-        for key in ('summary','results','status','error'):
-            if key in event and event[key] != saved.get(key):
+        for key in ('summary','results','status','error','supervisor_control'):
+            if event.get(key) != saved.get(key):
                 raise AdmissionError('source event bytes changed')
     if subtype == 'final' and (row['delivery_state'] != 'pending' or row['delivery_claim'] != claim):
         raise AdmissionError('source claim changed')
@@ -210,8 +210,13 @@ def persist_admission(conn, *, event, claim, target_session_id, disposition='del
         raise AdmissionError('finding requires committed source object')
     # An unknown/required obligation is never semantically suppressible.
     effect_pending = conn.execute('SELECT effect_pending FROM delegation_result_objects WHERE object_id=?', (object_id,)).fetchone()[0]
+    from agent.supervisor_control_presentation import protected_delivery
+    mandatory = protected_delivery(event) or (subtype == 'final' and
+        protected_delivery(json.loads(get_result_object(conn, object_id))))
     retainable = (retainable and get_launch_control(conn, launch)['retainable'] and not effect_pending
-                  and not event.get('error') and row['state'] in {'completed', 'success'})
+                  and not mandatory and row['state'] in {'completed', 'success'})
+    if mandatory:
+        disposition = 'deliver_unchanged'
     view_text, not_before = None, None
     if disposition == 'deliver_bounded_view' and retainable and view_window is not None:
         try:

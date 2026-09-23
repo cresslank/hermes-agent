@@ -23,6 +23,9 @@ def event_presentation_muted(event: str, session_id: str) -> bool:
 
 def diagnostic_process_event(event: dict) -> bool:
     """Early failure/monitor diagnostics, not the explicitly requested final result."""
+    if ("supervisor_control" in event or any("supervisor_control" in item
+            for item in (event.get("results") or ()) if isinstance(item, dict))):
+        return False
     return bool(event.get("task_failure_notice")) or event.get("type") in {
         "watch_disabled", "watch_overflow_tripped", "watch_overflow_released",
     }
@@ -104,20 +107,24 @@ class OptionalUpdate:
     cleanup: bool = False
     correction: bool = False
     changed_commitment: bool = False
+    supervisor_control: bool = False
+    phase: str | None = None
 
     @property
     def eligible(self):
         return (self.optional and self.replaceable and self.subject and self.revision
                 and not any((self.requested, self.approval, self.safety, self.failure,
-                             self.cleanup, self.correction, self.changed_commitment)))
+                             self.cleanup, self.correction, self.changed_commitment, self.supervisor_control)))
 
 
 class OptionalProgressText(str):
     """Producer-owned marker; ordinary strings and warnings stay unclassified."""
     def __new__(cls, text, *, subject="provider_wait", revision="progress"):
         value = super().__new__(cls, text)
+        phase = revision if revision in {"progress", "local_load", "first_chunk", "post_chunk",
+                                         "first_event", "reconnect", "post_event"} else None
         value.optional_update = OptionalUpdate(subject, revision, optional=True,
-                                              replaceable=True, complete=True)
+                                              replaceable=True, complete=True, phase=phase)
         return value
 
 
@@ -223,7 +230,10 @@ class StatusCoalescer:
             if (self._last.get(metadata.subject) or (None,))[0] == key or (pending and pending.fingerprint == key):
                 return  # exact optional duplicates never dispatch inference
             last = self._last.get(metadata.subject)
-            can_queue = (last is not None and metadata.complete and callable(self.dispatch)
+            # Native wait/load phases already identify progress. Show changed
+            # progress immediately and deduplicate identical notices locally;
+            # inference is reserved for genuinely unclassified optional content.
+            can_queue = (metadata.phase is None and last is not None and metadata.complete and callable(self.dispatch)
                          and callable(self.call_later)
                          and (pending is not None or len(self._pending) < self.CAPACITY))
             if can_queue:

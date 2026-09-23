@@ -33,10 +33,11 @@ def _str_or_none(value: Any) -> Optional[str]:
 
 def _fabricated_entry(idx: int, status: str, error: str, child: Any, duration: float = 0) -> Dict[str, Any]:
     """Result entry for a child that raised, never finished, or was abandoned."""
-    return {
+    from agent.supervisor_control_presentation import attach_supervisor_control
+    return attach_supervisor_control({
         "task_index": idx, "status": status, "summary": None, "error": error, "api_calls": 0,
         "duration_seconds": duration, "_child_role": getattr(child, "_delegate_role", None),
-    }
+    }, child)
 
 def _append_missed_steer(entry: Dict[str, Any], late_steer: Optional[str]) -> None:
     """Record steer text that won the race with the child's failure/timeout."""
@@ -678,7 +679,8 @@ def _build_result_entry(
         entry["missed_steer"] = _missed_steer
         _miss_note = ("[steer did not land — the subagent finished before it could " f"be delivered: {_missed_steer}]")
         entry["summary"] = f"{summary}\n\n{_miss_note}" if summary else _miss_note
-    return entry
+    from agent.supervisor_control_presentation import attach_supervisor_control
+    return attach_supervisor_control(entry, child)
 
 
 def _is_image_url(ref: str) -> bool:
@@ -763,6 +765,11 @@ class _ChildRun:
 
     def attach_worktree(self, entry_dict: Dict[str, Any]) -> Dict[str, Any]:
         """Inspect + prune the child worktree, reporting into the entry (no-op without isolation)."""
+        # The finally-path refreshes this same returned mapping after native
+        # lifecycle settlement. A timeout keeps requested/unknown, not stopped.
+        self._result_entry = entry_dict
+        from agent.supervisor_control_presentation import attach_supervisor_control
+        attach_supervisor_control(entry_dict, self.child)
         info = self.worktree_info
         if info is None:
             return entry_dict
@@ -1038,6 +1045,8 @@ class _ChildRun:
             "files_written": sorted({p for tid, paths in _files_written_map.items() if tid == self.child_task_id for p in paths})[:40],
             "output_tail": _extract_output_tail(result, max_entries=8, max_chars=600),
         }
+        if entry.get("supervisor_control") is not None:
+            complete_kwargs["supervisor_control"] = entry["supervisor_control"]
         if entry.get("failure_reason"):
             # Classified verdict rides the event so every surface glosses the failure the same way.
             complete_kwargs["failure_reason"] = entry["failure_reason"]
@@ -1076,6 +1085,10 @@ class _ChildRun:
         # processes, httpx clients) so subagent subprocesses don't outlive the delegation.
         if not close_deferred:
             _close_child(child, "Failed to close child agent after delegation")
+        entry = getattr(self, "_result_entry", None)
+        if entry is not None:
+            from agent.supervisor_control_presentation import attach_supervisor_control
+            attach_supervisor_control(entry, child)
         # The child's execute_code kernels live exactly as long as the child (pinned against the LRU
         # cap while it runs); dispose them here so they never squat the cap after the child is gone.
         with _quiet("Failed to dispose child execute_code kernels: %s"):

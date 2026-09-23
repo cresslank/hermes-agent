@@ -44,7 +44,7 @@ def _read(runtime):
     return conn
 
 
-def pending_decisions(runtime, target_refs):
+def pending_decisions(runtime, target_refs, delegation_id=None):
     """Exact proposed work-map links, not topical similarity or list position."""
     todos, revision = runtime.plan_steps()
     decisions = []
@@ -65,8 +65,49 @@ def pending_decisions(runtime, target_refs):
                 if len(requirement.text) <= 1200:
                     decisions.append({"id": requirement.id, "text": requirement.text,
                         "unresolved": True, "next_action_id": step["todo_id"], "next_action": text})
+    if not decisions and delegation_id is not None:
+        decisions = consumer_decisions(runtime, delegation_id)
     unique = {(d["id"], d["next_action_id"]): d for d in decisions}
     return list(unique.values()) if len(unique) <= 3 else []
+
+
+def consumer_decisions(runtime, delegation_id):
+    """Join authenticated launch consumer links to exact current requirements.
+
+    A required result consumer supplies an unresolved information need, not a
+    newly invented tool action. Missing/old links remain unknown. Read again at
+    the safe point so steering cannot deliver under a replaced requirement.
+    """
+    conn = _read(runtime)
+    try:
+        row = conn.execute("SELECT parent_session_id,task_json FROM async_delegations WHERE delegation_id=?",
+                           (delegation_id,)).fetchone()
+        if not row or row["parent_session_id"] != runtime.session_id:
+            return []
+        task = json.loads(row["task_json"] or "{}")
+        binding = task.get("supervision_revision", {})
+        if any(binding.get(k) != getattr(runtime.revision, k)
+               for k in ("profile", "lineage", "work_id", "instruction_event", "requirements")):
+            return []
+        if task.get("supervision_parent_generation") != store.generation(conn, row["parent_session_id"]):
+            return []
+        controls = store.get_launch_control(conn, delegation_id)["children"]
+        requirements = {r.id: r for r in runtime.requirements}
+        decisions = {}
+        for control in controls:
+            for consumer in control.get("consumers", ()):
+                if (consumer.get("ref") != "parent:" + row["parent_session_id"]
+                        or consumer.get("requires_result") is not True):
+                    continue
+                for rid in consumer.get("requirement_ids", ()):
+                    requirement = requirements.get(rid)
+                    if requirement is not None and 0 < len(requirement.text) <= 1200:
+                        decisions[rid] = {"id": rid, "text": requirement.text, "unresolved": True,
+                            "next_action_id": consumer["ref"], "next_action": requirement.text,
+                            "source": "native_launch_consumer"}
+        return list(decisions.values()) if len(decisions) <= 3 else []
+    finally:
+        conn.close()
 
 
 def offer_child_finding(delegation_id, object_id):
@@ -101,9 +142,10 @@ def offer_child_finding(delegation_id, object_id):
     if any(binding.get(k) != getattr(runtime.revision, k) for k in ("profile", "lineage", "work_id", "instruction_event", "requirements")):
         return
     refs = refs_in_text(goals[index])
-    decisions = pending_decisions(runtime, refs)
+    decisions = pending_decisions(runtime, refs, delegation_id)
     text = entry.get("summary")
-    if (not decisions or entry.get("status") not in {"success", "completed"}
+    from agent.supervisor_control_presentation import protected_delivery
+    if (not decisions or protected_delivery(entry) or entry.get("status") not in {"success", "completed"}
             or not isinstance(text, str) or not 0 < len(text) <= 1200 or entry.get("error")):
         return
     # The immutable child result proves the source bytes, not the truth of its claims.
@@ -219,7 +261,7 @@ def drain_findings(runtime):
                 and meta.get("launch_id") == launch and meta.get("final_completion_ack") is False
                 and meta.get("verification") == "provisional" and meta.get("audience") == "owner"
                 and set(meta.get("decision_ids", ())) <= {d["id"] for d in decisions}
-                and bool(meta.get("decision_ids")) and pending_decisions(runtime, refs) == decisions)
+                and bool(meta.get("decision_ids")) and pending_decisions(runtime, refs, launch) == decisions)
             if failure or not valid:
                 runtime._settle(proposal, *(failure or ("rejected", "admission_invalid")))
                 continue
@@ -240,29 +282,40 @@ def final_decision(event, target_session):
     baseline = CompletionDecision()
     if runtime is None or event.get("finding_id"):
         return baseline
+    with runtime.lock:
+        current_revision = runtime.revision
     conn = _read(runtime)
     try:
-        store.generation(conn, target_session)
+        parent_generation = store.generation(conn, target_session)
         launch = conn.execute("SELECT * FROM async_delegations WHERE delegation_id=?", (event["delegation_id"],)).fetchone()
         if not launch or launch["parent_session_id"] != target_session or not launch["event_json"]:
             return baseline
-        binding = json.loads(launch["task_json"] or "{}").get("supervision_revision", {})
-        if any(binding.get(k) != getattr(runtime.revision, k) for k in ("profile", "lineage", "work_id", "instruction_event", "requirements")):
+        task = json.loads(launch["task_json"] or "{}")
+        binding = task.get("supervision_revision", {})
+        if any(binding.get(k) != getattr(current_revision, k) for k in ("profile", "lineage", "work_id")):
             return baseline
+        changed_input = any(binding.get(k) != getattr(current_revision, k)
+                            for k in ("instruction_event", "requirements"))
+        control = store.get_launch_control(conn, event["delegation_id"])
+        launch_generation = task.get("supervision_parent_generation")
+        if ((launch_generation is not None and launch_generation != parent_generation)
+                or (changed_input and (launch_generation is None or not control["children"]))):
+            return baseline  # old legacy/unbound work cannot be adopted after steering
         saved = json.loads(launch["event_json"])
         object_id = saved.get("source_object_id")
         if not object_id or event.get("source_object_id") != object_id:
             return baseline
         raw = store.get_result_object(conn, object_id)
-        if len(raw) > 1200 or event.get("error") or launch["state"] not in {"success", "completed"}:
+        from agent.supervisor_control_presentation import protected_delivery
+        if (len(raw) > 1200 or protected_delivery(event) or protected_delivery(saved)
+                or protected_delivery(json.loads(raw)) or launch["state"] not in {"success", "completed"}):
             return baseline
         # Read an actual committed final, never a pre-final candidate or model assertion.
         old = conn.execute("""SELECT id,content FROM messages WHERE session_id=? AND role='assistant'
-            AND tool_calls IS NULL AND content IS NOT NULL AND timestamp<=? AND timestamp>=?
-            ORDER BY id DESC LIMIT 1""", (target_session, launch["completed_at"], launch["dispatched_at"])).fetchone()
+            AND tool_calls IS NULL AND content IS NOT NULL AND timestamp>=?
+            ORDER BY id DESC LIMIT 1""", (target_session, launch["dispatched_at"])).fetchone()
         if not old or not 0 < len(old["content"]) <= 1200:
             return baseline
-        control = store.get_launch_control(conn, event["delegation_id"])
         effect = conn.execute("SELECT effect_pending FROM delegation_result_objects WHERE object_id=?", (object_id,)).fetchone()[0]
         root = store.lineage(conn, target_session)
         delivery = store.digest(store.profile_key(), root, event["delegation_id"], "final", "final")
@@ -284,7 +337,10 @@ def final_decision(event, target_session):
         "immutable_object_id": object_id, "source_ref": object_id, "late": True,
         "identity_already_disposed": False, "ordinary_delivery_authorized": True, "optional": control["retainable"],
         "retainable": control["retainable"], "retention_available": available,
-        "required_obligation": control["obligation"] != "optional", "effect_or_cleanup_pending": bool(effect)}
+        "required_obligation": control["obligation"] != "optional", "effect_or_cleanup_pending": bool(effect),
+        "comparison_scope": "same_owned_work", "input_revision_changed": changed_input,
+        "original_revision": binding,
+        "current_revision": {k: getattr(current_revision, k) for k in binding if hasattr(current_revision, k)}}
     facts = {"changed": True, "evidence_refs": [object_id], "result": result,
         "conclusion": {"id": "message:" + str(old["id"]), "text": old["content"]},
         "requirements": reqs, "findings": [{"id": finding, "text": raw.decode(),
@@ -293,12 +349,15 @@ def final_decision(event, target_session):
     issued = runtime.clock()
     deadline = min(issued + .150, runtime.round_deadline) if not runtime.closed and runtime.round_deadline else issued + .150
     actions = {Action.RETAIN_RESULT, Action.FINAL_BOUNDED_VIEW, Action.DELIVER_FINAL}
-    snap = runtime.observe("completion_ready", facts, target_id=delivery, actions=actions,
-        evidence_refs=(object_id,), owner="completion_admission", deadline=deadline,
-        deadline_issued_at=issued, completeness=DeliveryCompleteness(), data_class="project_excerpt")
+    with runtime.lock:
+        if runtime.revision != current_revision:
+            return baseline  # source reads must not be rebound to a newer scope
+        snap = runtime.observe("completion_ready", facts, target_id=delivery, actions=actions,
+            evidence_refs=(object_id,), owner="completion_admission", deadline=deadline,
+            deadline_issued_at=issued, completeness=DeliveryCompleteness(), data_class="project_excerpt")
     if snap is None:
         return baseline
-    runtime._wait_for(delivery, deadline, runtime.revision)
+    runtime._wait_for(delivery, deadline, current_revision)
     with runtime.lock:
         entry = runtime._take(delivery, actions)
         if entry is None:
@@ -319,7 +378,8 @@ def final_decision(event, target_session):
                         Action.DELIVER_FINAL: "deliver_unchanged"}
         return CompletionDecision(dispositions[proposal.action], control["retainable"],
             (0, len(raw)) if proposal.action == Action.FINAL_BOUNDED_VIEW else None, deadline,
-            selection=(runtime, proposal, registration), comparison=(old["id"], store.digest(old["content"])))
+            selection=(runtime, proposal, registration), comparison=(old["id"], store.digest(old["content"])),
+            launch_generation=parent_generation)
 
 
 def persist_selection(conn, decision, row):

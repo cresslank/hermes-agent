@@ -290,7 +290,8 @@ def _list_payload(parent_agent: Any) -> Dict[str, Any]:
         if not _owns_subagent_record(r, parent_agent):
             continue
         started = r.get("started_at")
-        entries.append({
+        from agent.supervisor_control_presentation import attach_supervisor_control
+        entries.append(attach_supervisor_control({
             "subagent_id": r.get("subagent_id"),
             "parent_id": r.get("parent_id"),
             "goal": r.get("goal"),
@@ -299,7 +300,7 @@ def _list_payload(parent_agent: Any) -> Dict[str, Any]:
             "running_seconds": round(time.time() - started, 1) if isinstance(started, (int, float)) else None,
             "accepting_steer": bool(r.get("accepting_steer", False)),
             "live_transcript": getattr(r.get("agent"), "_live_transcript_path", None),
-        })
+        }, r.get("agent")))
     payload: Dict[str, Any] = {"action": "list", "count": len(entries), "subagents": entries}
     if not entries:
         payload["note"] = (

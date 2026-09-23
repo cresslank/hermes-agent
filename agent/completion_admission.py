@@ -35,6 +35,7 @@ class CompletionDecision:
     selection: tuple | None = None
     comparison: tuple[int, str] | None = None
     declined: bool = False
+    launch_generation: int | None = None
 
     def __post_init__(self):
         import math
@@ -118,6 +119,10 @@ def prepare_event(event, claim, target_session_id):
                 if runtime._validate(proposal, registration):
                     decision = replace(decision, disposition='deliver_unchanged', retainable=False,
                                        view_window=None, declined=True)
+            if (decision.launch_generation is not None
+                    and decision.launch_generation != store.generation(conn, target_session_id)):
+                decision = replace(decision, disposition='deliver_unchanged', retainable=False,
+                                   view_window=None, declined=True)
             if decision.comparison is not None:
                 latest = conn.execute("SELECT id,content FROM messages WHERE session_id=? AND role='assistant' "
                                       "AND tool_calls IS NULL AND content IS NOT NULL ORDER BY id DESC LIMIT 1",
