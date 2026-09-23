@@ -452,6 +452,11 @@ class PlanningGraph:
 
     def advisory(self):
         """One next existing request only, under the original shared deadline."""
+        from hermes_cli.config_cached import current_config_readonly
+        config = current_config_readonly()
+        supervision = config.get("supervision", {}) if isinstance(config, dict) else {}
+        if not isinstance(supervision, dict) or supervision.get("planning_advisories", True) is not True:
+            return None
         from agent.owned_delegation import owner_of
         from agent.owned_delegation_planning import native_idle_fence
         rt = self.rt
