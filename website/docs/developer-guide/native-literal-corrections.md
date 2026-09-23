@@ -95,6 +95,10 @@ outbox rows are facts, not a restarted process's permissions or replay queue.
 The source domain remains complete native literal records; the original-output
 codec restrictions documented in `supervision-literal-sources.md` still apply.
 Required/unknown ordinary completion delivery and API no-wake behavior must remain
-independent. The focused ordinary child-construction and actual Gateway/TUI
-continuation qualification is a separate integration lane until its tests land.
-Neither this document nor the local scalar/sink tests constitute full F22 closure.
+independent. Offline continuation tests exercise public child construction, native
+completion publication, committed source changes, same-pair deduplication and
+API no-wake behavior across CLI, Telegram adapter acceptance and TUI session
+notifications. Telegram tests run the real main conversation from the accepted
+adapter handler, not a complete inbound GatewayRunner service. Model HTTP and
+Telegram SDK transport remain in-memory doubles. These tests do not qualify live
+network transport or human reading. Final integrated acceptance is separate.
