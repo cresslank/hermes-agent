@@ -107,7 +107,7 @@ public tool argument schemas receive no new keys; successful tool output may
 include `source_propositions`, a list of opaque host refs. Copying that list
 confers no authority.
 
-The later native graph/adoption join can call:
+The same-window native publication consumer can call:
 
 ```python
 lookup_literal_source(runtime, ref, recipient_registration)
@@ -146,8 +146,8 @@ mutation, role change, session rebinding, revision change and expiry all abstain
 - The existing shared tool-round deadline is used unchanged (currently at most
   150 ms). There is no renewal on lookup, clock override, delayed provider worker,
   durable restart promise, or automatic retrieval to restore missing records.
-- A returned proposition is a snapshot, not a perpetual capability. Every actual
-  consuming effect must reenter lookup. No post-return concurrent-mutation
+- A returned proposition is a snapshot, not a perpetual capability. Every effect
+  using **v1 publication authority** must reenter lookup. No post-return concurrent-mutation
   exclusion is promised. Parent joins must perform their final source check at
   their effect boundary and explicitly design any later durable adoption or
   fresh-invocation renewal; copying an expired source proposition is insufficient.
@@ -165,11 +165,12 @@ only if the existing canonical JSON encoder preserves the original numerical
 meaning; underflow/rounded tokens abstain. Original bytes, hashes and spans are
 unchanged, and ordinary representable numbers, booleans and Unicode stay distinct.
 
-Still open: main-agent adoption of an exact reversible whole-record rendering;
-canonical claim persistence and dependency graph joins; exact-coordinate pair
-eligibility; negotiated F22 contest/correction actions; consequential required
-answer dependency policy; actual original/correction emission and durable
-receipts. Source publication alone does not close any of these requirements.
+The separate [native local final-use purpose](native-claim-use-contests.md#native-local-final-use)
+can now record exact whole-final adoption after ordinary batch completion. The
+same-window claim/contest join is also documented there. Neither changes v1
+publication lifetime or grants egress. Still open: mandatory-answer relevance,
+adopted-claim contest/correction delivery joins, and actual original/correction
+emission and durable receipts. Source publication alone closes none of these.
 
 ## Verification workflow
 

@@ -30,7 +30,7 @@ from jev_supervisor.transport import Transport
 
 
 @pytest.fixture
-def native(tmp_path, monkeypatch):
+def native(tmp_path, monkeypatch, request):
     home = tmp_path / 'home'
     home.mkdir()
     monkeypatch.setenv('HERMES_HOME', str(home))
@@ -45,6 +45,9 @@ def native(tmp_path, monkeypatch):
     monkeypatch.setattr(tools, 'lcm_recall', denied)
     fields = ('target_id a b comparability dependent_ids deterministic_invalidation delivered_consequential '
         'changed immutable_verified claim linked_requirement_id evidence_contract deterministic_contract candidates').split()
+    coverage = getattr(request, 'param', None) == 'coverage'
+    if coverage:
+        fields.extend('requirements coverage_scope global_coverage continuation_available omitted_requirement_ids'.split())
     policy = dict(id='claim-fixture', profile=str(home), fields={k: 'synthetic' for k in fields}, sources={}, fixture=True)
     config = {'supervision': {'enabled': True, 'plugins': {
         'hermes-lcm': {'literal_sources': {'version': VERSION, 'recipients': ['fixture-claims']}},
@@ -63,7 +66,7 @@ def native(tmp_path, monkeypatch):
         assert str(request.url) == 'https://api.typesafe.ai/v1/systemone'
         body = json.loads(request.content)
         assert set(body) == {'model', 'state', 'questions'} and body['model'] == 'jev-1.13.0'
-        assert all(k.startswith(('F22/', 'F17/')) for k in body['questions'])
+        assert all(k.startswith(('F22/', 'F17/', *(['F20/'] if coverage else []))) for k in body['questions'])
         source = ctx.supervision._literal_source_registration
         for lock in (rt.lock, facade._registration.fence, source.lock, source.provider.lock):
             assert lock.acquire(blocking=False), 'external I/O under an authority lock'
@@ -73,7 +76,8 @@ def native(tmp_path, monkeypatch):
             mode.pop('on_response')()
         answers = {}
         for key, q in body['questions'].items():
-            choice = 'supports' if key.startswith('F17/') else mode['choice']
+            choice = ('not_addressed' if key.startswith('F20/') else
+                      'supports' if key.startswith('F17/') else mode['choice'])
             answers[key] = dict(type='choice', choice=choice, confidence=.99,
                 probabilities={k: float(k == choice) for k in q['criteria']})
         return httpx.Response(200, json=dict(model=body['model'], usage={}, answers=answers))

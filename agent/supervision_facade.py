@@ -130,6 +130,11 @@ class SupervisionFacade:
         runtime = self._active_runtime()
         if refs and runtime is not None:
             try:
+                registration.final_use.capture(runtime, refs)
+            except Exception:
+                # Optional local capture cannot fail an already completed source read.
+                pass
+            try:
                 runtime.dependencies.claim_uses.published(registration, refs)
             except Exception:
                 # An optional contest failure cannot invalidate this completed

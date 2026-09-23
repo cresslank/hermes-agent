@@ -92,6 +92,94 @@ storage never creates a successful contest receipt. Immutable pair/claim identit
 also prevents repeated same-runtime no-op classification after fresh publication;
 durable contested rows prevent replay after graph reload.
 
+## Native-local final use
+
+This is a separate opt-in purpose under the **existing** literal source owner:
+
+```yaml
+supervision:
+  enabled: true
+  plugins:
+    hermes-lcm:
+      literal_sources:
+        version: supervision.literal-sources.v1
+        recipients: [example-supervisor]
+        final_use:
+          version: supervision.literal-final-use.v1
+          consumer: native:accepted-final
+          enabled: true
+```
+
+This is a contract example, not activation. The `final_use` mapping is closed:
+exactly those three keys/values are required (including literal boolean `true`).
+Absent, disabled, malformed, old-version or other-consumer policy denies local
+final use. The current registered policy is scoped to its owner registration;
+policy reload/replacement closes the old registration and loses all selections.
+Existing observation/history grants do **not** opt in. Old providers inherit
+explicit denial. This purpose has no public model tool, arbitrary recipient,
+row-ID lookup, inference dispatch or remote disclosure authority.
+
+During real pack/auto/proposal hydration, the host may enroll only an already
+selected complete row uniquely linked to an eligible **committed** claim-use
+node. The LCM owner retains an opaque, bounded in-memory selection, not a new
+database, persisted source body or adoption receipt. It binds the actual engine,
+store/home/database/session/lifecycle, registered native consumer, native work,
+turn/instruction/requirement/catalog/control generations, and exact canonical
+claim/declaration/artifact predecessor fingerprint. The shared 64-source bound
+includes these selections and in-flight final permissions. Only ordinary
+evidence-round bookkeeping may be crossed; no old publication is retained or
+revived. `lookup_literal_source` still rejects after batch completion or expiry.
+
+The real `finish_text_response` branch calls the native final-use consumer only
+**after all stop/continuation gates**, including F20, accept the final. Neither
+hydration nor `prepare_final` adopts. The entire untransformed visible final,
+whole dedicated claim artifact and exact claim span must all equal the reversible
+`LCM record <exact_ref>: <JSON string of all original source bytes>` form above.
+This is the owner's positive record grammar in conjunction with the committed
+`answer_dependency` declaration, not a substring detector. It does not interpret
+negation inside arbitrary prose. Quotation wrappers, rejection, extra context,
+repetition, paraphrase, transformed/think-only or joined-fragment final output
+are unsupported. One final and one unambiguous declaration qualify; the existing
+2,400-character rendered-claim bound remains unchanged.
+
+At this accepted native phase LCM consumes its selection for **one fresh local
+permission**, re-reading only that original row with a read-only, zero-busy-wait
+SQLite connection. It compares whole bytes, span, numeric/other coordinate pins
+and native attribution with the original validator. It neither invokes the old
+publication resolver around a failed host lookup nor searches for another row.
+Source I/O is outside graph, registration, provider and canonical write locks.
+The synchronous native phase, not a renewed 150 ms or inference deadline, owns
+this bounded point read and canonical write; cancellation or generation loss
+makes the permission unavailable. No background worker, wait/retry budget or
+hard OS filesystem-latency guarantee is introduced.
+
+The host then fences the actual current final/engine/consumer/policy and LCM
+lifecycle, and rechecks them inside the existing zero-wait canonical writer.
+The writer additionally compares exact predecessor body, revision and status.
+A missing/deleted/reset/retained-away or busy record cannot be recreated as
+adopted. Only an acknowledged canonical write updates the in-memory graph;
+failures are not retried. Successful `claim_declared -> adopted` stores the
+accepted final hash/span/current revision, selection invocation provenance,
+exact claim and declaration revision, and complete
+source identity through the existing `claim_delivery` family. It never stores
+source bodies, marks truth, grants finality, or proves emission or human receipt.
+`emission` and `correction_relevance` remain `unknown`.
+
+Final attempts consume their selections even on unavailability; accepted input,
+turn end/cancel/rebind, lifecycle transitions, owner replacement and process exit
+invalidate them. Restart cannot mint authority from a persisted `adopted` row.
+Native source revalidation and the lifecycle fence do not promise exclusion of
+arbitrary out-of-process SQLite/filesystem tampering after the final point read;
+as with v1, no cross-database atomic source snapshot is claimed. This is not an
+external presentation or source-truth attestation.
+
+Qualify with `test_supervision_final_use.py` and the unchanged
+`test_supervision_claim_final_boundary.py`, using the canonical host runner and
+matching LCM source. Positive routes use real ordinary hydration, batch
+finalization, accepted final owner and canonical readback, including actual
+elapsed time past the original publication deadline. Negative controls retain
+ordinary output and source-read success when optional callbacks fail.
+
 ## Explicitly unsupported paths
 
 - `required_answer_dependency.v1` mandatory-answer/decision relevance is **not yet

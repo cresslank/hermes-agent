@@ -64,6 +64,23 @@ class LiteralSourceProviderV1(ABC):
         """Hold lifecycle invalidation out through the host's final acceptance."""
         yield False
 
+    def capture_final_source(self, engine, invocation_id, source_ref, scope, consumer):
+        """Optional distinct native-local purpose. Old providers default to denial."""
+        return None
+
+    def authorize_final_source(self, engine, selection, scope, consumer, phase):
+        return None
+
+    @contextmanager
+    def final_source_fence(self, permission):
+        yield False
+
+    def final_source_current(self, permission):
+        return False
+
+    def release_final_source(self, token):
+        pass
+
     @abstractmethod
     def resolve_literal_source(self, engine, invocation_id: str, source_ref: str) -> LiteralSourceRecordV1 | None:
         """Revalidate a retained immutable record against its exact native row only."""
@@ -91,7 +108,7 @@ class LiteralSourceInvocationV1:
 
 
 class LiteralSourceRegistration:
-    def __init__(self, facade, engine, provider, recipients, working_recipients=frozenset()):
+    def __init__(self, facade, engine, provider, recipients, final_policy=None, *, working_recipients=frozenset()):
         self.facade, self.engine, self.provider = facade, engine, provider
         self.scope = facade._context._manager.scope_key
         self.generation = uuid.uuid4().hex
@@ -101,10 +118,13 @@ class LiteralSourceRegistration:
         self.lock = threading.RLock()
         self.pending = {}
         self.records = {}
+        from agent.supervision_final_use import NativeFinalUse
+        self.final_use = NativeFinalUse(self, final_policy)
 
     def close(self):
         with self.lock:
             self.active = False
+            self.final_use.release()
             for invocation in {p.invocation_id for p, _ in self.records.values()} | set(self.pending):
                 self.provider.release_literal_sources(invocation)
             self.pending.clear()
@@ -281,7 +301,8 @@ def register(facade, *, version, engine, provider):
     old = getattr(facade, "_literal_source_registration", None)
     if old is not None:
         old.close()
-    registration = LiteralSourceRegistration(facade, engine, provider, frozenset(recipients), frozenset(working_recipients))
+    registration = LiteralSourceRegistration(facade, engine, provider, frozenset(recipients),
+        final_policy=grant.get("final_use"), working_recipients=frozenset(working_recipients))
     facade._literal_source_registration = registration
     context._manager._track_registration(context.manifest, "literal_sources", context.plugin_id, registration.close)
     return registration

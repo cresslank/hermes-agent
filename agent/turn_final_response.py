@@ -301,6 +301,17 @@ def finish_text_response(
         final_response = None
         return _verdict("continue")
 
+    # Adoption is after all stop/F20 gates, not pre-final preparation. Only
+    # unchanged visible whole-final text qualifies; promoted reasoning, joined
+    # fragments and transformed candidates remain unsupported. Optional faults
+    # must not change the accepted answer, persistence or baseline hooks.
+    if assistant_message.content == final_response and final_msg.get("content") == final_response:
+        try:
+            from agent.supervision_final_use import accepted_final
+            accepted_final(agent, final_response, final_msg)
+        except Exception:
+            logger.debug("optional local final-use unavailable")
+
     append_message(messages, final_msg)
     # Make the answer durable before leaving the loop (_DB_PERSISTED_MARKER keeps
     # _persist_session idempotent). Failure must NOT abort the turn: finalize retries.

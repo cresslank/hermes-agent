@@ -17,7 +17,7 @@ KINDS = frozenset({"planning", "research_pass", "gap_obligation", "claim_deliver
 TERMINAL = frozenset({"superseded", "withdrawn_by_parent", "disposition_committed", "stale", "issued", "invalid"})
 
 
-def save(runtime, rows, *, validate=None, predecessors=None):
+def save(runtime, rows, *, validate=None, predecessors=None, predecessor_records=None):
     """Atomically replace the named graph records. Fail closed on storage/capacity."""
     runtime._assert_owner(tool_worker=True)
     try:
@@ -58,6 +58,11 @@ def save(runtime, rows, *, validate=None, predecessors=None):
                                    (*key, row["id"])).fetchone()
                 if predecessors is not None and (old is None or old[2:4] != predecessors.get(row["id"])):
                     raise sqlite3.IntegrityError("owner_record_predecessor_changed")
+                if predecessor_records is not None:
+                    expected = json.dumps(predecessor_records.get(row["id"]), sort_keys=True,
+                        separators=(",", ":"), allow_nan=False)
+                    if old is None or old[4] != expected:
+                        raise sqlite3.IntegrityError("owner_record_body_changed")
                 if old:
                     if old == (row["kind"], session, row["revision"], row["status"], body):
                         continue  # exact acknowledged write replay only

@@ -36,12 +36,20 @@ class ClaimUses:
         self.owner = dependencies
         self.rt = dependencies.runtime
         self.requests = {}
+        self.final_sources = set()
 
     @property
     def graph(self):
         return self.owner.planning
 
+    def clear_final_sources(self):
+        for source in self.final_sources:
+            with source.source.lock:
+                source.release(self.rt)
+        self.final_sources.clear()
+
     def clear(self):
+        self.clear_final_sources()
         self.requests.clear()
 
     def declare(self, path, text, declaration):

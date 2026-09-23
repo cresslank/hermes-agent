@@ -152,6 +152,7 @@ class SupervisionRuntime:
 
     def bind_turn(self):
         with self.lock:
+            self.dependencies.claim_uses.clear_final_sources()
             self._abandon_owner_selections()
             self.history_visibility = None
             self.session_id = getattr(self.agent(), "session_id", "")
@@ -181,6 +182,7 @@ class SupervisionRuntime:
         with self.lock:
             if origin.message_id in self.sources:
                 return False
+            self.dependencies.claim_uses.clear_final_sources()
             self.closed = False
             if not origin.continuation:
                 self.revision = replace(self.revision, work_id=uuid.uuid4().hex)
@@ -902,6 +904,7 @@ class SupervisionRuntime:
         reset_views(self)
         with self.ready:
             self.closed = True
+            self.dependencies.claim_uses.clear_final_sources()
             self._abandon_owner_selections()
             self.history_visibility = None
             self._native_verification_requests.clear()
@@ -917,6 +920,7 @@ class SupervisionRuntime:
         close_views(self)
         with self.ready:
             self.closed = True
+            self.dependencies.claim_uses.clear_final_sources()
             self._native_verification_requests.clear()
             self.revision = replace(self.revision, run_generation=self.revision.run_generation + 1)
             for proposal, _ in self.pending:
