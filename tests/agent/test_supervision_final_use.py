@@ -285,6 +285,82 @@ def test_unavailable_or_nonpositive_final_never_adopts(native, monkeypatch, fail
     assert not n.calls
 
 
+@pytest.mark.parametrize("state", ["ordinary", "deleted", "replacement", "lifecycle-aba"])
+def test_final_adoption_uses_registered_physical_store(native, monkeypatch, record_property, state):
+    import threading
+
+    n = native
+    owner = configure(n)
+    first, _ = prepare(n)
+    messages, _ = hydrate_and_commit(n, first, monkeypatch)
+    store = n.engine._store
+    text = n.claim_file.read_text()
+    moved = []
+    reads = []
+    reader = store._get_for_local_final
+
+    def point_read(sid):
+        assert not n.rt.lock._is_owned() and not owner.lock._is_owned() and not owner.provider.lock._is_owned()
+        row = reader(sid)
+        reads.append(sid)
+        if state == "lifecycle-aba":
+            errors = []
+            def transition():
+                try:
+                    n.engine.on_session_start("session-B", platform="cli")
+                    n.engine.on_session_start("session-A", platform="cli")
+                except BaseException as exc:
+                    errors.append(exc)
+            worker = threading.Thread(target=transition)
+            worker.start()
+            worker.join(3)
+            assert not worker.is_alive(), "native lifecycle blocked behind final point read"
+            assert not errors
+        return row
+
+    monkeypatch.setattr(store, "_get_for_local_final", point_read)
+    try:
+        if state == "replacement":
+            backup = sqlite3.connect(n.home / "stale.db")
+            try:
+                store.backup(backup)
+            finally:
+                backup.close()
+        if state in {"deleted", "replacement"}:
+            assert store.delete_session_messages("session-A") >= 2
+            assert store.get(first[0]) is None
+        if state == "replacement":
+            path = store.db_path
+            previous_inode = path.stat().st_ino
+            for suffix in ("", "-wal", "-shm"):
+                source = path.with_name(path.name + suffix)
+                if source.exists():
+                    detached = path.with_name("detached-" + source.name)
+                    source.rename(detached)
+                    moved.append((source, detached))
+            (n.home / "stale.db").rename(path)
+            assert path.stat().st_ino != previous_inode
+            assert store.get(first[0]) is None
+        verdict = finish(n, text, messages)
+        assert verdict.action == "break" and verdict.final_response == text
+        assert messages[-1]["content"] == text and reads == [first[0]]
+        rows = load(n.rt)
+        expected_status = "adopted" if state == "ordinary" else "claim_declared"
+        assert rows[0]["status"] == expected_status, "final adoption escaped the registered store identity"
+        assert not owner.final_use.selections and not owner.provider.final_selections and not owner.provider.final_permissions
+        assert not n.calls
+        record_property("physical_source_identity", dict(state=state, canonical_status=rows[0]["status"],
+            baseline_text_unchanged=True, final_point_reads=len(reads)))
+    finally:
+        if moved:
+            for suffix in ("", "-wal", "-shm"):
+                candidate = store.db_path.with_name(store.db_path.name + suffix)
+                if candidate.exists():
+                    candidate.unlink()
+            for source, detached in moved:
+                detached.rename(source)
+
+
 @pytest.mark.parametrize("native", ["coverage"], indirect=True)
 def test_f20_continuation_has_priority_over_local_adoption(native, monkeypatch):
     n = native
