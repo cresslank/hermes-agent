@@ -72,9 +72,12 @@ def field_data_policy(value, *, profile, fact_keys=None):
     if (type(value["id"]) is not str or not 0 < len(value["id"]) <= 256
             or value["profile"] != profile or type(value["fixture"]) is not bool):
         raise ValueError("invalid_data_policy")
+    # Registration holds a catalog spanning multiple producers; snapshots carry
+    # only their exact fact keys. A larger catalog must not enlarge one request.
+    entry_limit = 256 if fact_keys is None else 64
     for name in ("fields", "sources"):
         entries = value[name]
-        if not isinstance(entries, Mapping) or len(entries) > 64:
+        if not isinstance(entries, Mapping) or len(entries) > entry_limit:
             raise ValueError("invalid_data_policy")
         if any(type(k) is not str or not 0 < len(k) <= 128 or
                type(v) is not str or not 0 < len(v) <= 256 for k, v in entries.items()):
