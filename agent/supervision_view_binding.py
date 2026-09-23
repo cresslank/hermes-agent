@@ -98,6 +98,8 @@ class NativeViewsBinding:
         self.details = {}
         self.detail_requests = {}
         self.skill_hints = {}
+        self.local_skill_contents = ()
+        self.local_skill_route = False
         self.skill_removals = {}
         self.skill_plan_origin = None
         # Skill eligibility belongs to the accepted task/phase, not per-tool
@@ -146,6 +148,8 @@ class NativeViewsBinding:
                         self.skill_hints.pop(plugin_id)
             else:
                 self.skill_hints.clear()
+                self.local_skill_contents = ()
+                self.local_skill_route = False
                 self.skill_phase = None
                 self.skill_catalog_seen = None
             self.skill_scope = self._skill_task_scope()
@@ -283,10 +287,7 @@ class NativeViewsBinding:
         return await asyncio.wrap_future(future)
 
     def _read_skill_details(self, request, registration):
-        from tools.skills_tool import (
-            _is_skill_disabled, _locate_skill, _read_skill_text, _safe_frontmatter,
-            _skill_lookup_path_error, _skill_search_dirs, skill_matches_platform,
-        )
+        from agent.supervision_skill_presentation import read_skill_content
         runtime = self.runtime
         runtime._assert_owner(tool_worker=True)
         target = request['target_id']
@@ -322,26 +323,10 @@ class NativeViewsBinding:
                         context['expected'] != runtime.revision or not registration.active or
                         runtime.clock() >= context['deadline']):
                     return None
-            # skill_view(preprocess=False) still performs credential readiness,
-            # capture and passthrough registration. Reuse only the read-only
-            # native resolver and its collision/quarantine/platform/disabled gates.
-            # Plugin-qualified skills need a separately qualified read-only owner.
-            if ':' in selected_id or _skill_lookup_path_error(selected_id):
+            snapshot = read_skill_content(selected_id, description=rows[selected_id]['description'], max_chars=1200)
+            if snapshot is None:
                 return None
-            try:
-                project_dirs, search_dirs, _ = _skill_search_dirs()
-                error, _, skill_md = _locate_skill(selected_id, None, project_dirs, search_dirs)
-                if error or skill_md is None:
-                    return None
-                body = _read_skill_text(skill_md)
-                metadata = _safe_frontmatter(content=body)
-            except (OSError, ValueError, TypeError):
-                return None
-            if (not isinstance(body, str) or not 0 < len(body) <= 1200 or
-                    '[SKILL_PRUNED]' in body or metadata.get('description') != rows[selected_id]['description'] or
-                    not skill_matches_platform(metadata) or _is_skill_disabled(metadata.get('name', selected_id))):
-                return None
-            details.append({**rows[selected_id], 'content': body, 'excerpt_complete': True, 'pruned': False})
+            details.append({**rows[selected_id], 'content': snapshot.content, 'excerpt_complete': True, 'pruned': False})
         with self.lock:
             if (self.details.get(target) is not context or context['expected'] != runtime.revision or
                     not registration.active or runtime.clock() >= context['deadline']):
@@ -626,24 +611,7 @@ class NativeViewsBinding:
             return self._request(request['domain'], facts, action=(Action.SUPPRESS_STATUS, Action.PRESENT_STATUS), refs=(ref,),
                 relations=('progress_only', 'duplicate', 'material_outcome', 'actionable_change'), revision=request['revision'],
                 deadline=request['deadline'], asynchronous=True, validate=validate)
-        if request['domain'] != 'clarification_proposed':
-            return None
-        default = self.views.defaults.get(f['question'])
-        if not default or not default.interpretations:
-            return None
-        candidate = 'default:' + fingerprint((default.evidence_ref, default.value))
-        facts = dict(user_ref=default.evidence_ref, slot=default.question, user_wording=default.source_text,
-            interpretations=default.interpretations, permission_ui=False, secret_ui=False,
-            authorization_missing=False, safe_default=True,
-            resolution_candidates={'default_defined': {'id': candidate, 'ref': default.evidence_ref,
-                'description': default.value, 'authorized': True}})
-        def validate(p):
-            if (p.feature_id == 'F19' and p.metadata.get('candidate_id') == candidate
-                    and p.metadata.get('resolution') == 'default_defined'
-                    and self.views.defaults.get(default.question) is default):
-                return {'relation': 'use_authorized_default'}
-        return self._request(request['domain'], facts, action=Action.CLARIFY_DEFAULT,
-            refs=(default.evidence_ref,), revision=request['revision'], deadline=request['deadline'], validate=validate)
+        return None
 
     @staticmethod
     def _format_source(text):
@@ -671,44 +639,15 @@ class NativeViewsBinding:
                 len(choices) != 3 or any(type(c) is not str for c in choices) or
                 set(choices) != {'markdown', 'plain_text', 'json'}):
             return None
-        interpretations = [{'id': c, 'text': c, 'consequence': 'Render the answer content in ' + c} for c in choices]
-        resolutions = {}
-        candidate = None
-        refs = (slot['user_ref'],)
-        if slot['mode'] == 'retrieve':
-            source = self.runtime.sources.get(slot['source_ref'])
-            if not source or fingerprint(source) != slot['source_pin']:
-                return None
-            candidate = 'format-source:' + slot['source_pin']
-            resolutions['retrievable'] = {'id': candidate, 'ref': slot['source_ref'],
-                'description': 'Read the explicitly named accepted output-format instruction.', 'authorized': True}
-            refs = (slot['source_ref'],)
-        facts = dict(user_ref=slot['user_ref'], slot=question, user_wording=slot['wording'],
-            interpretations=interpretations, permission_ui=False, secret_ui=False,
-            authorization_missing=False, safe_default=False, resolution_candidates=resolutions,
-            user_only_established=slot['mode'] == 'ask', retrieval_exhausted=slot['mode'] == 'ask')
-        def validate(p):
-            if p.feature_id != 'F19' or self.clarification_slot is not slot:
-                return None
-            if (slot['mode'] == 'ask' and p.action == Action.CLARIFY_ASK and
-                    p.metadata.get('feature_action') == 'ask_material' and
-                    p.metadata.get('original_question_only') is True and p.metadata.get('slot') == question):
-                return {'relation': 'ask_material'}
-            if (slot['mode'] == 'retrieve' and p.action == Action.CLARIFY_RETRIEVE and
-                    p.metadata.get('feature_action') == 'retrieve' and
-                    p.metadata.get('candidate_id') == candidate and p.metadata.get('resolution') == 'retrievable'):
-                source = self.runtime.sources.get(slot['source_ref'])
-                if source and fingerprint(source) == slot['source_pin']:
-                    value = self._format_source(source)
-                    if value in choices:
-                        return {'question': question, 'choices_offered': choices, 'user_response': '',
-                                'resolution': 'retrieved', 'resolved_value': value, 'evidence_ref': slot['source_ref']}
-            return None
-        result = self._request('clarification_proposed', facts,
-            action=Action.CLARIFY_ASK if slot['mode'] == 'ask' else Action.CLARIFY_RETRIEVE,
-            refs=refs, validate=validate)
-        # A material ask deliberately continues into the original clarify UI.
-        return {k: v for k, v in result.items() if k != 'revision'} if result and result.get('resolution') == 'retrieved' else None
+        if slot['mode'] != 'retrieve':
+            return None  # ask means the existing UI, never an invented answer
+        source = self.runtime.sources.get(slot['source_ref'])
+        if source and fingerprint(source) == slot['source_pin']:
+            value = self._format_source(source)
+            if value in choices:
+                return {'question': question, 'choices_offered': choices, 'user_response': '',
+                        'resolution': 'retrieved', 'resolved_value': value, 'evidence_ref': slot['source_ref']}
+        return None
 
     def accept_defaults(self, origin):
         """Explicit user-only presentation contract; tool arguments cannot add defaults.
@@ -760,6 +699,8 @@ class NativeViewsBinding:
             return
         task = self._task()
         agent = self.runtime.agent()
+        if self.runtime.sources:
+            self._local_skills(next(reversed(self.runtime.sources.values())))
         if not task or agent is None:
             return
         ref, text = task
@@ -797,8 +738,46 @@ class NativeViewsBinding:
         except (ValueError, TypeError, AttributeError):
             pass
 
+    def _local_skills(self, text):
+        from agent.supervision_skill_presentation import read_skill_content
+        # Only an unambiguous literal instruction is a local explicit route.
+        # Mentioning/quoting/negating a name is not permission to auto-load it.
+        match = re.fullmatch(r'(?:Use|Load) (?:the )?skill (?:`([\w-]+)`|([\w-]+))[.!]?', text.strip())
+        required = [c.id for c in self.views.skills.candidates if c.required]
+        if match:
+            required.append(match[1] or match[2])
+        self.local_skill_route = bool(required)
+        if not required:
+            self.local_skill_contents = ()
+            return
+        from agent.supervision_skill_presentation import MAX_SKILL_CHARS
+        names = tuple(dict.fromkeys(required))
+        contents = [read_skill_content(name) for name in names] if len(names) <= 8 else []
+        # Preserve all mandatory routes: partial admission is not permission to
+        # choose a convenient subset. Ordinary skill_view remains available.
+        complete = contents and all(contents) and sum(len(c.content) for c in contents) <= MAX_SKILL_CHARS
+        self.local_skill_contents = tuple(contents) if complete else ()
+
+    def skill_contents(self):
+        from agent.supervision_skill_presentation import SkillContent
+        if self.closed:
+            return ()
+        if self.local_skill_route:
+            return self.local_skill_contents
+        contents = []
+        for hint, _, _, registration in self.skill_hints.values():
+            if (registration.active and self.views.skills.owns_hint(hint)
+                    and {'observe', 'select_skills'} <= registration.grants):
+                contents.append(SkillContent(hint.skill_id, hint.content, 'native skill catalog: ' + hint.skill_id))
+        # Focused-skill contract admits one optional match, not one per provider.
+        return tuple(contents[:1])
+
     def _skills(self, ref, text, words):
         from tools.skills_tool import skills_list
+        # A semantic optional match cannot replace an explicit/mandatory route,
+        # including a mandatory body that was too large or otherwise ineligible.
+        if self.local_skill_route or any(c.required for c in self.views.skills.candidates):
+            return
         try:
             rows = json.loads(skills_list()).get('skills', [])
             scope = fingerprint((self.skill_scope, self.skill_phase, self.runtime.revision.catalog))
@@ -815,7 +794,7 @@ class NativeViewsBinding:
             candidates: list[dict[str, Any]] = [{'id': r['name'], 'description': r['description'], 'covers': r['description'],
                 'does_not_cover': 'Unknown: this catalog supplies no separate exclusions; inspect full content before use.',
                 'authorized': True} for r in rows]
-            facts = dict(task_ref=ref, task=text, rule_scope='Existing focused-skill rules; suggestions never load skills.',
+            facts = dict(task_ref=ref, task=text, rule_scope='Existing focused-skill rules; native request assembly supplies the selected complete content.',
                 ambiguous=True, mandatory_match=False, mandatory_ids=[], stage='metadata', candidates=candidates)
             ids = tuple(r['id'] for r in candidates)
             revision = self.views.skills.catalog(tuple(SkillCandidate(r['id'], r['description']) for r in candidates), scope)

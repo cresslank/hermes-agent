@@ -21,7 +21,8 @@ egress policy and proposal queue. Execution owners settle synchronous selections
 status proposals only schedule settlement on the existing presentation dispatcher.
 Core imports no plugin types. The evidence owner's typed request protocol remains
 separate; this adapter handles the existing native `select_tools`, `select_skills`,
-`select_windows`, `suppress_status` and `clarify_default` actions.
+`select_windows` and `suppress_status` actions. Finite output-format defaults
+are resolved locally, not dispatched as clarification judgments.
 
 The adapter implements exactly:
 
@@ -84,22 +85,43 @@ owner.skills.rank(tuple(ids), revision=revision, plugin_id=plugin_id, ambiguous=
 owner.skills.remove_own_hint(plugin_id, hint=exact_hint, registration=registration_generation)
 ```
 
-Required IDs rank first. Only an explicitly unresolved ambiguous selection creates
-one positive request-only hint. Removing a hint or ending its scope does not erase
-loaded skill bodies, mandatory rules, safety instructions or transcript history.
+Required IDs rank first. The native consumer now supplies the selected **complete
+skill body**, not a recommendation to load it on another model turn. Metadata-only
+hints have no content effect. `supervision_skill_presentation.SkillPresentation`
+attaches a snapshot only to a newly assembled trailing user/tool message, never
+scans backward to rewrite a prior user row, and preserves that exact suffix on
+later request clones while its anchor remains in context. Selection retirement
+only ends future eligibility; it cannot erase a previously presented body. System
+bytes, role counts and canonical history remain unchanged. Compression may remove
+an anchor; snapshots are not durable history and are not restored across restart.
+
+Literal whole-message `Use skill <name>.` / `Load skill <name>.` instructions and
+host-catalog `required=True` candidates resolve locally with no remote vote. Local
+bodies may contain up to 65,536 characters and are admitted whole or not at all.
+If any mandatory body is unavailable, optional selection cannot replace that
+route or select only the convenient mandatory subset. The ordinary `skill_view`
+route remains available. Plugin-qualified, pruned, disabled, quarantined, dynamic
+shell/template and oversized bodies are not automatically supplied; no setup,
+credential capture, rendering, or execution follows from content admission.
+
+**Coverage limit:** remote ambiguous selection still requires the existing <=1,200
+character full-detail snapshot and original 150ms budget. This does not qualify
+semantic selection for ordinary larger skills. Broadening that path needs a
+separately bounded provider/host content contract, not truncation or a generic
+wire-limit increase. Explicit/mandatory local loading is independent of this cap.
 
 Native assembly uses bounded lexical overlap only as an ambiguity prefilter, not
 as a semantic decision. Explicit tool names and active required-tool pins bypass
 optional shortlisting. Skill candidates come from the native scoped list; a
 metadata shortlist must pass a second full-content detail decision under the same
-deadline before producing a hint. The facade negotiates
+deadline before selecting content for presentation. The facade negotiates
 `skill_details="supervision.skill-details.v1"` and provides async
 `acquire_skill_details(request)`. It queues at most one <=3-selected-ID acquisition
 back to the already-waiting execution owner, compares the exact event, task,
 revision, source policy and original issued deadline, and echoes that binding with
 authorized complete content. The plugin performs its dependent decision; only
 `phase="ready"` over content served to that registration by this owner can become
-a hint. Native reads reuse the local skill resolver's collision, quarantine,
+a content selection. Native reads reuse the local skill resolver's collision, quarantine,
 platform and disabled-skill gates without invoking `skill_view`, preprocessing,
 credential readiness/capture, or credential passthrough registration. Missing,
 pruned, oversized or ambiguous bodies stay baseline. Plugin-qualified skills
@@ -135,7 +157,7 @@ Only `feature_action=remove_own_hint` with that exact hint ID and task reference
 can consume the proposal. The host rechecks the live plan, plugin/registration,
 revision, catalog, hint object, generation, deadline and mandatory/must-keep/
 safety-or-cleanup vetoes under the owner fences. Its sole effect is deleting that
-one optional suggestion. Other plugins' hints, ranked IDs, loaded bodies,
+one optional future selection. Other plugins' hints, ranked IDs, presented bodies,
 requirements and source history remain unchanged. A new identical-looking hint
 is a different object and cannot be removed by an old proposal. Ordinary scope
 reset/unload remains lifecycle cleanup, never an applied F12 removal receipt.
@@ -171,8 +193,9 @@ There are no per-dispatch duplicate transforms.
 
 Supported JSON envelopes have exactly one textual `output`, `stdout` or `content`
 field. At most eight complete line-aligned blocks, each at most 1,200 characters,
-are selectable. Critical failure/approval/partial/mutation/cleanup/receipt blocks
-and neighboring blocks remain mandatory. Every sibling status/receipt field is
+are selectable. Critical failure/approval/partial/mutation/cleanup/receipt,
+supervisor-control, obligation and provenance blocks and neighbors remain mandatory.
+Every sibling field, including the complete native `supervisor_control` envelope, is
 retained. The selected view includes exact source offsets, omission metadata and a
 full-output reference. The **original** result is persisted with the existing
 spillover path translator **before selection is dispatched**, using a
@@ -253,7 +276,7 @@ owner.defaults[question] = AuthorizedDefault(
 ```
 
 The inline clarify executor passes the owner into the actual `clarify_tool` before
-UI presentation. Material, unauthorized, secret, approval, stale and multiselect
+UI presentation. Unauthorized, secret, approval, stale and multiselect
 cases retain existing UI behavior. A batch is suppressed only if every question
 independently has an admitted default. The output distinguishes `resolved_value`
 with `resolution="authorized_default"` from `user_response`; it never fabricates a
@@ -271,10 +294,11 @@ never an action/approval/secret default:
 
 `markdown`, `plain_text`, and `json` are the finite values for the literal question
 `Output format?`. The admitted source ID, exact source text, scope and reversible
-presentation alternatives accompany the semantic decision. Other questions retain
-the original clarification UI. `{"output_format":"ask"}` explicitly leaves the
-choice with the user; a supported `ask_material` action admits only that original
-question/UI. `{"output_format_ref":"<accepted-message-id>"}` names exactly one
+presentation alternatives define a deterministic contract. No remote call,
+remaining inference budget or plugin grant is needed to honor an accepted default.
+The choices must be exactly the three finite values. Other questions retain the
+original clarification UI. `{"output_format":"ask"}` explicitly leaves the
+choice with the user and continues into that original question/UI. `{"output_format_ref":"<accepted-message-id>"}` names exactly one
 already accepted, same-work source containing the format contract. The retrieval
 owner pins and rechecks its bytes and resolves only the finite format value. It
 cannot search files, query history, access another work's source, or authorize a
@@ -296,7 +320,11 @@ these tests.
 
 `tests/agent/test_supervision_native_views.py` additionally runs the real standalone
 plugin registry and `NativeHostBridge` with a strict fake HTTP transport through
-these native consumers, including positive F12/F13/F16/F18/F19 decisions. Supply
+these native consumers, including positive F12/F13/F16/F18 decisions. F19 no
+longer dispatches remotely. `test_supervision_direct_skills.py` and
+`test_supervision_direct_presentation.py` qualify full content, local larger
+bodies, mandatory-route preservation, stable request prefixes, supervisor-control
+retention and deterministic finite format defaults. Supply
 `JEV_SUPERVISOR_SOURCE`, or for the clean-environment canonical runner place the
 reviewed source checkout path in the disposable test HOME's
 `.hermes/jev-supervisor-test-source`. Without that explicit dependency this optional
@@ -320,7 +348,8 @@ selection. The standalone plugin must negotiate these mappings and request their
 grants before using them.
 
 The native integration tests use the unaltered standalone `NativeHostBridge`,
-including negotiated material presentation and clarification retrieve/ask actions.
+including negotiated material presentation. Clarification retrieve/ask now
+uses the native finite source contract rather than remote action codecs.
 No translation subclass supplies missing behavior. Explicit older-host capability
 controls retain the original UI, rather than manufacturing a successful owner
 receipt. The standalone installed-entry suite separately qualifies all four

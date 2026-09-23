@@ -22,7 +22,7 @@ from typing import Any
 
 from agent.supervision_catalog import Catalog, SkillView, fingerprint
 
-_CRITICAL = re.compile(r"error|fail|warn|not[ _-]run|partial|approv|denied|mutat|cleanup|cancel|timeout|exit|receipt|commit", re.I)
+_CRITICAL = re.compile(r"error|fail|warn|not[ _-]run|partial|approv|denied|mutat|cleanup|cancel|timeout|exit|receipt|commit|supervisor[ _-]control|obligation|provenance|source_ref|decision_id|input_ref", re.I)
 
 
 @dataclass(frozen=True)
@@ -145,17 +145,15 @@ class SupervisionViews:
                 or not default.evidence_ref or multi_select
                 or (choices and default.value not in choices)):
             return None
-        revision = fingerprint((self.scope, question, choices, default.value, default.evidence_ref))
-        answer = self._decide("evaluate_relation", "clarification_proposed", {
-            "question": question, "choices": choices, "authorized_default": default.value,
-            "evidence_ref": default.evidence_ref, "low_stakes": True,
-        }, revision=revision)
-        if answer and answer.get("relation") == "use_authorized_default":
-            # Never label this as an answer supplied by the user.
-            return {"question": question, "choices_offered": choices, "user_response": "",
-                    "resolution": "authorized_default", "resolved_value": default.value,
-                    "evidence_ref": default.evidence_ref}
-        return None
+        # This is a finite presentation contract, not generic clarification or
+        # authorization inference. Exact accepted defaults need no remote vote.
+        if (question != "Output format?" or not isinstance(choices, list) or len(choices) != 3
+                or any(type(c) is not str for c in choices)
+                or set(choices) != {"markdown", "plain_text", "json"}):
+            return None
+        return {"question": question, "choices_offered": choices, "user_response": "",
+                "resolution": "authorized_default", "resolved_value": default.value,
+                "evidence_ref": default.evidence_ref}
 
     def rank_retrieval(self, candidates: tuple[dict, ...], *, required_ids=(), complete: bool):
         """Explicit retrieval owner seam: no corpus search or expanded permissions.
@@ -309,14 +307,14 @@ def request_views(agent, api_messages, schemas):
     tools = owner.tools(schemas, required_ids=tuple(set(owner.required_tools) | set(getattr(agent, "_supervision_required_tools", ()))),
                         rules_revision=getattr(agent, "_supervision_rules_revision", ""),
                         available_schemas=available)
-    if owner.skills.hints:
-        # Only the request clone changes. Historical skill bodies remain untouched.
-        api_messages = list(api_messages)
-        for index in range(len(api_messages) - 1, -1, -1):
-            msg = api_messages[index]
-            if msg.get("role") == "user" and isinstance(msg.get("content"), str):
-                api_messages[index] = {**msg, "content": msg["content"] + "\n\n" + next(iter(owner.skills.hints.values()))}
-                break
+    from agent.supervision_skill_presentation import SkillPresentation
+    identity = (getattr(agent, "session_id", None), runtime.revision.profile if runtime else None)
+    presentation = getattr(agent, "_supervision_skill_presentation", None)
+    if presentation is None or presentation[0] != identity:
+        presentation = (identity, SkillPresentation())
+        agent._supervision_skill_presentation = presentation
+    contents = binding.skill_contents() if binding is not None else ()
+    api_messages = presentation[1].apply(api_messages, contents)
     owner.next_cycle()
     return api_messages, tools
 
