@@ -33,7 +33,7 @@ def test_configured_ordinary_mutation_capable_child_stops_without_main_model_or_
         return child
     monkeypatch.setattr(dt, '_build_child_preserving_parent_tools', build_running_child)
     n = factory.make(text='- Inspect the current fixture.', policy_change=enable, grants=['observe', 'cancel_child'])
-    n.mode['relation'] = 'current' 
+    n.mode['relation'] = 'current'
     n.agent.run_conversation = Mock(side_effect=AssertionError('Main-model reconsideration'))
     assert n.owner is not None and n.owner.direct_enabled
     job = factory.launch(n, legacy=True)
