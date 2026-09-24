@@ -135,6 +135,8 @@ class SupervisionRuntime:
         self.round_deadline_issued_at = None
         self._decision_budget = ContextVar[dict[str, float | None] | None]("native_decision_budget", default=None)
         self.closed = False
+        from agent.supervision_scope_lifecycle import ProviderScope
+        self.provider_scope = ProviderScope()
         self.final_continuations = 0
         from agent.supervision_dependencies import DependencyOwner
         self.dependencies = DependencyOwner(self)
@@ -155,7 +157,9 @@ class SupervisionRuntime:
             _runtimes[(self.revision.profile, self.revision.lineage, self.revision.work_id)] = self
 
     def bind_turn(self):
+        from agent.supervision_scope_lifecycle import has_live_children, retire, notify
         with self.lock:
+            retired = retire(self) if self.closed and not has_live_children(self) else None
             self.dependencies.claim_uses.clear_final_sources()
             self._abandon_owner_selections()
             self.history_visibility = None
@@ -168,6 +172,8 @@ class SupervisionRuntime:
             self.last_final_text = ""
             self.closed_targets.clear()
             self.closed = False
+        if retired is not None:
+            notify(self, retired)
         from agent.supervision_view_binding import reset_views
         reset_views(self, preserve_defaults=True)
         from agent.supervision_receipts import record_work
@@ -217,12 +223,21 @@ class SupervisionRuntime:
     def accept_instruction(self, origin):
         if not is_accepted_origin(origin):
             return False
+        from agent.supervision_scope_lifecycle import retire, notify
+        retired = None
         with self.lock:
             if origin.message_id in self.sources:
                 return False
             self.dependencies.claim_uses.clear_final_sources()
             self.closed = False
             if not origin.continuation:
+                retired = retire(self)
+                from agent.supervision_scope_lifecycle import ProviderScope
+                self.provider_scope = ProviderScope()
+                old_key = (self.revision.profile, self.revision.lineage, self.revision.work_id)
+                with _registry_lock:
+                    if _runtimes.get(old_key) is self:
+                        _runtimes.pop(old_key, None)
                 self.revision = replace(self.revision, work_id=uuid.uuid4().hex)
                 self.sources.clear()
                 self.requirements = ()
@@ -262,6 +277,8 @@ class SupervisionRuntime:
             from agent.supervision_receipts import record_work
             record_work(self)
             self.ready.notify_all()  # stale a waiting action without granting a fresh budget
+        if retired is not None:
+            notify(self, retired)
         from agent.supervision_view_binding import reset_views
         reset_views(self)
         binding = getattr(self.agent(), "_supervision_view_binding", None)
@@ -294,6 +311,7 @@ class SupervisionRuntime:
                 required_obligations=(), deadline_issued_at=None, recipient=None, expected_revision=None,
                 mcp_recipients=(), working_premise=None):
         from agent.supervision_mcp import recipient_authorized
+        from agent.supervision_scope_lifecycle import admit, notify, has_live_children
         regs = [r for r in self._registrations() if (recipient is None or r is recipient)
                 and "observe" in r.grants and data_class in r.data_policy
                 and set(required_data_classes) <= r.data_policy]
@@ -302,6 +320,11 @@ class SupervisionRuntime:
         if not regs or (self.closed and not self._owner_survives_turn(owner)) or (deadline is not None and deadline <= self.clock()):
             return None
         with self.lock:
+            if getattr(self, "control_revoked", False):
+                return None
+            if self.closed and (not self._owner_survives_turn(owner) or
+                    (owner == "owned_delegation" and not has_live_children(self))):
+                return None
             if expected_revision is not None and self.revision != expected_revision:
                 return None
             self.sequence += 1
@@ -330,32 +353,36 @@ class SupervisionRuntime:
                 owner=owner, required_obligations=required_obligations, deadline_issued_at=issued,
                 turn_id=getattr(self.agent(), "_current_turn_id", "") or "",
                 tool_call_id=facts.get("action", {}).get("tool_call_id", target_id) if event == "action_proposed" else "")
-        for reg in regs:
-            # Recheck immediately before disclosing any facts or issuing egress
-            # policy; admission of another recipient is never transferable.
-            if owner == "mcp" and (self.clock() >= expiry or
-                    not recipient_authorized(mcp_recipients, reg)):
-                continue
-            # Consumers only schedule their bounded worker. Never call arbitrary provider code
-            # under the instruction/control fence, tool authorization lock or database lock.
-            policy = reg.egress_policy
-            if policy and set(base.facts) <= policy["fields"].keys():
-                policy = {**policy, "fields": {key: policy["fields"][key] for key in base.facts},
-                          "sources": {key: policy["sources"][key] for key in base.facts if key in policy["sources"]}}
-            else:
-                policy = {}  # legacy local class grants are not a remote egress grant
-            snapshot = replace(base, data_policy=policy)
-            token = _observer_callback.set(True)
-            try:
-                from agent.supervision_dispatch import issue
-                payload = snapshot.to_mapping()
-                payload["dispatch_capability"] = issue(self, reg, snapshot)
-                reg.consumer(payload)
-            except Exception:
-                # Third-party observers cannot break execution or leak raw exception/source text.
-                reg.note_failure()
-            finally:
-                _observer_callback.reset(token)
+            provider_scope = admit(self, regs)
+        try:
+            for reg in regs:
+                # Recheck immediately before disclosing any facts or issuing egress
+                # policy; admission of another recipient is never transferable.
+                if owner == "mcp" and (self.clock() >= expiry or
+                        not recipient_authorized(mcp_recipients, reg)):
+                    continue
+                # Consumers only schedule their bounded worker. Never call arbitrary provider code
+                # under the instruction/control fence, tool authorization lock or database lock.
+                policy = reg.egress_policy
+                if policy and set(base.facts) <= policy["fields"].keys():
+                    policy = {**policy, "fields": {key: policy["fields"][key] for key in base.facts},
+                              "sources": {key: policy["sources"][key] for key in base.facts if key in policy["sources"]}}
+                else:
+                    policy = {}  # legacy local class grants are not a remote egress grant
+                snapshot = replace(base, data_policy=policy)
+                token = _observer_callback.set(True)
+                try:
+                    from agent.supervision_dispatch import issue
+                    payload = snapshot.to_mapping()
+                    payload["dispatch_capability"] = issue(self, reg, snapshot)
+                    reg.consumer(payload)
+                except Exception:
+                    # Third-party observers cannot break execution or leak raw exception/source text.
+                    reg.note_failure()
+                finally:
+                    _observer_callback.reset(token)
+        finally:
+            notify(self, provider_scope, delivered=True)
         return base
 
     def _settle(self, proposal, status, reason):
@@ -945,6 +972,8 @@ class SupervisionRuntime:
             self.ready.notify_all()
         from agent.supervision_receipts import record_work
         record_work(self)
+        from agent.supervision_scope_lifecycle import retire_if_idle
+        retire_if_idle(self)
 
     def revoke(self):
         self.control_revoked = True
@@ -956,7 +985,9 @@ class SupervisionRuntime:
             optional_reads.clear()
         from agent.supervision_view_binding import close_views
         close_views(self)
+        from agent.supervision_scope_lifecycle import retire, notify
         with self.ready:
+            retired = retire(self)
             self.closed = True
             self.dependencies.claim_uses.clear_final_sources()
             self._native_verification_requests.clear()
@@ -973,3 +1004,4 @@ class SupervisionRuntime:
             self.evidence.clear()
             self.dependencies.clear()
             self.ready.notify_all()
+        notify(self, retired)

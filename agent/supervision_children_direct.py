@@ -30,13 +30,16 @@ class RecurringChildControl:
         self.bridge, self.runtime, self.owner = bridge, bridge.runtime, bridge.owner
         self.stop = threading.Event()
         self.thread = None
+        self.running = False
         self.targets = {}
         self.next_due = {}
         self.roots = json.loads(self.owner.policy_pin)["read_roots"]
         self.sequence = 0
 
     def start(self):
-        if self.thread is None or not self.thread.is_alive():
+        # Launch admission holds runtime.lock; thread liveness alone races its exit.
+        if not self.running:
+            self.running = True
             from agent.memory_provider import spawn_context_thread
             self.thread = spawn_context_thread(target=self.run, name="owned-child-control", daemon=True)
             self.thread.start()
@@ -58,8 +61,14 @@ class RecurringChildControl:
                             if s["cancel_requested"]:
                                 self.owner.signal_semantic_cancel(handle)
                     except (ValueError, OSError, sqlite3.Error):
-                        continue
+                        live.append(handle)  # unknown settlement is not terminal
                 if not live:
+                    with rt.lock:
+                        if handles != tuple(self.bridge.launches.values()):
+                            continue  # a child joined while the census was being read
+                        self.running = False  # allow a concurrent launch to restart
+                    from agent.supervision_scope_lifecycle import retire_if_idle
+                    retire_if_idle(rt)
                     return
                 now = time.monotonic()
                 # A nonwaiting authority read can fail on transient storage mutex
@@ -81,6 +90,8 @@ class RecurringChildControl:
         finally:
             with rt.lock:
                 rt.child_control_waiters.pop(tid, None)
+                if self.thread is threading.current_thread():
+                    self.running = False
 
     def observe(self, handle, identity):
         from agent.supervision_children import ChildCompleteness, _guard, _scope
@@ -132,10 +143,11 @@ class RecurringChildControl:
                     input_mode=s["input_mode"], original_input_ref=s["original_input_ref"], current_input_ref=s["current_input_ref"],
                     duplicate_refs=duplicate_refs))
             self.targets[handle.child_id] = (handle, _scope(rt.revision), _guard(s), identity, tuple(duplicate_refs))
-            rt.observe("child_control_tick", facts, target_id=handle.child_id, owner="owned_delegation",
-                actions=(Action.CANCEL_CHILD, Action.REPRIORITIZE_CHILD), evidence_refs=refs,
-                required_data_classes=("project_excerpt", "history_excerpt"),
-                completeness=ChildCompleteness(scope="enumerated_items", complete=True))
+            revision = rt.revision
+        rt.observe("child_control_tick", facts, target_id=handle.child_id, owner="owned_delegation",
+            actions=(Action.CANCEL_CHILD, Action.REPRIORITIZE_CHILD), evidence_refs=refs,
+            required_data_classes=("project_excerpt", "history_excerpt"), expected_revision=revision,
+            completeness=ChildCompleteness(scope="enumerated_items", complete=True))
 
     def drain(self):
         for target in tuple(self.targets):
