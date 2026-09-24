@@ -696,7 +696,9 @@ class NativeViewsBinding:
         with runtime.lock:
             expected = runtime.revision
             sources = tuple(runtime.sources.items())
-            if (not sources or runtime.completeness.omitted
+            # The latest message can be complete while accepted history is not.
+            # This cumulative owner state is maintained even without F09 grants.
+            if (not sources or not runtime.action_scope.complete or runtime.completeness.omitted
                     or any(not isinstance(t, str) or not 0 < len(t) <= 1200 for _, t in sources)
                     or sum(len(t) for _, t in sources) > 6000
                     or any(re.search(r'\b(password|passcode|otp|2fa|mfa|cvc|cvv|secret|token|api[ _-]?key|'
@@ -713,6 +715,7 @@ class NativeViewsBinding:
         revision = fingerprint((project(expected), question, offered, sources))
         def current():
             return (runtime.revision == expected and tuple(runtime.sources.items()) == sources
+                    and runtime.action_scope.complete and not runtime.completeness.omitted
                     and tuple(choices) == offered and not self.closed and not runtime.closed)
         def validate(proposal):
             meta = project(proposal.metadata)
