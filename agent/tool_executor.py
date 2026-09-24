@@ -736,15 +736,18 @@ def _dispatch_authorized_once(
     from agent.supervision_action_scope import ActionAuthorizationDenied
 
     def current_arguments():
-        return (authorization.arguments_at_dispatch(agent, ref.name, ref.args, ref.call_id)
-                if authorization is not None else ref.args)
+        arguments = (authorization.arguments_at_dispatch(agent, ref.name, ref.args, ref.call_id)
+                     if authorization is not None else ref.args)
+        if recheck_child is not None:
+            recheck_child()
+        return arguments
 
     started = False
     try:
         # Last boundary AFTER plugin/Relay argument rewrites, shared by sequential,
         # concurrent and inline (including nested delegate) execution. Denied
         # capabilities must not open a terminal approval prompt either.
-        with dispatch_fence(agent, ref.name, ref.args):
+        with dispatch_fence(agent, ref.name, ref.args) as recheck_child:
             prepare_current_terminal(ref)
             _advance_start_order(None if read_reuse is not None else
                                  lambda: _begin_tool_execution(agent, ref, display_index))

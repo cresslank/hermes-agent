@@ -505,8 +505,13 @@ class OwnedDelegationOwner:
                     s['handoffs'].append('dispatch:nested')
                     s['candidate'] = None
             self._commit(live, begin)
+        def recheck():
+            # Admission may precede approval/order waits. A sealed child must not
+            # issue new I/O afterward; keep the original handle, not a new binding.
+            with self._lock:
+                self._open(self._get(handle).snapshot)
         try:
-            yield
+            yield recheck
         finally:
             with self._lock:
                 # The body really exited. Retain this exact fact until CAS
@@ -727,10 +732,10 @@ def register_launch(parent, child, request=None, *, goal=""):
 def dispatch_fence(child, name, args):
     binding = binding_of(child)
     if binding:
-        with binding[0].dispatch(binding[1], name, args):
-            yield
+        with binding[0].dispatch(binding[1], name, args) as recheck:
+            yield recheck
     else:
-        yield
+        yield None
 
 
 def seal_explicit_stop(child):
