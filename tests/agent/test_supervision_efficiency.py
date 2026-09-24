@@ -47,7 +47,12 @@ def native(rig, monkeypatch):
     monkeypatch.setattr(socket, "getaddrinfo", deny)
     policy = {"id": "synthetic-owner-policy", "profile": str(rig.home), "fixture": True,
               "fields": {k: "synthetic" for k in FIELDS}, "sources": {}}
-    rig.config["supervision"]["plugins"]["fixture-supervisor"]["egress_policy"] = policy
+    section = rig.config["supervision"]["plugins"]["fixture-supervisor"]
+    # This transport implements efficiency questions, not action authorization.
+    # An unanswered F09 request would spend the shared pre-dispatch deadline
+    # before F04 can run. Composition tests opt in with F09 egress and answers.
+    section["grants"] = [grant for grant in section["grants"] if grant != "authorize_action"]
+    section["egress_policy"] = policy
     settings = {"profile": str(rig.home), "enabled": True, "policy_id": policy["id"],
                 "allowed_classes": ["synthetic"], "fixture_policy": True}
     rig.config["plugins"] = {"entries": {"fixture-supervisor": {"settings": {
