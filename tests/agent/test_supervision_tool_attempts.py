@@ -87,8 +87,10 @@ def dispatch(native, monkeypatch):
 
 def repeat(native, dispatch, path, count=4, **arguments):
     hints = []
+    # Each native dispatch has a fresh call ID, including a second repeat batch.
+    offset = len(dispatch.calls)
     for i in range(count):
-        raw = dispatch("read_file", {"path": str(path), **arguments}, f"attempt-{i}")
+        raw = dispatch("read_file", {"path": str(path), **arguments}, f"attempt-{offset + i}")
         assert "not a regular file" in raw
         hints.extend(native.runtime.drain_at_safe_point())
         native.runtime.committed_batch([])  # real round boundary, not a renewed wait

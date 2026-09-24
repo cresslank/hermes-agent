@@ -110,10 +110,13 @@ def test_heartbeat_touches_periodically_and_stops():
 
     touches: list = []
     stop = threading.Event()
+    repeated = threading.Event()
 
     class _Agent:
         def _touch_activity(self, desc):
             touches.append(desc)
+            if len(touches) >= 2:
+                repeated.set()
 
     thread = threading.Thread(
         target=te._run_tool_activity_heartbeat,
@@ -122,15 +125,12 @@ def test_heartbeat_touches_periodically_and_stops():
         daemon=True,
     )
     thread.start()
-    time.sleep(0.12)
-    stop.set()
-    thread.join(timeout=1.0)
-
+    try:
+        assert repeated.wait(2.0), f"expected periodic touches, got {len(touches)}"
+    finally:
+        stop.set()
+        thread.join(timeout=2.0)
     assert not thread.is_alive(), "heartbeat thread did not exit on stop"
-    assert len(touches) >= 2, f"expected periodic touches, got {len(touches)}"
-    n = len(touches)
-    time.sleep(0.1)
-    assert len(touches) == n, "heartbeat kept touching after stop_event set"
 
 
 def test_slow_tool_call_refreshes_activity_during_execution(monkeypatch):
@@ -281,13 +281,13 @@ def test_heartbeat_exits_once_worker_tid_is_interrupted():
     import agent.tool_executor as te
     from tools.interrupt import set_interrupt
 
-    touches: list = []
     stop = threading.Event()
+    stamped = threading.Event()
     fake_worker_tid = 10**9 + 111922  # not a live thread; only the bit matters
 
     class _Agent:
         def _touch_activity(self, desc):
-            touches.append(desc)
+            stamped.set()
 
     thread = threading.Thread(
         target=te._run_tool_activity_heartbeat,
@@ -297,17 +297,14 @@ def test_heartbeat_exits_once_worker_tid_is_interrupted():
     )
     thread.start()
     try:
-        time.sleep(0.12)
-        assert touches, "heartbeat never stamped while the worker was live"
+        assert stamped.wait(2.0), "heartbeat never stamped while the worker was live"
         set_interrupt(True, fake_worker_tid)
-        thread.join(timeout=1.0)
+        thread.join(timeout=2.0)
         assert not thread.is_alive(), "heartbeat kept running after its worker was abandoned"
-        n = len(touches)
-        time.sleep(0.12)
-        assert len(touches) == n
     finally:
         set_interrupt(False, fake_worker_tid)
         stop.set()
+        thread.join(timeout=2.0)
 
 
 def test_sequential_timeout_stops_abandoned_workers_heartbeat(monkeypatch):
