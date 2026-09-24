@@ -1,4 +1,4 @@
-"""Versioned restart-biased lifecycle policy and bounded native input identities.
+"""Versioned decisive-stop lifecycle policy and bounded native input identities.
 
 A replacement worker is not a completed obligation. These rules grant neither
 execution nor result acceptance, and are never inferred from task prose.
@@ -13,36 +13,16 @@ import stat
 import subprocess
 import time
 
-VERSION = "supervision.direct-control.v1"
+VERSION = "supervision.direct-control.v2"
 CONTRACT = "supervision.child-relevance.v2"
 POLICY = dict(version=VERSION, enabled=True, interval_seconds=2,
-              cancellation_rule="restart-biased.v1", choice_min=.80, confidence_min=.80)
+              cancellation_rule="decisive-stop.v1", choice_min=.80, confidence_min=.80)
 RELATIONS = frozenset({"current", "superseded", "duplicate", "no_remaining_consumer", "insufficient"})
 
 
 def enabled(policy):
     value = policy.get("direct_control") if isinstance(policy, dict) else None
     return type(value) is dict and value == POLICY and all(type(value[k]) is type(v) for k, v in POLICY.items())
-
-
-def qualifies(snapshot, evidence):
-    """The sole native direct cancellation rule, also used by the bridge."""
-    if (snapshot.get("direct_control") != VERSION or snapshot.get("input_mode") == "pinned"
-            or not snapshot.get("replaceable") or not snapshot.get("consumer_set_closed")
-            or snapshot.get("effect_class") != "read_only" or snapshot.get("handoffs")
-            or snapshot.get("cleanup_pending") or snapshot.get("obligation") == "unknown"
-            or any(c["obligation"] == "unknown" or c["requires_effects"] or c["requires_cleanup"]
-                   for c in snapshot["consumers"])):
-        return False
-    if evidence.probability < POLICY["choice_min"] or evidence.confidence < POLICY["confidence_min"]:
-        return False
-    if evidence.relation == "superseded":
-        return (snapshot.get("input_mode") == "current" and snapshot.get("original_input_ref") is not None
-                and snapshot.get("current_input_ref") is not None
-                and snapshot["original_input_ref"] != snapshot["current_input_ref"])
-    if evidence.relation == "duplicate":
-        return bool(snapshot.get("duplicate_refs"))
-    return evidence.relation == "no_remaining_consumer"
 
 
 def input_identity(roots, *, budget=.5, max_files=4096, max_bytes=64 * 1024 * 1024):
@@ -141,5 +121,8 @@ def control_projection(snapshot):
     result = {k: record.get(k) for k in ("actor", "feature_id", "action", "reason_code", "decision_id", "state")}
     result.update(original_input_ref=snapshot.get("original_input_ref"), current_input_ref=snapshot.get("current_input_ref"),
                   obligation_ref=snapshot.get("obligation_ref"), obligation_state=snapshot.get("obligation_state", "unknown"),
-                  partial_refs=list(snapshot.get("partial_refs", ()))[:8])
+                  partial_refs=list(snapshot.get("partial_refs", ()))[:8],
+                  worker_finished=snapshot.get("worker_finished", False),
+                  processes_stopped=snapshot.get("processes_stopped", False),
+                  effects_reconciled=snapshot.get("effects_reconciled", False))
     return result

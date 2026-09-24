@@ -105,7 +105,8 @@ def propose(rig, handle, key, *, value=.01, feature='F01', expected=None):
 
 
 def prime(rig, handle):
-    assert propose(rig, handle, 'first').reason == 'await_distinct_revision'
+    # Cancellation is decisive on its first request; advance only the test revision.
+    assert not rig.owner.status(handle)['cancel_requested']
     rig.revision[2] += 1
 
 
@@ -179,11 +180,8 @@ def test_ordinary_delegate_launch_produces_durable_scoped_handle_and_metadata(ri
 
 
 @pytest.mark.parametrize('feature', ['F01', 'F04'])
-def test_semantic_cancel_two_meaningful_revisions_and_distinct_settlement(rig, feature):
+def test_native_stop_first_request_and_distinct_settlement(rig, feature):
     child, handle = rig.launch()
-    assert propose(rig, handle, 'first', feature=feature).reason == 'await_distinct_revision'
-    assert not propose(rig, handle, 'repeat-same', feature=feature).accepted
-    rig.revision[2] += 1
     expected = rig.owner.status(handle)['control_revision']
     receipt = propose(rig, handle, 'second', feature=feature)
     assert receipt.accepted and receipt.cancel_requested
@@ -201,19 +199,12 @@ def test_semantic_cancel_two_meaningful_revisions_and_distinct_settlement(rig, f
     assert all(state[k] for k in ('cancel_requested', 'settled', 'processes_stopped', 'effects_reconciled'))
 
 
-def test_contribution_clears_candidate_and_same_evidence_never_counts_twice(rig):
-    _, handle = rig.launch()
-    prime(rig, handle)
-    assert rig.owner.clear_semantic_candidate(handle, expected_revision=rig.owner.status(handle)['control_revision'])
+def test_native_stop_does_not_reinterpret_plugin_scores(rig):
+    child, handle = rig.launch()
+    assert propose(rig, handle, 'decided-by-plugin', value=.9).accepted
+    assert child.stopped.is_set()
     assert rig.owner.status(handle)['candidate'] is None
-    assert not propose(rig, handle, 'after-fresh-finding').accepted
-    assert propose(rig, handle, 'useful', value=.9).reason == 'contribution_or_uncertainty'
-    assert rig.owner.status(handle)['candidate'] is None
-    rig.revision[2] += 1
-    assert not propose(rig, handle, 'new-first').accepted
-    assert not propose(rig, handle, 'same').accepted
-    rig.revision[1] += 1
-    assert propose(rig, handle, 'new-second').accepted
+    assert not propose(rig, handle, 'repeat').accepted
 
 
 @pytest.mark.parametrize('case', ['legacy', 'required', 'unknown', 'unclosed', 'empty', 'missing', 'result', 'effects', 'cleanup'])

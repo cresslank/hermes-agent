@@ -519,7 +519,10 @@ def _validate_child_output_schema(
     from tools.delegation_output_schema import build_retry_message, validate_output
     _first_text = result.get("final_response") or ""
     _schema_valid, _schema_errors = validate_output(_first_text, _output_schema)
-    if _schema_valid or not _first_text.strip() or result.get("interrupted", False):
+    from agent.owned_delegation import binding_of
+    binding = binding_of(child)
+    sealed = binding is not None and binding[0].status(binding[1])['cancel_requested']
+    if _schema_valid or not _first_text.strip() or result.get("interrupted", False) or sealed:
         return _SchemaOutcome(_output_schema, _schema_valid, _schema_errors, 0)
 
     # Exactly one retry turn, carrying the validation errors verbatim (no
@@ -893,6 +896,10 @@ class _ChildRun:
             worker_thread_holder["t"] = threading.current_thread()
             from agent.delegation_context import delegated_child_context
             with delegated_child_context(str(getattr(child, "session_id", "") or "")):
+                from agent.owned_delegation import binding_of
+                binding = binding_of(child)
+                if binding is not None and binding[0].status(binding[1])['cancel_requested']:
+                    return dict(interrupted=True, completed=False, final_response='', api_calls=0)
                 from tools.delegate_context_recipe import run_context
                 return child.run_conversation(**run_context(user_message, self.child_task_id, self.relay_text))
 

@@ -15,9 +15,8 @@ from tests.agent.test_owned_delegation_policy import factory as factory
 def test_accounting_contention_keeps_original_control_deadline(factory, monkeypatch, record_property, stage):
     n = factory.make()
     job = factory.launch(n)
-    if stage == 'cancellation':
-        factory.progress(n, job, 'First optional milestone')
-        assert n.owner.status(job.handle)['semantic_observation']
+    if stage == 'observation':
+        n.mode['value'] = .08  # non-stop observation; no first-vote state
     original = n.runtime.children.apply
     current = n.owner.current
     measurements, memberships = [], []
@@ -76,8 +75,6 @@ def test_native_cancel_revalidates_authority_and_budget(factory, monkeypatch, re
 
     n = factory.make()
     job = factory.launch(n)
-    factory.progress(n, job, 'First optional milestone')
-    assert n.owner.status(job.handle)['semantic_observation']
     original = n.runtime.children.apply
     measurements = []
 

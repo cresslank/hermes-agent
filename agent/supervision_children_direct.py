@@ -45,7 +45,7 @@ class RecurringChildControl:
         rt = self.runtime
         tid = threading.get_ident()
         try:
-            while not self.stop.is_set() and active(rt) and self.owner.current():
+            while not self.stop.is_set() and active(rt):
                 with rt.lock:
                     handles = tuple(self.bridge.launches.values())
                     rt.child_control_waiters[tid] = frozenset(h.child_id for h, _ in handles)
@@ -62,7 +62,9 @@ class RecurringChildControl:
                 if not live:
                     return
                 now = time.monotonic()
-                due = [h for h in live if now >= self.next_due.get(h.child_id, 0)]
+                # A nonwaiting authority read can fail on transient storage mutex
+                # contention. Abstain this pass, not the entire live-child lifespan.
+                due = [h for h in live if now >= self.next_due.get(h.child_id, 0)] if self.owner.current() else []
                 # Filesystem work is on this scoped thread, not the parent model path.
                 identity = input_identity(self.roots) if due else None
                 for handle in due:
@@ -123,8 +125,8 @@ class RecurringChildControl:
                 job=dict(id=handle.child_id, active=True, objective=s["objective"], milestone=s["latest_milestone"],
                     generation=int(handle.generation[:15], 16), control_revision=s["control_revision"],
                     obligation=s["obligation"], obligation_ref=s["obligation_ref"], replaceable=s["replaceable"],
-                    effect_class="readonly" if s["effect_class"] == "read_only" else "unknown",
-                    effect_policy_id=s["effect_policy_id"], owner_cancel_grant=True, consumer_set_closed=s["consumer_set_closed"],
+                    effect_class="readonly" if s["effect_class"] == "read_only" else "mutating",
+                    effect_policy_id=s["effect_policy_id"] or VERSION, owner_cancel_grant=owner._grant.allow_owned_child_stop, consumer_set_closed=s["consumer_set_closed"],
                     consumers=[dict(id=c["ref"], obligation=c["obligation"]) for c in s["consumers"]],
                     pending_handoff=bool(s["handoffs"]), pending_effect=bool(s["inflight"]), pending_cleanup=s["cleanup_pending"],
                     input_mode=s["input_mode"], original_input_ref=s["original_input_ref"], current_input_ref=s["current_input_ref"],
@@ -164,7 +166,7 @@ class RecurringChildControl:
                     or answer["probabilities"][answer["choice"]] != max(answer["probabilities"].values())):
                 return "rejected"
             cancel = proposal.action == Action.CANCEL_CHILD
-            if meta.get("feature_action") != ("cancel_replaceable_readonly" if cancel else "priority_update"):
+            if meta.get("feature_action") != ("cancel_owned_child" if cancel else "priority_update"):
                 return "rejected"
             with control_fence(owner._lock, proposal.expires_at_monotonic):
                 live = owner._get(handle)

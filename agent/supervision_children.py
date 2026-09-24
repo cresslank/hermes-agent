@@ -1,7 +1,7 @@
 """Native F01 join: exact consumer links -> observation -> fenced owner effects.
 
-No provider imports. Observations are distinct from priority proposals. The owner
-persists the first validated observation, not the plugin's private confirmation.
+No provider imports. One qualified stop decision seals native cancellation;
+there is no stored first vote or main-model reconsideration.
 No callback runs with the control lock held; settlement takes runtime then control.
 """
 from dataclasses import dataclass, replace
@@ -201,8 +201,6 @@ class ChildRelevanceOwner:
                 return "rejected"
             values, relation = _answers({r["question_id"]: r["answer"] for r in rows}, ids)
             probability = relation["probabilities"][relation["choice"]]
-            strong = (relation["choice"] == "no_remaining_consumer" and probability >= .97
-                      and relation["confidence"] >= .90 and all(v <= .05 for v in values.values()))
             priority = meta.get("priority", "unchanged")
             expected_priority = "unchanged"
             if probability >= .85 and relation["confidence"] >= .80:
@@ -220,47 +218,20 @@ class ChildRelevanceOwner:
                 s = live.snapshot
                 if s["control_revision"] != expected or _scope(runtime.revision) != scope or _guard(s) != guard:
                     return "stale"
-                if not owner.semantic_authorized(handle, deadline=proposal.expires_at_monotonic) or s["cancel_requested"] or s["settled"] or s["inflight"]:
+                if not owner.semantic_authorized(handle, deadline=proposal.expires_at_monotonic) or s["cancel_requested"] or s["settled"]:
                     return "no_op"
-                # A priority proposal without this independently validated observation
-                # can never prime cancellation. Nor can a claimed prior receipt.
-                native_prior = s.get("semantic_observation")
-                if prior != native_prior or observation["prior_receipt_id"] != (prior["receipt_id"] if prior else None):
-                    return "stale"
                 cancel = proposal.action == Action.CANCEL_CHILD
-                if cancel and (not strong or prior is None or prior["guard"] != guard
-                        or prior["scope"] != list(scope) or tuple(prior["revision"]) == _meaningful(runtime.revision)):
-                    return "rejected"
-                if not strong:
-                    owner._commit(live, lambda n: n.update(candidate=None, semantic_observation=None),
-                                  deadline=proposal.expires_at_monotonic)
-                elif proposal.action == Action.REPRIORITIZE_CHILD and prior is not None:
-                    # Repeated inference on identical evidence never creates another vote.
-                    pass
-                else:
+                if cancel:
                     evidence = SemanticEvidence(_meaningful(runtime.revision),
                         tuple((c["ref"], max(values[i] for i in c["requirement_ids"])) for c in s["consumers"]),
                         relation["choice"], probability, relation["confidence"])
-                    if not cancel:
-                        # A legacy/raw caller's candidate is not a native first observation.
-                        owner._commit(live, lambda n: n.update(candidate=None), deadline=proposal.expires_at_monotonic)
-                    receipt = owner.request_semantic_cancel(handle, expected_revision=live.snapshot["control_revision"],
+                    receipt = owner.request_semantic_cancel(handle, expected_revision=s["control_revision"],
                         evidence=evidence, idempotency_key=proposal.proposal_id,
                         deadline=proposal.expires_at_monotonic, _defer_signal=True)
-                    if receipt.reason not in {"await_distinct_revision", "cancel_requested"}:
-                        return "no_op"
-                    if not cancel:
-                        record = dict(receipt_id=proposal.proposal_id, revision=list(evidence.revision),
-                            full_revision=project(proposal.expected), control_revision=expected,
-                            plugin_generation=proposal.plugin_generation,
-                            child_generation=handle.generation, requirement_ids=list(ids),
-                            evidence_refs=list(proposal.evidence_refs), answers=rows,
-                            scope=list(scope), guard=guard, evidence=project(evidence))
-                        owner._commit(live, lambda n: n.update(semantic_observation=record), deadline=proposal.expires_at_monotonic)
-                    elif not receipt.accepted:
+                    if not receipt.accepted:
                         return "no_op"
                 if not cancel and not getattr(owner, "priority_effects_supported", True):
-                    return "no_op"  # observation persisted; no scheduler consumed a priority effect
+                    return "no_op"  # no scheduler consumed a priority effect
                 if not cancel and expected_priority != "unchanged":
                     # Required and unknown workers retain ordinary scheduling regardless
                     # of semantic priority advice. Only optional attested work may yield.

@@ -12,6 +12,7 @@ from tests.agent.test_owned_delegation_bridge import rig
 
 def direct_job(rig):
     child, handle = rig.launch()
+    rig.owner._grant = dataclasses.replace(rig.owner._grant, allow_owned_child_stop=True)
     with rig.owner._lock:
         live = rig.owner._get(handle)
         # This fixture exercises the lower owner contract; production launch
@@ -50,8 +51,7 @@ def test_one_judgment_pending_stop_survives_inflight_and_expiry_with_open_obliga
     assert rig.store.read(handle.child_id)["supervisor_control"]["decision_id"] == control["decision_id"]
 
 
-@pytest.mark.parametrize("change", [dict(input_mode="pinned"), dict(cleanup_pending=True), dict(consumer_set_closed=False),
-    dict(effect_class="unknown"), dict(current_input_ref=None), dict(current_input_ref="input:old")])
+@pytest.mark.parametrize("change", [dict(cleanup_pending=True), dict(consumer_set_closed=False), dict(handoffs=['pending'])])
 def test_direct_native_owner_keeps_identity_capability_and_input_fences(rig, change):
     child, handle = direct_job(rig)
     with rig.owner._lock:

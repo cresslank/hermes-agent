@@ -94,7 +94,7 @@ class SupervisionFacade:
             capabilities["receipt_reuse"] = EfficiencyOwner.receipt_reuse_version
             from agent.supervision_children import VERSION as CHILD_RELEVANCE_VERSION
             capabilities['child_relevance'] = CHILD_RELEVANCE_VERSION
-            capabilities['direct_control'] = 'supervision.direct-control.v1'
+            capabilities['direct_control'] = 'supervision.direct-control.v2'
             capabilities["optional_read"] = "supervision.optional-read.v1"
             capabilities["action_authorization"] = "supervision.action-authorization.v1"
             from agent.supervision_delivery import FINAL_ACTIONS_VERSION, FINAL_ACTIONS

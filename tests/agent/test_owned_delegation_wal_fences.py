@@ -43,10 +43,6 @@ def test_native_cancel_fences_actual_sidecar_generation(factory, monkeypatch, su
     job = factory.launch(n)
     with _plugin_home_scope(n.home):
         assert n.owner.current()
-    factory.progress(n, job, 'First supplementary section')
-    first = n.owner.status(job.handle)
-    assert first['semantic_observation'] and not first['cancel_requested'] and first['priority'] == 0
-    assert list(n.runtime.receipts.values())[-1].status == 'no_op'
     original = n.runtime.children.apply
     authority = n.owner._store._authority
     observed, lookups = [], []

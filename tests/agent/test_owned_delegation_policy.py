@@ -119,8 +119,9 @@ def factory(tmp_path, monkeypatch):
             finally:
                 done.set()
         finish_child(child)
-        return dict(task_index=task_index, status="interrupted" if child.stopped.is_set() else "completed",
-                    result="Synthetic result preserved", duration_seconds=0)
+        from agent.supervisor_control_presentation import attach_supervisor_control
+        return attach_supervisor_control(dict(task_index=task_index, status="interrupted" if child.stopped.is_set() else "completed",
+                    result="Synthetic result preserved", duration_seconds=0), child)
 
     monkeypatch.setattr(dt, "_build_child_preserving_parent_tools", build)
     monkeypatch.setattr(dt, "_run_single_child", run_child)
@@ -134,15 +135,15 @@ def factory(tmp_path, monkeypatch):
     monkeypatch.setattr(dt, "_capture_origin", lambda: ("", "", None, None, False))
     monkeypatch.setattr("tools.delegation_live_log.create_live_transcripts", lambda *a, **kw: (None, [], []))
 
-    def make(name="A", *, text=None, policy_change=None, db_kind="canonical"):
+    def make(name="A", *, text=None, policy_change=None, db_kind="canonical", grants=None):
         home = tmp_path / name
         home.mkdir()
         policy = dict(version=VERSION, allow_optional_readonly=True, consumer_contract=CONSUMERS, read_roots=[str(home)])
         if policy_change:
             policy_change(policy)
-        fields = "target_id changed meaningful_change evidence_refs changed_requirement_ids explicit_owner_stop explicit_supersession current_instructions child_relevance_contract native_observation requirements job".split()
+        fields = "target_id changed meaningful_change evidence_refs changed_requirement_ids explicit_owner_stop explicit_supersession current_instructions child_relevance_contract native_observation requirements job direct_control observation_id main_progress sibling_progress".split()
         config = {"supervision": {"enabled": True, "plugins": {"fixture-owned": {
-            "grants": ["observe", "reprioritize_child", "cancel_child"], "data_policy": ["task_text"],
+            "grants": grants if grants is not None else ["observe", "reprioritize_child", "cancel_child"], "data_policy": ["task_text", "project_excerpt", "history_excerpt"],
             "owned_delegation": policy,
             "egress_policy": dict(id="offline-fixture", profile=str(home), fields={k: "synthetic" for k in fields}, sources={}, fixture=True)}}},
             "plugins": {"entries": {"fixture-owned": {"settings": {
@@ -243,20 +244,9 @@ def test_ordinary_registration_installation_and_native_first_cancel(factory, cou
     assert all(c["requirement_ids"] == [n.runtime.requirements[0].id] for c in first_launch["consumers"])
     assert not n.calls
     factory.progress(n, job, "Optional appendix section one")
-    first = n.owner.status(job.handle)
-    assert first["semantic_observation"] and first["candidate"] and not first["cancel_requested"]
-    assert first["priority"] == 0 and first == n.owner._store.read(job.handle.child_id)
-    assert list(n.runtime.receipts.values())[-1].status == "no_op"  # no applied priority fiction
-    evidence = n.runtime.revision.evidence
-    call_count = len(n.calls)
-    factory.progress(n, job, "Optional appendix section one", row_id="new-bookkeeping-id")
-    renamed = n.owner.status(job.handle)
-    assert {k: v for k, v in renamed.items() if k != "control_revision"} == {
-        k: v for k, v in first.items() if k != "control_revision"}
-    assert renamed["control_revision"] > first["control_revision"]  # dispatch bookkeeping only
-    assert n.runtime.revision.evidence == evidence
-    assert len(n.calls) == call_count
-    factory.progress(n, job, "Optional appendix section two")
+    assert n.owner.status(job.handle)["candidate"] is None
+    assert list(n.runtime.receipts.values())[-1].status == "applied"
+    assert len(n.calls) == 1
     state = n.owner.status(job.handle)
     assert state["cancel_requested"] and job.child.stopped.is_set() and not state["settled"]
     assert not state["processes_stopped"] and not state["effects_reconciled"]
@@ -328,7 +318,6 @@ def test_launch_installs_when_canonical_db_arrives_after_ingress(factory):
     n.owner = n.agent._owned_delegation_owner
     assert job.handle and n.owner.status(job.handle)["obligation"] == "optional"
     factory.progress(n, job, "First lazy-installed milestone")
-    factory.progress(n, job, "Second lazy-installed milestone")
     assert n.owner.status(job.handle)["cancel_requested"]
 
 
@@ -381,8 +370,7 @@ def test_noop_and_profile_a_b_a(factory):
             assert n.owner.semantic_authorized(job.handle)
         n.mode.update(relation="no_remaining_consumer", value=.01)
         factory.progress(n, job, "Optional appendix revised " + job.child.session_id)
-        assert n.owner.status(job.handle)["semantic_observation"]
-        factory.progress(n, job, "Optional appendix revised again " + job.child.session_id)
+        assert n.owner.status(job.handle)["cancel_requested"]
         assert n.owner.status(job.handle)["cancel_requested"] and job.child.stopped.is_set()
         job.child.release.set()
         job.thread.join(3)
@@ -392,8 +380,10 @@ def test_noop_and_profile_a_b_a(factory):
 def test_revocation_does_not_drop_lifetime_or_reuse_confirmation(factory, kind):
     n = factory.make()
     job = factory.launch(n)
-    factory.progress(n, job, "First optional milestone")
-    assert n.owner.status(job.handle)["semantic_observation"]
+    n.mode.update(relation="current", value=.99)
+    factory.progress(n, job, "First useful milestone")
+    assert not n.owner.status(job.handle)["cancel_requested"]
+    n.mode.update(relation="no_remaining_consumer", value=.01)
     with _plugin_home_scope(n.home):
         if kind == "disabled":
             n.config["supervision"]["enabled"] = False

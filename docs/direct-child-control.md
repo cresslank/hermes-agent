@@ -1,46 +1,59 @@
-# Direct child control: native lifecycle contract
+# Direct child stop: one semantic authority
 
-The v2 native controller lives in `supervision_children_direct.py`; the finite policy and bounded input fingerprint in `owned_delegation_direct.py`; sealed stop signalling in `owned_delegation_stop.py`. Legacy v1 semantics are unchanged unless the owner supplies an authenticated `direct_control` v1 launch record.
+Jev decides whether the current owned child should stop. The plugin's finite deterministic rule converts that judgment to `cancel_owned_child`. Hermes validates the native ID/generation, current scope, registration grant, deadline, consumer ownership and lifecycle state, then seals native cancellation. **No Hermes/main-model call, reconsideration prompt, second relevance threshold, or two-observation confirmation occurs.** The arbiter provides replay/mechanical fences, not another semantic vote. The legacy F01 wire also stops on its first qualified decision; its existing optional/read-only grant is not silently widened.
 
-## Installation prerequisite — not yet wired
+## Source configuration (not installed or activated)
 
-**Configured ordinary launch installation is not implemented by this commit.** An implementation edit batch for `owned_delegation_policy.py` and `tools/delegate_tool.py` was blocked before execution and must be reauthorized separately. Consequently existing production configuration cannot yet install this controller or preserve v2 stop scopes across steering. The new native lower lifecycle contract, provider codec and recurring controller are source-owned building blocks, not deployment-complete coverage.
+Configured ordinary-launch installation is implemented. An authorized deployment must set the following under its existing plugin entry, preserving its authenticated egress/provenance configuration and canonical profile/session database. This change makes no live configuration changes.
 
-The configured owner must:
-
-1. Opt in to exactly the policy below, retaining existing read roots, profile grant, registration/session/database generation and explicit-revocation fences.
-2. Set `direct_enabled` and install v2 records only for existing natively restricted read-only children, or an explicit `tasks[].read_only=true` capability request that the owner actually fences. Never infer capability from goal prose or silently attenuate ordinary editing workers. Native parent-only return topology, not model-provided supervision metadata, establishes the closed consumer set. Unknown consumers stay unknown.
-3. Persist `direct_control`, `replaceable`, `input_mode`, `original_input_ref`, `current_input_ref`, `obligation_ref`, `obligation_state`, `partial_refs`, and `duplicate_refs` at launch. Required work uses `obligation_state=open`; stopping does not satisfy it or relaunch anything. Input mode is explicitly `current`, `pinned`, or `unspecified`.
-4. Preserve scoped stop authority keyed by exact owned handle plus profile/lineage/work and canonical session/database/plugin generation across continuation steering. Fresh execution and stale-result acceptance remain separate permissions. Do not adopt stored workers.
-5. Allow lifecycle observations after `finish_turn`, but not after explicit `revoke`. The runtime/dispatch hooks in this commit support that distinction; the configured owner's policy-currentness check still needs its matching installation change.
-
-```json
-{
-  "version": "supervision.direct-control.v1",
-  "enabled": true,
-  "interval_seconds": 2,
-  "cancellation_rule": "restart-biased.v1",
-  "choice_min": 0.8,
-  "confidence_min": 0.8
-}
+```yaml
+supervision:
+  enabled: true
+  plugins:
+    jev-supervisor:
+      grants: [observe, cancel_child]
+      data_policy: [task_text, project_excerpt, history_excerpt]
+      owned_delegation:
+        version: supervision.owned-delegation.v1
+        allow_optional_readonly: false
+        allow_owned_child_stop: true
+        consumer_contract: authenticated-parent-only.v1
+        read_roots: [/absolute/project/root]
+        direct_control:
+          version: supervision.direct-control.v2
+          enabled: true
+          interval_seconds: 2
+          cancellation_rule: decisive-stop.v1
+          choice_min: 0.8
+          confidence_min: 0.8
 ```
 
-This object belongs under `supervision.plugins.<plugin>.owned_delegation.direct_control`. It is a closed versioned policy, not tunable ad-hoc thresholds. Existing optional read-only policy fields remain necessary. Do not deploy before installation and native production-path tests are completed.
+`direct_control` is a closed versioned value, not a tunable threshold menu. Both host and plugin must support v2. `allow_owned_child_stop` explicitly grants stopping ordinary mutation-capable and required children. It does not grant execution, waive approval, classify effects as harmless, or authorize result acceptance. `allow_optional_readonly` remains separate for old explicitly restricted launches and may be false. Reprioritization is not required by the direct owner.
 
-## Projection/egress
+The native root launch establishes its parent return consumer and persists the immutable child generation before scheduling; it does not require model-written supervision metadata. Ordinary tools are not silently narrowed to read-only. Native direct children cannot create nested delegation through the tracked delegate tool; known pending handoffs/cleanup remain blockers. Untracked external activity remains unknown, not reconciled.
 
-V2 top-level fact fields: `target_id`, `changed`, `evidence_refs`, `child_relevance_contract`, `direct_control`, `observation_id`, `current_instructions`, `main_progress`, `sibling_progress`, `job`.
+Scope is bound to profile/lineage/work and canonical session/database/plugin generation. Same-work steering, `finish_turn`, and a new turn do not revoke ownership of a live child; old replies remain fenced by their full request revision. Explicit runtime revoke or a new work/session/plugin generation removes semantic control authority. No persisted worker is adopted after restart.
 
-Native local classes required: `task_text`, `project_excerpt`, `history_excerpt`. Remote field classifications and provenance sources must be explicitly approved by the deployment's existing egress policy. The controller sends accepted task text, bounded native todo progress and owned sibling milestones/identities, never hidden reasoning, prompts, environment, credentials or raw tool arguments. Oversized task/qualifier sets abstain rather than truncate. Input identities are content hashes; raw input files do not reach the provider.
+## Judgment and dispatch boundary
 
-The scoped background thread ticks every two seconds while live children remain, independently of the main model and idle parent. It revalidates actual filesystem content at unchanged HEAD (tracked/untracked/deleted/renamed inputs), bounded to 4096 files/64MiB and .5s per census. Unknown/oversized/symlink/racy inputs remain unknown. A change is evidence for semantic relevance, not automatic supersession. A periodic observation does not bump the shared evidence revision and therefore does not spuriously cancel a sibling's inference. The provider additionally bounds one in-flight request per child and two HTTP calls per profile, bypassing caching for recurring v2 opportunities.
+The `supervision.child-relevance.v2` Choice is `current`, `superseded`, `duplicate`, `no_remaining_consumer`, or `insufficient`. Only the plugin evaluates the .8 choice/confidence rule. `superseded` additionally requires explicitly current input mode and distinct known input identities; `duplicate` requires a supplied native reference. Pinned inputs do not prohibit stopping an otherwise unnecessary instance. The configured ordinary launch uses unspecified input mode, so content drift alone cannot classify it as superseded.
 
-## Lifecycle effects
+A timely stop atomically persists `cancel_requested`, invalidates result applicability and leaves the obligation open. Every subsequent native child dispatch is refused. When no tool/cleanup/handoff is in progress the existing hard interrupt is delivered immediately. An already-dispatched tool is allowed to exit its ordinary cancellation boundary before signalling; the sealed fence survives inference expiry. No main-model approval is requested.
 
-A timely qualifying v2 judgment atomically seals `cancel_requested`, invalidates result applicability, leaves the obligation open and persists the decision attribution. Existing dispatch fences immediately prevent further dispatch. A running read-only tool exits before signal; inference expiry never erases an already sealed command. Cleanup, handoff, unknown capability and unknown consumers remain fences.
+Native states distinguish `pending_stop`, `signalling`, `requested`, `signal_failed`, `stopped`, and `already_finished`. `stopped` records worker completion, not rollback of issued effects. `worker_finished`, `processes_stopped`, and `effects_reconciled` are separate explicit fields. Mutation-capable work never inherits read-only reconciliation guarantees. A blocked tool can remain pending; remote actions and arbitrary work inside an already-issued command are not magically preempted or undone. Existing required approval and secret boundaries are unchanged.
 
-`supervisor_control_for_child(child)` exports native, bounded attribution only for a live bound handle. States are `pending_stop`, `signalling`, `requested`, `signal_failed`, `stopped`, and `already_finished`. `requested` is not process death. Signal failures retry at most three times, spaced two seconds, against the same owned generation. Completion wins conservatively if it beats signal confirmation. SQLite CAS and existing finalizer generation authorization own durable transitions.
+The scheduler neither creates a replacement nor retries schema repair on a sealed worker. The configured owner also refuses an exact-goal relaunch in the same work/instruction boundary after a semantic stop. A later authenticated user instruction can authorize a fresh attempt; this mechanical boundary does not infer semantic equivalence between differently worded goals. Required unfinished work remains unfinished.
 
-## Verification scope
+## Observation, egress and lifecycle
 
-`tests/agent/test_owned_delegation_direct.py` covers the real lower owner, SQLite persistence, dispatch sealing, pending stop, required open obligation, signal failure/completion arbitration, pinned/cleanup/capability fences, and actual Git same-HEAD dirty input identities. It deliberately labels its fixture-installed direct record: **this is not ordinary configured launch end-to-end coverage**. Existing configured v1 suites remain passing. F21's accepted-instruction invalidation remains intact, but a new F21 selected-dependency-to-child binding is not supplied here.
+The scoped background thread ticks every two seconds while children remain, independently of main-model activity. It sends bounded accepted task text, todo progress and sibling milestones/identities. It never sends hidden reasoning, system prompts, credentials or arbitrary tool arguments. Original/current local input identities are bounded content hashes, not transmitted file contents. Use project read roots, not the profile's changing state database.
+
+A fresh observation ID binds each opportunity. Existing one-per-child/two-per-profile inference limits, original one-second background budget, exact codec validation, egress checks, CAS and finalizer generation authorization remain in force. Recurring inference does not mutate the shared revision merely to manufacture another vote.
+
+The host currently has no provider terminal-scope notification join on last-child settlement, runtime revoke, or old-work retirement. Do not emit terminal closure at `finish_turn` while children remain live. The terminal-notification/512-scope retirement join is a separate runtime integration requirement; these source changes preserve the live stop scope but do not claim to repair that retirement seam.
+
+## Offline verification
+
+`tests/agent/test_child_stop_decisive.py` exercises configured ordinary launch through the real plugin registry, HTTP codec (in-process fixture only), recurring native consumer, SQLite owner, scheduler, child lifecycle and result presentation. It verifies actual native interrupt delivery, zero main-model reconsideration, sealed subsequent dispatch, no schema retry or exact-goal relaunch, required obligations staying open, mutation in-flight boundaries, stale generation refusal and live scope retention after turn completion. Child model execution is synthetic; no paid model or live socket is used.
+
+The direct owner, legacy bridge, configured policy and native children suites retain mechanical authority, race, persistence failure and settlement checks under the one-decision contract.

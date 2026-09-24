@@ -51,10 +51,11 @@ class OwnerGrant:
     plugin_id: str
     allow_optional_readonly: bool = False
     controls_all_consumers: bool = False
+    allow_owned_child_stop: bool = False
 
     def __post_init__(self):
         if (not self.profile or not self.plugin_id or type(self.allow_optional_readonly) is not bool or
-                type(self.controls_all_consumers) is not bool):
+                type(self.controls_all_consumers) is not bool or type(self.allow_owned_child_stop) is not bool):
             raise ControlDenied('Owner grants require explicit profile policy booleans')
 
 
@@ -188,11 +189,12 @@ class CancelReceipt:
 
 @dataclasses.dataclass(frozen=True)
 class SemanticEvidence:
-    """Host-validated F01 evidence. F04 must supply this exact same gate input.
+    """Exact evidence binding accompanying a plugin-decided native STOP.
 
     revision is (instruction_event, requirements_revision, evidence_revision),
     compared to the host revision provider, not arbitrary plugin call counters.
-    contribution probabilities must cover ALL active consumer refs exactly.
+    Consumer IDs must cover the native set; scores are attribution, not a second
+    semantic vote. The registered plugin owns the relevance decision.
     """
     revision: tuple[int, int, int]
     contributions: tuple[tuple[str, float], ...]
@@ -348,6 +350,15 @@ class OwnedDelegationOwner:
                         inflight=0, dispatches={}, handoffs=[], cleanup_pending=False, candidate=None, receipts={},
                         objective=str(goal)[:16000], latest_milestone='',
                         semantic_observation=None, priority=0)
+            if getattr(self, 'direct_enabled', False) and self._grant.allow_owned_child_stop:
+                from agent.owned_delegation_direct import VERSION, input_identity
+                import json
+                import hashlib
+                identity = input_identity(json.loads(self.policy_pin)['read_roots'])
+                snap.update(direct_control=VERSION, replaceable=False, input_mode='unspecified',
+                    launch_goal_digest=hashlib.sha256(str(goal).encode()).hexdigest(),
+                    original_input_ref=identity, current_input_ref=identity, duplicate_refs=[],
+                    obligation_ref='obligation:' + child_id, obligation_state='open', partial_refs=[])
             if ancestor:
                 self._commit(ancestor, lambda s: (s['handoffs'].append(child_id), s.update(candidate=None)))
             try:
@@ -471,11 +482,11 @@ class OwnedDelegationOwner:
         with self._lock:
             live = self._get(handle)
             self._open(live.snapshot)
+            if name == 'delegate_task' and live.snapshot.get('direct_control'):
+                raise ControlDenied('Direct parent-only workers cannot delegate')
             # Retain the installed fence even after an invalidating change.
             if live.snapshot['effect_policy_id']:
                 if name == 'delegate_task':
-                    if live.snapshot.get('direct_control'):
-                        raise ControlDenied('Direct parent-only workers cannot delegate')
                     if not isinstance(args, dict) or args.get('action', 'spawn') not in ('spawn', ''):
                         raise ControlDenied('Read-only children may only use owned nested spawn')
                 elif not self._policy.permits(name, args):
@@ -518,9 +529,9 @@ class OwnedDelegationOwner:
         # Unknown/legacy work requires an explicit owner reconciliation receipt.
         if s['settled'] and s['effect_class'] == 'read_only' and not s['cleanup_pending']:
             s['processes_stopped'] = s['effects_reconciled'] = True
-            control = s.get('supervisor_control')
-            if control and control['state'] not in {'stopped', 'already_finished'}:
-                control['state'] = 'stopped' if control.get('signal_delivered') else 'already_finished'
+        control = s.get('supervisor_control')
+        if s['settled'] and control and control['state'] not in {'stopped', 'already_finished'}:
+            control['state'] = 'stopped' if control.get('signal_delivered') else 'already_finished'
 
     def finish(self, handle, *, worker_finished=True):
         with self._lock:
@@ -601,16 +612,16 @@ class OwnedDelegationOwner:
                 return self._receipt(s, False, 'deadline_expired')
             if s['control_revision'] != expected_revision:
                 return self._receipt(s, False, 'stale_control_revision')
-            from agent.owned_delegation_direct import VERSION as DIRECT, qualifies
+            from agent.owned_delegation_direct import VERSION as DIRECT
             direct = s.get('direct_control') == DIRECT
-            eligible_obligation = (s['obligation'] in {'required', 'optional'} if direct else s['obligation'] == 'optional')
-            consumer_veto = any(c['obligation'] == 'unknown' or c['requires_effects'] or c['requires_cleanup']
-                or (not direct and (c['obligation'] != 'optional' or c['requires_result'] or c.get('requires_corroboration', True)))
-                for c in s['consumers'])
+            eligible_obligation = direct or s['obligation'] == 'optional'
+            consumer_veto = not direct and any(c['obligation'] != 'optional' or c['requires_effects'] or c['requires_cleanup']
+                or c['requires_result'] or c.get('requires_corroboration', True) for c in s['consumers'])
+            granted = self._grant.allow_owned_child_stop if direct else self._grant.allow_optional_readonly
             if (not self.semantic_authorized(handle, deadline=deadline) or s['cancel_requested'] or s['settled']
                     or s['worker_finished'] or live.finish_pending or not eligible_obligation or
-                    not s['consumer_set_closed'] or not s['consumers'] or s['effect_class'] != 'read_only' or
-                    s['handoffs'] or s['cleanup_pending'] or not self._grant.allow_optional_readonly or
+                    not s['consumer_set_closed'] or not s['consumers'] or (not direct and s['effect_class'] != 'read_only') or
+                    s['handoffs'] or s['cleanup_pending'] or not granted or
                     consumer_veto):
                 return self._receipt(s, False, 'ineligible')
             revision = self._revision()
@@ -618,32 +629,23 @@ class OwnedDelegationOwner:
                     not isinstance(revision, tuple) or len(revision) != 3 or
                     any(type(v) is not int or v < 0 for v in revision)):
                 return self._receipt(s, False, 'stale_meaningful_revision')
+            # The registered plugin already decided STOP. Only validate the exact
+            # native evidence binding; probability/relevance is not voted on here.
             values = dict(evidence.contributions)
-            def prob(v):
-                return type(v) in (int, float) and math.isfinite(v) and 0 <= v <= 1
-            strong = (len(values) == len(evidence.contributions) and set(values) == {c['ref'] for c in s['consumers']} and
-                      all(prob(v) and v <= .05 for v in values.values()) and
-                      evidence.relation in ('no_remaining_consumer', 'superseded') and
-                      prob(evidence.probability) and evidence.probability >= .97 and
-                      prob(evidence.confidence) and evidence.confidence >= .90)
-            if direct:
-                strong = (len(values) == len(evidence.contributions) and set(values) == {c['ref'] for c in s['consumers']}
-                    and all(prob(v) for v in values.values()) and prob(evidence.probability) and prob(evidence.confidence)
-                    and qualifies(s, evidence))
-            previous = s['candidate']
-            accepted = bool(strong and (direct or (previous is not None and tuple(previous) != revision and
-                            all(a <= b for a, b in zip(previous, revision)))))
-            reason = 'cancel_requested' if accepted else 'await_distinct_revision' if strong else 'contribution_or_uncertainty'
+            if len(values) != len(evidence.contributions) or set(values) != {c['ref'] for c in s['consumers']}:
+                return self._receipt(s, False, 'stale_consumers')
+            accepted, reason = True, 'cancel_requested'
             def change(new):
-                new['candidate'] = list(revision) if strong else None
+                new['candidate'] = None
                 if accepted:
                     new['cancel_requested'] = True
-                    if direct:
-                        new['result_applicability'] = 'invalidated'
-                        new['obligation_state'] = 'open'
-                        new['supervisor_control'] = dict(actor=self._grant.plugin_id, feature_id=feature_id,
-                            action='cancel_child', reason_code=evidence.relation, decision_id=idempotency_key,
-                            policy_version=DIRECT, state='pending_stop', signal_delivered=False, signal_attempts=0)
+                    new['cancel_instruction_event'] = evidence.revision[0]
+                    new['result_applicability'] = 'invalidated'
+                    new['obligation_state'] = 'open'
+                    new['supervisor_control'] = dict(actor=self._grant.plugin_id, feature_id=feature_id,
+                        action='cancel_child', reason_code=evidence.relation, decision_id=idempotency_key,
+                        policy_version=DIRECT if direct else 'supervision.child-relevance.v1',
+                        state='pending_stop', signal_delivered=False, signal_attempts=0)
                 receipt = dataclasses.asdict(self._receipt({**new, 'control_revision': new['control_revision'] + 1}, accepted, reason))
                 # Bound receipt growth without evicting an uncertain accepted command.
                 if len(new['receipts']) >= 128:

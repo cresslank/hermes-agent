@@ -21,7 +21,7 @@ def signal(owner, handle):
             return
         if s["worker_finished"] or live.finish_pending or s["settled"]:
             return
-        if s["inflight"] or s["handoffs"] or s["cleanup_pending"] or s["effect_class"] != "read_only":
+        if s["inflight"] or s["handoffs"] or s["cleanup_pending"]:
             return
         if record["state"] in {"requested", "signalling", "stopped", "already_finished"}:
             return

@@ -207,25 +207,18 @@ def settle(n):
     assert n.runtime.drain_at_safe_point() == ()
 
 
-def test_public_launch_first_native_receipt_then_distinct_milestone_cancels(native):
+def test_public_launch_first_native_decision_cancels(native):
     n = native
     handle, = n.launch()
     assert not n.calls  # launch alone is not a semantic revision
     steer_from_user(n.agent, 'Compare the documented method only; the legacy appendix is optional.')
-    settle(n)
-    first = n.owner.status(handle)
-    assert first['semantic_observation'] and first['candidate'], (n.bridge.supervisor.inspect(), n.calls, n.sent, list(n.runtime.receipts.values()))
-    assert first['priority'] == 1 and not first['cancel_requested']
-    assert n.sent[-1]['action'] == 'reprioritize_child'
-    assert n.store.read(handle.child_id) == first
-    n.progress(handle, 'The remaining deliverable is a legacy appendix comparison.')
     settle(n)
     state = n.owner.status(handle)
     assert state['cancel_requested'] and not state['settled']
     assert not state['processes_stopped'] and not state['effects_reconciled']
     assert n.children[0].stopped.is_set()
     assert n.sent[-1]['action'] == 'cancel_child'
-    assert state['semantic_observation']['receipt_id'] == first['semantic_observation']['receipt_id']
+    assert state['semantic_observation'] is None and state['candidate'] is None
     with pytest.raises(ControlDenied):
         with n.owner.dispatch(handle, 'read_file', {'path': str(n.home / 'fixture')}):
             pass
@@ -248,22 +241,13 @@ def test_priority_alone_and_repeated_inference_do_not_supply_native_first_vote(n
     assert n.owner.status(handle)['semantic_observation'] is None
     n.progress(handle, 'Declared deliverable: optional appendix, second section.')
     settle(n)
-    first = n.owner.status(handle)['semantic_observation']
-    before = len(n.calls)
-    n.progress(handle, 'Declared deliverable: optional appendix, second section.')
-    settle(n)
-    assert len(n.calls) == before
-    assert n.owner.status(handle)['semantic_observation'] == first
-    assert not n.owner.status(handle)['cancel_requested']
+    assert n.owner.status(handle)['cancel_requested']
 
 
 @pytest.mark.parametrize('relation,value', [('current', .99), ('insufficient', .5)])
 def test_contribution_and_uncertainty_clear_native_observation(native, relation, value):
     n = native
     handle, = n.launch()
-    n.progress(handle, 'Optional appendix draft.')
-    settle(n)
-    assert n.owner.status(handle)['semantic_observation']
     n.mode.update(relation=relation, value=value)
     n.progress(handle, 'The appendix now covers the requested method comparison.')
     settle(n)
@@ -273,7 +257,7 @@ def test_contribution_and_uncertainty_clear_native_observation(native, relation,
     n.mode.update(relation='no_remaining_consumer', value=.01)
     n.progress(handle, 'Remaining work: unrequested formatting alternatives.')
     settle(n)
-    assert not n.owner.status(handle)['cancel_requested']
+    assert n.owner.status(handle)['cancel_requested']
 
 
 @pytest.mark.parametrize('native', ['required', 'unclosed', 'no_owner_grant', 'no_grant', 'unknown_links'], indirect=True)
@@ -293,8 +277,6 @@ def test_negative_authority_preserves_workers(native):
 def test_effect_edge_races_reject_queued_cancellation(native, race):
     n = native
     handle, = n.launch()
-    n.progress(handle, 'Optional remaining appendix.')
-    settle(n)
     n.progress(handle, 'Appendix includes an unneeded legacy table.')
     assert n.sent[-1]['action'] == 'cancel_child'
     rev = n.owner.status(handle)['control_revision']
@@ -325,6 +307,7 @@ def test_effect_edge_races_reject_queued_cancellation(native, race):
 def test_real_batch_scheduler_consumes_bounded_priority_without_losing_delivery(native):
     n = native
     n.mode['pause_schedule'] = True
+    n.mode['value'] = .08
     handles = n.launch(3)
     # Pause at the real scheduler entry, after public launch/authority publication.
     # No executor/future is replaced; priority only orders not-yet-submitted work.
@@ -374,48 +357,46 @@ def test_weaker_priority_decision_does_not_prime_cancellation(native):
     n.mode['value'] = .01
     n.progress(handle, 'Optional appendix next section.')
     settle(n)
-    assert n.owner.status(handle)['semantic_observation']
-    assert not n.owner.status(handle)['cancel_requested']
+    assert n.owner.status(handle)['semantic_observation'] is None
+    assert n.owner.status(handle)['cancel_requested']
 
 
 def test_repeated_accepted_instruction_is_not_another_meaningful_revision(native):
     n = native
     handle, = n.launch()
+    n.mode['value'] = .08
     text = 'Only the documented comparison matters; the appendix remains optional.'
     steer_from_user(n.agent, text)
     settle(n)
-    first = n.owner.status(handle)['semantic_observation']
-    assert first
+    first = n.owner.status(handle)['priority']
+    assert first == 1
     count = len(n.calls)
     steer_from_user(n.agent, text)
     settle(n)
     assert len(n.calls) == count
-    assert n.owner.status(handle)['semantic_observation'] == first
+    assert n.owner.status(handle)['priority'] == first
     assert not n.owner.status(handle)['cancel_requested']
 
 
-def test_new_run_requires_its_own_first_native_observation(native):
+def test_new_run_rejects_the_queued_old_decision(native):
     n = native
     handle, = n.launch()
     n.progress(handle, 'Optional appendix draft.')
-    settle(n)
-    first = n.owner.status(handle)['semantic_observation']
     n.runtime.bind_turn()
+    settle(n)
+    assert not n.owner.status(handle)['cancel_requested']
     n.progress(handle, 'Optional appendix next section.')
     settle(n)
-    second = n.owner.status(handle)['semantic_observation']
-    assert second['receipt_id'] != first['receipt_id']
-    assert second['full_revision']['run_generation'] > first['full_revision']['run_generation']
-    assert not n.owner.status(handle)['cancel_requested']
+    assert n.owner.status(handle)['cancel_requested']
 
 
-def test_new_plugin_generation_cannot_reuse_native_first_observation(native):
+def test_new_plugin_generation_rejects_the_queued_old_decision(native):
     n = native
     handle, = n.launch()
     n.progress(handle, 'Optional appendix draft.')
-    settle(n)
-    first = n.owner.status(handle)['semantic_observation']
     n.bridge.close()
+    settle(n)
+    assert not n.owner.status(handle)['cancel_requested']
     replacement = NativeHostBridge(n.facade, n.cfg, None, transport=Transport(n.cfg,
         FixtureCredential(str(n.home)), http_transport=httpx.MockTransport(n.handle)))
     try:
@@ -426,10 +407,7 @@ def test_new_plugin_generation_cannot_reuse_native_first_observation(native):
         for future in futures:
             future.result(timeout=2)
         n.runtime.drain_at_safe_point()
-        second = n.owner.status(handle)['semantic_observation']
-        assert second['receipt_id'] != first['receipt_id']
-        assert second['plugin_generation'] != first['plugin_generation']
-        assert not n.owner.status(handle)['cancel_requested']
+        assert n.owner.status(handle)['cancel_requested']
     finally:
         replacement.close()
 
@@ -437,8 +415,6 @@ def test_new_plugin_generation_cannot_reuse_native_first_observation(native):
 def test_foreign_profile_cannot_consume_queued_control(native, monkeypatch):
     n = native
     handle, = n.launch()
-    n.progress(handle, 'Optional appendix.')
-    settle(n)
     n.progress(handle, 'Unneeded appendix table.')
     monkeypatch.setenv('HERMES_HOME', str(n.home / 'foreign'))
     settle(n)
@@ -446,11 +422,9 @@ def test_foreign_profile_cannot_consume_queued_control(native, monkeypatch):
     assert list(n.runtime.receipts.values())[-1].status == 'stale'
 
 
-def test_claimed_prior_receipt_cannot_replace_exact_native_record(native):
+def test_historical_prior_hint_is_not_a_second_vote(native):
     n = native
     handle, = n.launch()
-    n.progress(handle, 'Optional appendix.')
-    settle(n)
     n.progress(handle, 'Unneeded appendix table.')
     from agent.supervision_types import project
     proposal, registration = n.runtime.pending.pop()
@@ -458,16 +432,14 @@ def test_claimed_prior_receipt_cannot_replace_exact_native_record(native):
     metadata['semantic_observation']['prior_receipt_id'] = 'plugin-private-claim'
     n.runtime.pending.append((dataclasses.replace(proposal, metadata=metadata), registration))
     settle(n)
-    assert not n.owner.status(handle)['cancel_requested']
-    assert list(n.runtime.receipts.values())[-1].status == 'stale'
+    assert n.owner.status(handle)['cancel_requested']
+    assert list(n.runtime.receipts.values())[-1].status == 'applied'
 
 
 @pytest.mark.parametrize('winner', ['dispatch', 'cancel'])
 def test_real_control_fence_serializes_cancel_and_dispatch(native, monkeypatch, winner):
     n = native
     handle, = n.launch()
-    n.progress(handle, 'Optional appendix.')
-    settle(n)
     n.progress(handle, 'Unneeded appendix table.')
     entered, release = threading.Event(), threading.Event()
     outcome = []

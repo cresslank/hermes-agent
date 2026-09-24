@@ -85,7 +85,7 @@ def _policy(runtime, registration, *, deadline=None):
     from agent.owned_delegation_planning import CONSUMERS_V2
     from hermes_cli.config_cached import current_config_readonly
     from hermes_constants import hermes_home_key
-    if runtime.closed or hermes_home_key() != runtime.revision.profile or not registration.active:
+    if getattr(runtime, "control_revoked", False) or hermes_home_key() != runtime.revision.profile or not registration.active:
         return None
     config = current_config_readonly(deadline=deadline)
     supervision = config.get("supervision") if isinstance(config, dict) else None
@@ -95,12 +95,20 @@ def _policy(runtime, registration, *, deadline=None):
     entry = plugins.get(registration.plugin_id) if isinstance(plugins, dict) else None
     policy = entry.get("owned_delegation") if isinstance(entry, dict) else None
     grants = entry.get("grants") if isinstance(entry, dict) else None
-    needed = {"observe", "reprioritize_child", "cancel_child"}
+    from agent.owned_delegation_direct import enabled
+    direct = enabled(policy)
+    fields = {"version", "allow_optional_readonly", "consumer_contract", "read_roots"}
+    if direct:
+        fields |= {"direct_control", "allow_owned_child_stop"}
+    if runtime.closed and not direct:
+        return None
+    needed = {"observe", "cancel_child"} if direct else {"observe", "reprioritize_child", "cancel_child"}
     if (not isinstance(grants, list) or any(type(g) is not str for g in grants)
             or not needed <= set(grants) or not needed <= registration.grants
             or type(policy) is not dict
-            or set(policy) != {"version", "allow_optional_readonly", "consumer_contract", "read_roots"}
-            or policy["version"] != VERSION or policy["allow_optional_readonly"] is not True
+            or set(policy) != fields or (direct and policy.get("allow_owned_child_stop") is not True)
+            or policy["version"] != VERSION or type(policy["allow_optional_readonly"]) is not bool
+            or (not direct and policy["allow_optional_readonly"] is not True)
             or policy["consumer_contract"] not in (CONSUMERS, CONSUMERS_V2)
             or type(policy["read_roots"]) is not list or not 1 <= len(policy["read_roots"]) <= 8
             or any(type(p) is not str or not Path(p).is_absolute() for p in policy["read_roots"])):
@@ -129,6 +137,9 @@ class ConfiguredDelegationOwner(OwnedDelegationOwner):
         self.runtime, self.registration, self.policy_pin, self.db = runtime, registration, policy_pin, db
         self.session_generation = session_generation
         self.registration_generation = registration.generation
+        from agent.owned_delegation_direct import enabled
+        self.direct_enabled = enabled(json.loads(policy_pin))
+        self.launch_scopes = {}
         self.launch_contracts = {}
         self.resolving = {}
         path = Path(db.db_path).resolve()
@@ -149,7 +160,7 @@ class ConfiguredDelegationOwner(OwnedDelegationOwner):
         super().__init__(parent_session_id=str(runtime.agent().session_id), store=SQLiteControlStore(connect, authorize=self.current,
                 lifecycle_authorize=lambda **kw: self.storage_current(raise_on_contention=True, **kw),
                 wait_for_writer=False),
-            grant=OwnerGrant(runtime.revision.profile, registration.plugin_id, True, True),
+            grant=OwnerGrant(runtime.revision.profile, registration.plugin_id, json.loads(policy_pin)["allow_optional_readonly"], True, self.direct_enabled),
             consumer_resolver=self.resolving.get, policy=policy,
             revision_provider=lambda: (runtime.revision.instruction_event, runtime.revision.requirements, runtime.revision.evidence))
 
@@ -177,6 +188,10 @@ class ConfiguredDelegationOwner(OwnedDelegationOwner):
     def semantic_authorized(self, handle, *, deadline=None):
         record = self.launch_contracts.get(handle.child_id)
         live = self._live.get(handle.child_id)
+        if self.direct_enabled:
+            from agent.supervision_children import _scope
+            return (live is not None and live.handle == handle and self.current(deadline=deadline)
+                and self.launch_scopes.get(handle.child_id, ())[:3] == _scope(self.runtime.revision)[:3])
         return (live is not None and live.handle == handle
             and self.current(deadline=deadline) and record is not None
             and self.runtime.revision.work_id == record.work_id
@@ -194,21 +209,46 @@ class ConfiguredDelegationOwner(OwnedDelegationOwner):
         from agent.owned_delegation_planning import planning_preflight
         return planning_preflight(self, parent, request, require_inventory=require_inventory, goal=goal, operation=operation)
 
+    def _launch_controls(self, parent, request, ancestor=None, *, resolver=None):
+        if self.direct_enabled and request is None and ancestor is None:
+            from dataclasses import asdict
+            # Native ordinary launch returns to its parent; this is not a model claim.
+            consumer = Consumer('parent:' + self.parent_session_id, 'required', requires_result=True)
+            return [{**asdict(consumer), 'requirement_ids': []}], True, 'required', False
+        return super()._launch_controls(parent, request, ancestor, resolver=resolver)
+
     def launch(self, parent, child, request=None, *, goal=""):
         request = validate_request(request)
-        # Legacy launches remain genuinely legacy, including on an enabled host.
-        # Nested owned work must still go through the inherited dispatch fence.
-        if request is None and binding_of(parent) is None:
+        # Ordinary launches gain stop ownership only under the explicit direct grant.
+        # Existing optional-only configurations keep genuinely legacy launches.
+        if request is None and binding_of(parent) is None and not self.direct_enabled:
             return None
         with self.runtime.lock, self.registration.fence, self._lock:
             if not self.current():
                 raise ControlDenied("Configured owner authority unavailable")
             from agent.owned_delegation_planning import launch_resolution
-            record, resolved = launch_resolution(self, parent, request, goal)
+            if self.direct_enabled:
+                from agent.supervision_children import _scope
+                import hashlib
+                scope = _scope(self.runtime.revision)
+                goal_digest = hashlib.sha256(str(goal).encode()).hexdigest()
+                if any(live.snapshot.get('supervisor_control') and live.snapshot['cancel_requested']
+                        and live.snapshot.get('launch_goal_digest') == goal_digest
+                        and live.snapshot.get('cancel_instruction_event') == self.runtime.revision.instruction_event
+                        and self.launch_scopes.get(ident, ())[:3] == scope[:3]
+                        for ident, live in self._live.items()):
+                    raise ControlDenied("Stopped child work requires a new explicit user instruction before relaunch")
+            if self.direct_enabled and request is None and binding_of(parent) is None:
+                record, resolved = None, {}
+            else:
+                record, resolved = launch_resolution(self, parent, request, goal)
             self.resolving.clear()
             self.resolving.update(resolved)
             try:
                 handle = super().launch(parent, child, request, goal=goal)
+                if self.direct_enabled:
+                    from agent.supervision_children import _scope
+                    self.launch_scopes[handle.child_id] = _scope(self.runtime.revision)
                 if record is not None and record.goal == goal:
                     self.launch_contracts[handle.child_id] = record
                 return handle
