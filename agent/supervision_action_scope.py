@@ -132,7 +132,10 @@ class ActionScopeOwner:
             recipients = [r for r in rt._registrations() if
                           {"observe", "authorize_action"} <= r.grants and CLASSES <= r.data_policy]
             if not recipients or not rt.sources:
-                return fallback or authorization
+                # No configured assessment means baseline dispatch, not implicit
+                # F09 authority. A requested-but-unavailable assessment below
+                # still retains its original instruction/argument binding.
+                return fallback
             revision = rt.revision
             scope = [{"id": ref, "text": text} for ref, text in rt.sources.items()]
             refs = tuple(rt.sources)
