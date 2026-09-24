@@ -7,9 +7,22 @@ from tests.agent.test_supervision_read_supplier import requests, read
 from tests.agent.test_supervision_efficiency import feature_calls
 
 
-@pytest.mark.parametrize('relation', ['within_scope', 'outside_scope'])
-def test_authorization_then_reuse_are_distinct_consumable_decisions(factory, monkeypatch, relation):
+@pytest.mark.parametrize('relation,change', [
+    ('within_scope', 'none'), ('outside_scope', 'none'),
+    ('within_scope', 'instruction'), ('within_scope', 'arguments'),
+    ('within_scope', 'revoked'), ('within_scope', 'during_consume'),
+])
+def test_authorization_then_reuse_are_distinct_consumable_decisions(factory, monkeypatch, relation, change):
     from agent.supervision_types import project
+    from agent import tool_executor
+    real_dispatch = tool_executor._dispatch_authorized_once
+    inject_start = False
+    def dispatch(*args, **kwargs):
+        if inject_start:
+            kwargs['begin_execution'] = begin
+        return real_dispatch(*args, **kwargs)
+    # make_planning captures the real dispatch binding when constructing p.call.
+    monkeypatch.setattr(tool_executor, '_dispatch_authorized_once', dispatch)
     p = factory()
     rows = requests(p)
     p.commit(rows)
@@ -34,13 +47,46 @@ def test_authorization_then_reuse_are_distinct_consumable_decisions(factory, mon
     monkeypatch.setattr('agent.tool_executor._run_with_activity_heartbeat',
                         lambda agent, name, run: evaluations.append(name) or run())
     p.a.client.reset_mock()
-    _, actual = p.call('read_file', rows[1]['operation']['arguments'], settle=False)
+    arguments = rows[1]['operation']['arguments']
+    # Both selections have returned before the real start-order boundary. Reuse
+    # must pass that boundary too, rather than returning early around it.
+    from agent.supervision_context import accepted_input_origin
+    from agent.supervision_read_reuse import ReadReuse
+    advances = []
+    def invalidate():
+        if change == 'instruction':
+            p.rt.accept_instruction(accepted_input_origin(
+                'Read the source fresh instead.', kind='cli', continuation=True))
+        elif change == 'arguments':
+            arguments['offset'] = 2
+        elif change in {'revoked', 'during_consume'}:
+            registration.grants -= {'authorize_action'}
+    def begin(callback):
+        advances.append(True)
+        if change != 'during_consume':
+            invalidate()
+        if callback is not None:
+            callback()
+    if change == 'during_consume':
+        real_consume = ReadReuse.consume
+        def consume(selected, owner):
+            result = real_consume(selected, owner)
+            assert result is not None
+            invalidate()
+            return result
+        monkeypatch.setattr(ReadReuse, 'consume', consume)
+    inject_start = True
+    _, actual = p.call('read_file', arguments, settle=False)
+    assert advances == [True]
     assert len(feature_calls(p.native, 'F09')) == 1
     assert evaluations == [], (p.native.bridge.supervisor.inspect(), p.rt.receipts, [list(b['questions']) for b in p.native.calls], p.owner.current())
     assert not p.a.client.mock_calls
     envelope = json.loads(actual)
     assert envelope['executed'] is False
-    if relation == 'within_scope':
+    if change != 'none':
+        assert len(feature_calls(p.native, 'F04')) == 1
+        assert 'reused_from' not in envelope and envelope['type'] == 'supervision_advisory'
+    elif relation == 'within_scope':
         assert len(feature_calls(p.native, 'F04')) == 1
         assert envelope['reused_from'] == 'tool:' + first
         assert envelope['result'] == original

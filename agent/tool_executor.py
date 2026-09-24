@@ -717,10 +717,12 @@ def _dispatch_authorized_once(
     from agent.supervision_policy import runtime_for_agent
     supervision = runtime_for_agent(agent)
     read_reuse = None
+    authorization = None
     if supervision is not None:
         with supervision.decision_boundary():
-            advisory = supervision.prepare_action(ref.name, ref.args, ref.call_id)
-            if advisory:
+            authorization = supervision.prepare_action(ref.name, ref.args, ref.call_id)
+            if isinstance(authorization, str):
+                advisory = authorization
                 _advance_start_order()
                 state.blocked = True
                 return json.dumps({"error": advisory, "type": "supervision_advisory", "executed": False})
@@ -731,25 +733,42 @@ def _dispatch_authorized_once(
 
     from agent.terminal_approval_batch import prepare_current_terminal
     from agent.owned_delegation import dispatch_fence, ControlDenied
+    from agent.supervision_action_scope import ActionAuthorizationDenied
+
+    def current_arguments():
+        return (authorization.arguments_at_dispatch(agent, ref.name, ref.args, ref.call_id)
+                if authorization is not None else ref.args)
+
     started = False
     try:
         # Last boundary AFTER plugin/Relay argument rewrites, shared by sequential,
         # concurrent and inline (including nested delegate) execution. Denied
         # capabilities must not open a terminal approval prompt either.
         with dispatch_fence(agent, ref.name, ref.args):
-            if read_reuse is not None:
-                reused = read_reuse.consume(getattr(supervision, "efficiency"))
-                if reused is not None:
-                    _advance_start_order()
-                    return reused
             prepare_current_terminal(ref)
-            _advance_start_order(lambda: _begin_tool_execution(agent, ref, display_index))
+            _advance_start_order(None if read_reuse is not None else
+                                 lambda: _begin_tool_execution(agent, ref, display_index))
             started = True
+            if read_reuse is not None:
+                current_arguments()
+                reused = read_reuse.consume(getattr(supervision, "efficiency"))
+                # Reuse also waits on source/control/receipt owners. A stale
+                # authorization must neither publish reuse nor fall back to I/O.
+                current_arguments()
+                if reused is not None:
+                    return reused
+                _begin_tool_execution(agent, ref, display_index)
             from agent.supervision_tool_attempts import run_attempt
             from agent.supervision_planning import run_capture
             return _run_with_activity_heartbeat(agent, ref.name,
                 lambda: run_capture(agent, ref.name, ref.args, ref.call_id,
-                    lambda: run_attempt(agent, ref.name, ref.args, ref.call_id, ref.task_id, lambda: execute(ref.args))))
+                    lambda: run_attempt(agent, ref.name, ref.args, ref.call_id, ref.task_id,
+                        lambda: execute(current_arguments()))))
+    except ActionAuthorizationDenied as exc:
+        if not started:
+            _advance_start_order()
+        state.blocked = True
+        return json.dumps({"error": str(exc), "type": "supervision_advisory", "executed": False})
     except ControlDenied:
         if not started:
             _advance_start_order()

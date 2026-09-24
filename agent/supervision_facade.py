@@ -330,7 +330,9 @@ class SupervisionFacade:
 
     def prepare_action(self, *, tool_name, arguments, tool_call_id):
         runtime = self._active_runtime()
-        return runtime.prepare_action(tool_name, arguments, tool_call_id) if runtime else None
+        result = runtime.prepare_action(tool_name, arguments, tool_call_id) if runtime else None
+        # The plugin-facing API returns advice, never the host's dispatch authority.
+        return result if isinstance(result, str) else None
 
     def prepare_final(self, candidate):
         runtime = self._active_runtime()
