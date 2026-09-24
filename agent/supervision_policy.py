@@ -329,7 +329,7 @@ class SupervisionRuntime:
                 origin_kind=origin_kind, deadline_class="owner" if deadline is not None else "background",
                 owner=owner, required_obligations=required_obligations, deadline_issued_at=issued,
                 turn_id=getattr(self.agent(), "_current_turn_id", "") or "",
-                tool_call_id=target_id if event == "action_proposed" else "")
+                tool_call_id=facts.get("action", {}).get("tool_call_id", target_id) if event == "action_proposed" else "")
         for reg in regs:
             # Recheck immediately before disclosing any facts or issuing egress
             # policy; admission of another recipient is never transferable.

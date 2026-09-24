@@ -56,9 +56,12 @@ class ActionScopeOwner:
     def prepare(self, tool_name, arguments, tool_call_id):
         rt = self.runtime
         value, key = operation(tool_name, arguments)
+        # Authorization and reuse are separate decisions about one dispatch.
+        # Retiring the authorization must not close the later reuse target.
+        target = "action-scope:" + hashlib.sha256(tool_call_id.encode("utf-8")).hexdigest()
         with rt.lock:
             fallback = self.fallback(key)
-            if tool_call_id in rt.closed_targets:
+            if tool_call_id in rt.closed_targets or target in rt.closed_targets:
                 return fallback or MESSAGES["stale"]
             recipients = [r for r in rt._registrations() if
                           {"observe", "authorize_action"} <= r.grants and CLASSES <= r.data_policy]
@@ -69,12 +72,12 @@ class ActionScopeOwner:
             refs = tuple(rt.sources)
             facts = {"changed": True, "evidence_refs": refs, "accepted_scope": scope,
                      "scope_complete": self.complete,
-                     "action": {"id": tool_call_id, **project(value), "issued": False}}
+                     "action": {"id": target, "tool_call_id": tool_call_id, **project(value), "issued": False}}
             # Share the enclosing dispatch decision with any dependent native pass.
             deadline = rt.shared_deadline()
             issued = rt.decision_issued_at
         from agent.supervision_dependencies import LinkedOpportunity
-        snapshot = rt.observe("action_proposed", facts, target_id=tool_call_id,
+        snapshot = rt.observe("action_proposed", facts, target_id=target,
                               actions=(Action.AUTHORIZE_ACTION,), evidence_refs=refs,
                               owner="action_scope", relations=tuple(sorted(RELATIONS)),
                               data_class="task_text", required_data_classes=tuple(CLASSES),
@@ -82,12 +85,12 @@ class ActionScopeOwner:
                               deadline=deadline, deadline_issued_at=issued,
                               recipient=recipients[0])
         if snapshot is not None:
-            rt._wait_for(tool_call_id, deadline, revision)
+            rt._wait_for(target, deadline, revision)
         with rt.lock:
             if rt.revision != revision or operation(tool_name, arguments)[1] != key or rt.closed:
-                rt.closed_targets.add(tool_call_id)
+                rt.closed_targets.add(target)
                 return MESSAGES["stale"]
-            entry = rt._take(tool_call_id, {Action.AUTHORIZE_ACTION})
+            entry = rt._take(target, {Action.AUTHORIZE_ACTION})
             result = self.fallback(key)
             if not self.complete:
                 result = self.suppress(key, "insufficient")
@@ -113,7 +116,7 @@ class ActionScopeOwner:
                         else:
                             # A decision was received but could not be durably settled.
                             result = self.suppress(key, "insufficient")
-            rt.closed_targets.add(tool_call_id)
+            rt.closed_targets.add(target)
             return result
 
 
