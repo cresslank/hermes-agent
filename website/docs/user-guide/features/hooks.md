@@ -453,7 +453,7 @@ Payload fields below are the exact event-specific fields supplied by each call s
 | `transform_tool_result` | Transform | After `post_tool_call`, before conversation append; first string replaces the result. | `tool_name`, `args`, `result`, `task_id`, `session_id`, `tool_call_id`, `turn_id`, `api_request_id`, `duration_ms`, `status`, `error_type`, `error_message` | Exposes the full model-bound result and arguments. |
 | `transform_terminal_output` | Transform | After bounded foreground process capture, before final output limiting; first string replaces output. | `command`, `output`, `returncode`, `task_id`, `env_type` | Command/output may contain credentials. |
 | `pre_transcription` | Transform | Fired by the STT dispatcher after provider resolution and before any backend (built-in, command-type, or plugin-registered) is invoked; dict results are applied in registration order, last-writer-wins per field (`prompt`, `language`, `model`; `file_path` is read-only). | `file_path`, `provider`, `model`, `language`, `prompt`, `source` | The final prompt is uploaded to the configured STT provider with the audio — keep secrets out of hook returns. |
-| `pre_llm_call` | Directive/control | Once per turn before the loop; all valid string/`{"context": ...}` returns are joined and injected into the user message. | `session_id`, `task_id`, `turn_id`, `user_message`, `conversation_history`, `is_first_turn`, `model`, `platform`, `parent_session_id`, `sender_id` | Full user message and conversation history. |
+| `pre_llm_call` | Directive/control | Once per turn before the loop; all valid string/`{"context": ...}` returns are joined and injected into the user message. | `session_id`, `task_id`, `turn_id`, `user_message`, `conversation_history`, `current_user_observation`, `is_first_turn`, `model`, `platform`, `parent_session_id`, `sender_id` | Full user message and conversation history. |
 | `post_llm_call` | Observer | Successful, non-interrupted turn finalization; return ignored. | `session_id`, `task_id`, `turn_id`, `user_message`, `assistant_response`, `conversation_history`, `model`, `platform` | Full prompt, response, and history. |
 | `transform_llm_output` | Transform | Before `post_llm_call` and final delivery; first non-empty string replaces the response. | `response_text`, `session_id`, `model`, `platform` | Full final assistant text. |
 | `pre_verify` | Directive/control | At the bounded edited-code verify gate; first valid continue/block-stop directive keeps the turn going. | `session_id`, `platform`, `model`, `coding`, `attempt`, `final_response`, `changed_paths` | Draft response and changed paths. |
@@ -685,12 +685,25 @@ def my_callback(session_id: str, user_message: str, conversation_history: list,
 |-----------|------|-------------|
 | `session_id` | `str` | Unique identifier for the current session |
 | `user_message` | `str \| list` | The user's original message for this turn (before any skill injection). A multimodal turn (image or other attachment) is the list of content parts, exactly as sent |
-| `conversation_history` | `list` | Copy of the full message list (OpenAI format: `[{"role": "user", "content": "..."}]`) |
+| `conversation_history` | `list` | Shallow copy of the full post-compaction message list, including the current user row (OpenAI format: `[{"role": "user", "content": "..."}]`) |
+| `current_user_observation` | `dict` | Detached pre-compaction input snapshot, bound to the active session/task/turn at hook delivery; see below |
 | `is_first_turn` | `bool` | `True` if this is the first turn of a new session, `False` on subsequent turns |
 | `model` | `str` | The model identifier (e.g. `"anthropic/claude-sonnet-4.6"`) |
 | `platform` | `str` | Where the session is running: `"cli"`, `"telegram"`, `"discord"`, etc. |
 
 **Fires:** In `agent/turn_context.py` (turn preparation for `run_conversation()` in `agent/conversation_loop.py`), after context compression but before the main `while` loop. Fires once per `run_conversation()` call (i.e. once per user turn), not once per API call within the tool loop.
+
+**Current input observation:** `current_user_observation` has these keys:
+
+- `version`: `"hermes.current-user-observation.v1"`.
+- `session_id`, `task_id`, `turn_id`: the same identities as the enclosing hook, bound after turn-start compaction (including any session rotation).
+- `original_user_message`: a deep copy of the original clean/persistence override, or the original input when no override exists. May be a multimodal value.
+- `message`: an independent deep copy of the staged user row **before** turn-start compaction and context augmentation. Includes its API-facing `content` and any source, display-kind, synthetic, or other row metadata. A voice turn can therefore have clean transcript text in `original_user_message` and a voice prefix in `message.content`; the clean override does not erase the staged row's provenance.
+- `history_index`: the zero-based current-user coordinate in this hook's post-compaction `conversation_history`, or `None` when unavailable. The row at that index may now carry compaction/TODO context and need not equal the captured `message`. A replacement row must retain the staged timestamp; an older-user fallback or an engine that drops that provenance receives `None` instead.
+
+This is **host observation, not user- or model-authenticated authority**. Plugins must validate the version, identities, content types and provenance for their use case; receiving a clean string does not prove a human-authored turn. Neither field changes the prompt or grants permissions. Mutating the observation cannot change the staged row or original input. The legacy `conversation_history` field remains a shallow list copy; do not mutate its rows.
+
+The field is additive: older hosts/callers can omit it, and callbacks with narrow signatures continue to receive only their declared fields. Persistence-disabled internal forks still skip `pre_llm_call` entirely. Hook timing and injection order are unchanged.
 
 **Return value:** If the callback returns a dict with a `"context"` key, or a plain non-empty string, the text is appended to the current turn's user message. Return `None` for no injection.
 

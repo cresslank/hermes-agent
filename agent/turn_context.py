@@ -14,6 +14,7 @@ import threading
 import time
 import uuid
 from contextlib import suppress
+from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any, Dict, List, Mapping, Optional, Tuple
 
@@ -745,6 +746,7 @@ def _ensure_session_row(agent: Any, pending_cli_message: Any) -> None:
 def _collect_pre_llm_call_context(
     agent: Any, *, effective_task_id: str, turn_id: str, original_user_message: Any,
     messages: List[Any], conversation_history: Optional[List[Any]],
+    current_user_observation: Optional[Dict[str, Any]] = None,
 ) -> str:
     """Run ``pre_llm_call`` plugins; their context is injected into the user message
     (never the system prompt). Oversized per-hook context is spilled to disk so a
@@ -765,6 +767,8 @@ def _collect_pre_llm_call_context(
             platform=getattr(agent, "platform", None) or "",
             parent_session_id=getattr(agent, "_parent_session_id", None) or "",
             sender_id=getattr(agent, "_user_id", None) or "",
+            **({"current_user_observation": current_user_observation}
+               if current_user_observation is not None else {}),
         )
         try:
             # Spill oversized per-hook context to disk so a runaway plugin can't inflate every subsequent
@@ -1072,6 +1076,12 @@ def build_turn_context(
 
     # Preserve the original user message (no nudge injection).
     original_user_message = persist_user_message if persist_user_message is not None else user_message
+    # Compaction may rewrite even nested content/provenance in the staged row.
+    # Keep the clean input and API-facing row independent of each other and the prompt.
+    current_user_observation = {
+        "original_user_message": deepcopy(original_user_message),
+        "message": deepcopy(user_msg),
+    }
     should_review_memory = _tick_memory_nudge(agent)
     _emit_reaction(agent, original_user_message)
 
@@ -1118,11 +1128,31 @@ def build_turn_context(
     active_system_prompt = compaction.active_system_prompt
     conversation_history = compaction.conversation_history
     current_turn_user_idx = compaction.current_turn_user_idx
+    # Bind only after compaction: it may rotate the active session and re-anchor the row.
+    current_user_observation.update(
+        version="hermes.current-user-observation.v1",
+        session_id=agent.session_id,
+        task_id=effective_task_id,
+        turn_id=turn_id,
+        history_index=(
+            current_turn_user_idx
+            if 0 <= current_turn_user_idx < len(messages)
+            and isinstance(messages[current_turn_user_idx], dict)
+            and messages[current_turn_user_idx].get("role") == "user"
+            # The injection anchor may fall back to an older user row when an
+            # engine drops this turn. Do not describe that fallback as this input.
+            and (messages[current_turn_user_idx] is user_msg or
+                 messages[current_turn_user_idx].get("timestamp") ==
+                 current_user_observation["message"]["timestamp"])
+            else None
+        ),
+    )
 
     plugin_user_context = _collect_pre_llm_call_context(
         agent, effective_task_id=effective_task_id, turn_id=turn_id,
         original_user_message=original_user_message, messages=messages,
         conversation_history=conversation_history,
+        current_user_observation=current_user_observation,
     )
     plugin_user_context = _merge_gateway_notes(
         agent, messages, current_turn_user_idx, plugin_user_context
