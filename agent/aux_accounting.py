@@ -51,7 +51,7 @@ def record_aux_usage(
     Strictly best-effort (accounting must never break an aux call). No-ops outside an
     agent turn, for main-loop-accounted tasks (``_EXCLUDED_TASKS``), or without usage.
     The model is read from ``response.model`` (accurate after aux provider fallback);
-    *provider*/*base_url* reflect the originally-resolved route.
+    *provider*/*base_url* reflect the serving route, including after retry/fallback.
     """
     try:
         if not task or task in _EXCLUDED_TASKS:
@@ -66,7 +66,12 @@ def record_aux_usage(
 
         from agent.usage_pricing import estimate_usage_cost, normalize_usage, with_served_service_tier
 
-        usage = with_served_service_tier(normalize_usage(raw_usage, provider=provider), response)
+        # Billing identity does not identify the usage wire shape: native Anthropic
+        # auxiliary clients adapt their usage to Chat Completions before validation.
+        chat_shaped = "prompt_tokens" in raw_usage if isinstance(raw_usage, dict) else hasattr(raw_usage, "prompt_tokens")
+        usage = with_served_service_tier(
+            normalize_usage(raw_usage, provider=None if chat_shaped else provider), response,
+        )
         if not (
             usage.input_tokens or usage.output_tokens
             or usage.cache_read_tokens or usage.cache_write_tokens
