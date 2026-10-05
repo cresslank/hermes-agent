@@ -51,7 +51,7 @@ def record_aux_usage(
     Strictly best-effort (accounting must never break an aux call). No-ops outside an
     agent turn, for main-loop-accounted tasks (``_EXCLUDED_TASKS``), or without usage.
     The model is read from ``response.model`` (accurate after aux provider fallback);
-    *provider*/*base_url* reflect the originally-resolved route.
+    *provider*/*base_url* reflect the serving route, including after retry/fallback.
     """
     try:
         if not task or task in _EXCLUDED_TASKS:
