@@ -18,7 +18,7 @@ from tools.computer_use.cua_backend_input import _BTF_UNSUPPORTED_MSG
 from tools.computer_use.cua_backend_parse import (
     _apps_from_windows, _image_dimensions_from_bytes, _image_from_tool_result, _ingest_windows, _is_placeholder_id,
     _is_real_app_window, _parse_elements_from_structured, _parse_elements_from_tree, _parse_xprop_net_active_window,
-    _positive_int, _split_tree_text, _windows_from_tool_result, _z_index_uninformative,
+    _positive_int, _snapshot_id_from_result, _split_tree_text, _windows_from_tool_result, _z_index_uninformative,
 )
 
 logger = logging.getLogger("tools.computer_use.cua_backend")
@@ -95,6 +95,9 @@ def _sorted_windows(out: dict[str, Any]) -> list[dict[str, Any]]:
 def _tree_and_title(out: dict[str, Any]) -> tuple[str, str]:
     """``(tree_markdown, window_title)`` from a get_window_state result."""
     tree = _split_tree_text(data if isinstance((data := out.get("data")), str) else "")[1]
+    structured_tree = (out.get("structuredContent") or {}).get("tree_markdown")
+    if isinstance(structured_tree, str) and structured_tree:
+        tree = structured_tree
     return tree, (match.group(1) if (match := re.search(r'AXWindow\s+"([^"]+)"', tree)) else "")
 
 def _gws_is_empty(out: dict[str, Any]) -> bool:
@@ -248,13 +251,17 @@ class _CaptureMixin:
         surfaced element window at ``_DEFAULT_MAX_ELEMENTS`` (100) and spills the rest to a cache file, so
         walking a 1,444-node Electron tree — or Finder's, whose AX surface is pathologically slow — buys
         latency and nothing else. The bounded tree is a prefix of the unbounded one, so the elements the
-        model sees are unchanged. ``computer_use.ax_max_elements`` tunes it; 0 disables.
+        model sees are unchanged. ``computer_use.ax_max_elements`` tunes it; 0 omits the override
+        (Cua >= 0.35 defaults to 250 nodes, not an unlimited walk).
         """
         args: dict[str, Any] = {"pid": self._active_pid, "window_id": self._active_window_id,
                                 "session": self._session_id}
         from tools.computer_use import cua_backend as _cb  # lazy: cua_backend imports this module at import time
         if capped := _cb._cua_configured_ax_max_elements():
             args["max_elements"] = capped
+        # Cua >= 0.35 defaults to compact Markdown without tokens or frames.
+        if self._session.supports_input_value("get_window_state", "tree_format", "elements"):
+            args["tree_format"] = "elements"
         return args
 
     def _capture_vision(self) -> tuple[Optional[str], Optional[str], list[UIElement], str]:
@@ -268,12 +275,14 @@ class _CaptureMixin:
                 "window_id": self._active_window_id, "format": "jpeg", "quality": 85, "session": self._session_id}))
         if not png_b64:
             # "Unknown tool: screenshot" or an empty image part -> get_window_state. The title is cheap
-            # and useful; `elements` stays empty by contract.
-            gws_out = self._call_capture_tool("get_window_state", self._gws_args())
+            # and useful; `elements` stays empty by contract. Keep the compact default on both transports.
+            args = self._gws_args()
+            args.pop("tree_format", None)
+            gws_out = self._call_capture_tool("get_window_state", args)
             (png_b64, image_mime_type), (_, window_title) = _image_from_tool_result(gws_out), _tree_and_title(gws_out)
         if not png_b64:
             cli_out = self._cli_refetch(
-                "get_window_state", self._gws_args(), 30.0, "vision screenshot",
+                "get_window_state", args, 30.0, "vision screenshot",
                 "cua-driver vision capture returned no image over MCP (window_id=%s); re-fetching via CLI transport",
                 self._active_window_id) or {}
             if cli_out.get("images"):
@@ -297,7 +306,8 @@ class _CaptureMixin:
         # frames.
         sc_elements = (gws_out.get("structuredContent") or {}).get("elements")
         elements = (_parse_elements_from_structured(sc_elements) if isinstance(sc_elements, list) and sc_elements
-                    else _parse_elements_from_tree(tree) if tree else [])
+                    else _parse_elements_from_tree(tree, _snapshot_id_from_result(gws_out)) if tree else [])
+        window_title = window_title or next((e.label for e in elements if e.role == "AXWindow"), "")
         # Tokens are tied to this snapshot: overwrite the whole map (and clear it when the new capture carries none).
         self._snapshot_tokens = {e.index: e.element_token for e in elements if e.element_token}
         return *_image_from_tool_result(gws_out), elements, window_title

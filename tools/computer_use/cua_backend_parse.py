@@ -79,10 +79,25 @@ def _is_real_app_window(w: dict[str, Any]) -> bool:
     title = w.get("title", "")
     return not any(title.startswith(p) or title.lower().startswith(p.lower()) for p in _NON_APP_WINDOW_TITLE_PREFIXES)
 
-def _parse_elements_from_tree(markdown: str) -> list[UIElement]:
+def _snapshot_id_from_result(out: dict[str, Any]) -> Optional[str]:
+    """Cua's snapshot handle, from structuredContent or the compact tree's header only."""
+    structured = out.get("structuredContent") or {}
+    if "snapshot_id" in structured:
+        snapshot_id = structured["snapshot_id"]
+    else:
+        header = _split_tree_text(data if isinstance((data := out.get("data")), str) else "")[0]
+        match = re.search(r"(?:^|\s)snapshot_id=(\S+)", header)
+        snapshot_id = match.group(1) if match else None
+    # Cua 0.35's element_token parser accepts s{8 hex digits}:<row index>.
+    # Never repair malformed handles, or infer one from a label/body row.
+    return snapshot_id if isinstance(snapshot_id, str) and re.fullmatch(r"s[0-9a-fA-F]{8}", snapshot_id) else None
+
+
+def _parse_elements_from_tree(markdown: str, snapshot_id: Optional[str] = None) -> list[UIElement]:
     """Parse UIElements from get_window_state AX-tree markdown — last-resort fallback for drivers without
     ``structuredContent.elements``. Bounds are always ``(0, 0, 0, 0)`` (the markdown carries none), fine for
-    element-index clicks since the driver resolves the frame.
+    element-index clicks since the driver resolves the frame. For compact responses, Cua documents
+    row [N]'s element_token as <snapshot_id>:N. Only a handle from this response may supply that prefix.
 
     Last-resort fallback for cua-driver builds that don't carry the canonical ``structuredContent.elements``
     array (see ``_parse_elements_from_structured`` — Surface 2 of #47072 prefers that path).
@@ -90,7 +105,8 @@ def _parse_elements_from_tree(markdown: str) -> list[UIElement]:
     return [
         # groups 3-6: value / quoted / paren / id= label (first non-None wins)
         UIElement(index=int(m.group(1)), role=m.group(2),
-                  label=m.group(3) or m.group(4) or m.group(5) or m.group(6) or "", bounds=(0, 0, 0, 0))
+                  label=m.group(3) or m.group(4) or m.group(5) or m.group(6) or "", bounds=(0, 0, 0, 0),
+                  element_token=f"{snapshot_id}:{int(m.group(1))}" if snapshot_id else None)
         for m in _ELEMENT_LINE_RE.finditer(markdown)
     ]
 
