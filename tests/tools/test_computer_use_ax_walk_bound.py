@@ -24,6 +24,7 @@ class _StubCapture(_CaptureMixin):
         self._active_window_id: Optional[int] = 382
         self._session_id: Optional[str] = None
         self._last_app = ""
+        self._session = cua_backend._CuaDriverSession.__new__(cua_backend._CuaDriverSession)
 
     def _resolve_capture_windows(self, mode: str, app: Optional[str], pid: Optional[int],
                                  window_id: Optional[int]) -> list[dict[str, Any]]:
