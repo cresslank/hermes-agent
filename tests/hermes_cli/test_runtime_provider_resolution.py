@@ -2137,7 +2137,7 @@ def test_custom_provider_explicit_target_model_wins(monkeypatch):
         lambda p: {
             "name": "myproxy",
             "base_url": "http://127.0.0.1:10100/v1",
-            "api_key": "no-key-required",
+            "api_key": "",
             "model": "default-model",
         },
     )
@@ -2158,7 +2158,7 @@ def test_custom_provider_without_target_model_keeps_default(monkeypatch):
         lambda p: {
             "name": "myproxy",
             "base_url": "http://127.0.0.1:10100/v1",
-            "api_key": "no-key-required",
+            "api_key": "",
             "model": "default-model",
         },
     )
@@ -2186,7 +2186,7 @@ def test_custom_provider_pool_target_model_wins(monkeypatch):
         lambda p: {
             "name": "myproxy",
             "base_url": "http://127.0.0.1:10100/v1",
-            "api_key": "no-key-required",
+            "api_key": "",
             "model": "default-model",
         },
     )
@@ -2241,15 +2241,14 @@ def test_bare_custom_resolves_model_key_env_for_configured_base_url(monkeypatch)
 
 
 def test_configured_key_env_resolving_empty_is_logged(monkeypatch, caplog):
-    """#67453: a declared ``key_env`` whose variable is unset used to be laundered silently into
-    ``no-key-required`` and surface only as the provider's 403; a keyless block stays silent."""
+    """Missing declared credentials fail locally; an intentionally keyless block stays usable."""
     monkeypatch.setattr(rp, "resolve_provider", lambda *a, **k: "custom")
     monkeypatch.setattr(rp, "load_config", lambda: {"custom_providers": [
         {"name": "scw", "base_url": "https://api.example.test/v1", "key_env": "UNSET_LLM_KEY", "model": "m"},
         {"name": "local", "base_url": "http://127.0.0.1:8080/v1", "model": "m"}]})
     monkeypatch.delenv("UNSET_LLM_KEY", raising=False)
-    with caplog.at_level("WARNING", logger="hermes_cli.runtime_provider"):
-        assert rp.resolve_runtime_provider(requested="custom:scw")["api_key"] == "no-key-required"
-        assert rp.resolve_runtime_provider(requested="custom:local")["api_key"] == "no-key-required"
+    with caplog.at_level("WARNING", logger="hermes_cli.runtime_provider"), pytest.raises(rp.AuthError, match="UNSET_LLM_KEY"):
+        rp.resolve_runtime_provider(requested="custom:scw")
+    assert rp.resolve_runtime_provider(requested="custom:local")["api_key"] == "no-key-required"
     hits = [r for r in caplog.records if "UNSET_LLM_KEY" in r.getMessage()]
-    assert len(hits) == 1 and "scw" in hits[0].getMessage()
+    assert hits and all("scw" in hit.getMessage() for hit in hits)

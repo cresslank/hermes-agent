@@ -12,6 +12,8 @@ import json
 import hermes_yaml as yaml
 import pytest
 
+from hermes_cli.auth import AuthError
+
 ENDPOINT = "http://127.0.0.1:18080/v1"
 ENTRY_KEY = "entry-key-A-0123456789"
 BUILTIN_KEY = "builtin-key-B-0123456789"
@@ -70,8 +72,7 @@ def test_shadowing_entry_frozen_policy_sends_its_key_env(tmp_path, monkeypatch, 
 @pytest.mark.parametrize("entry_key_set", [True, False])
 def test_shadowing_entry_auxiliary_client_never_borrows_builtin_key(tmp_path, monkeypatch, name, builtin_env,
                                                                     entry_key_set):
-    """Aux reads key_env first; with key_env declared but unset it must not fall back to the
-    built-in's env-seeded pool row (the placeholder + warning is the documented outcome)."""
+    """An unset declaration must fail locally, never borrow the built-in's env-seeded pool row."""
     _home(tmp_path, monkeypatch, name, builtin_env)
     if not entry_key_set:
         monkeypatch.delenv("ENTRY_KEY_VAR")
@@ -79,8 +80,12 @@ def test_shadowing_entry_auxiliary_client_never_borrows_builtin_key(tmp_path, mo
     from hermes_cli.runtime_provider import _get_named_custom_provider
 
     entry = _get_named_custom_provider(f"custom:{name}")
-    expected = ENTRY_KEY if entry_key_set else "no-key-required"
-    assert _named_custom_api_key(entry, name, ENDPOINT) == expected
+    if entry_key_set:
+        assert _named_custom_api_key(entry, name, ENDPOINT) == ENTRY_KEY
+    else:
+        with pytest.raises(AuthError) as error:
+            _named_custom_api_key(entry, name, ENDPOINT)
+        assert error.value.code == "missing_api_key"
 
 
 def test_shadowing_entry_unset_key_env_never_borrows_builtin_key(tmp_path, monkeypatch):
@@ -88,9 +93,9 @@ def test_shadowing_entry_unset_key_env_never_borrows_builtin_key(tmp_path, monke
     monkeypatch.delenv("ENTRY_KEY_VAR")
     from hermes_cli import runtime_provider as rp
 
-    resolved = rp.resolve_runtime_provider(requested="custom:deepseek")
-    assert resolved["base_url"] == ENDPOINT
-    assert resolved["api_key"] == "no-key-required"
+    with pytest.raises(AuthError) as error:
+        rp.resolve_runtime_provider(requested="custom:deepseek")
+    assert error.value.code == "missing_api_key"
 
 
 def test_shadowing_entry_inline_api_key_beats_builtin_env(tmp_path, monkeypatch):
@@ -191,10 +196,16 @@ def test_declared_key_env_unset_never_falls_back_to_the_builtin_host_key(tmp_pat
     from hermes_cli import runtime_provider as rp
 
     with caplog.at_level("WARNING"):
-        resolved = rp.resolve_runtime_provider(requested=requested, explicit_base_url=BUILTIN_HOST if requested == "custom" else None)
-    assert resolved["api_key"] == "no-key-required"
+        if requested == "custom":
+            resolved = rp.resolve_runtime_provider(requested=requested, explicit_base_url=BUILTIN_HOST)
+            assert resolved["api_key"] == "no-key-required"
+        else:
+            with pytest.raises(AuthError) as error:
+                rp.resolve_runtime_provider(requested=requested)
+            assert error.value.code == "missing_api_key"
     warning = next(r.getMessage() for r in caplog.records if "ENTRY_KEY_VAR" in r.getMessage())
-    assert "no-key-required" in warning
+    assert "empty/unset" in warning
+    assert BUILTIN_KEY not in caplog.text
 
 
 def test_entry_owns_pool_rows_seeded_from_its_own_key_env(tmp_path, monkeypatch):

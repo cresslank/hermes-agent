@@ -169,7 +169,7 @@ def test_actual_background_tasks_reach_chat_completions(
     config["providers"] = {
         "actual-relay": {
             "base_url": base_url if stale_mode else base_url + "/v1",
-            "key_env": "ACTUAL_API_KEY",
+            **({"key_env": "ACTUAL_API_KEY"} if use_api_key else {}),
             "transport": stale_mode or "chat_completions",
         }
     }
