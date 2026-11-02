@@ -419,5 +419,5 @@ class TestExplicitCallableSurvivesCustomResolution:
         ["bare_custom", "local_server_alias", "main_runtime_reuse", "named_custom", "api_key_branch"],
     )
     def test_string_key_is_still_stripped(self, monkeypatch, shape):
-        seen = self._resolve(monkeypatch, shape, " sk-x ")
-        assert seen.get("api_key") == "sk-x"
+        seen = self._resolve(monkeypatch, shape, " synthetic-stripped-key ")
+        assert seen.get("api_key") == "synthetic-stripped-key"
