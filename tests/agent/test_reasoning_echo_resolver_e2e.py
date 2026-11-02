@@ -48,6 +48,7 @@ def _write_home(tmp_path, monkeypatch, reasoning_echo: bool):
     ]
     (home / "config.yaml").write_text("\n".join(lines) + "\n")
     monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.setenv("LLAMACPP_KEY", "synthetic-llamacpp-key")
     # Drop any path-keyed config cache from a prior test.
     try:
         from hermes_cli import config as _cfg

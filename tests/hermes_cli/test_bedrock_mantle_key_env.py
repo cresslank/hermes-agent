@@ -12,6 +12,7 @@ runtime resolver then makes of it.
 import os
 
 import hermes_yaml as yaml
+import pytest
 
 import hermes_cli.runtime_provider as rp
 from hermes_cli.model_setup_flows_bedrock import _model_flow_bedrock_api_key
@@ -102,6 +103,6 @@ def test_resolution_fails_closed_when_the_token_is_absent(monkeypatch):
     monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
     monkeypatch.setattr(rp, "load_config", lambda: cfg)
 
-    resolved = rp.resolve_runtime_provider(requested=cfg["model"]["provider"])
-
-    assert resolved["api_key"] != TOKEN
+    with pytest.raises(rp.AuthError) as error:
+        rp.resolve_runtime_provider(requested=cfg["model"]["provider"])
+    assert error.value.code == "missing_api_key"

@@ -1765,9 +1765,12 @@ def _fallback_entry_key(fb: dict) -> tuple[str, str, str]:
 
 
 def _fallback_entry_unavailable_without_network(agent, fb: dict) -> Optional[str]:
-    """Return a skip reason for fallback entries known to be unusable locally."""
     if (fb.get("provider") or "").strip().lower() != "nous":
-        return None
+        from hermes_cli.fallback_config import resolve_entry_api_key
+        from hermes_cli.runtime_provider_custom import named_custom_credential_unavailable
+        provider = (fb.get("provider") or "").strip().lower()
+        _explicit, api_mode = _fallback_api_mode_hint(fb, provider, fb.get("base_url"))
+        return named_custom_credential_unavailable(provider, fb.get("base_url"), resolve_entry_api_key(fb), api_mode=api_mode)
     try:
         from hermes_cli.auth import get_provider_auth_state
         state = get_provider_auth_state("nous") or {}
@@ -1959,10 +1962,7 @@ def _should_skip_fallback_candidate(agent, fb: dict, fb_key: tuple, fb_provider:
         unavailable.add(fb_key)
         logger.warning("Fallback skip: %s/%s is not locally usable (%s); suppressing for this session", fb_provider, fb_model, local_skip_reason)
         return True
-    # Identity semantics (axes, shim aliases, credential surfaces, multi-endpoint pools)
-    # are owned by agent.backend_identity — do not re-implement comparisons here.
-    # Skip entries that resolve to the same backend that just failed — falling back to it loops the failure.
-    # See #22548, #62984, #70893.
+    # backend_identity owns same-backend skips across aliases, credentials and endpoints (#22548, #62984, #70893).
     from agent.backend_identity import BackendIdentity, should_skip_candidate
     current_ident = BackendIdentity.build(provider=getattr(agent, "provider", ""),
         model=getattr(agent, "model", ""), base_url=str(getattr(agent, "base_url", "") or ""))
