@@ -48,20 +48,15 @@ def _clean(value: Any) -> str:
 def _key_env_secret(entry: dict[str, Any], label: str) -> str:
     """The credential named by ``key_env`` / ``api_key_env`` on a config block, or "".
 
-    A declared variable that resolves to nothing is logged: every custom rung substitutes
-    ``no-key-required`` for an empty key (keyless local servers), so a misnamed or unexported
-    variable otherwise surfaces only as the provider's 401/403 (#67453). A block with no key_env at
-    all stays silent — that IS the keyless-server configuration. A ``providers:`` entry with a
-    declared credential never falls back to an implicit env key, so the placeholder is what it gets.
+    Log a missing source without exposing its value. Named entries subsequently reject an unresolved
+    declaration; blocks without key_env stay silent because they may be intentionally keyless.
     """
     key_env = _clean(entry.get("key_env") or entry.get("api_key_env"))
     if not key_env:
         return ""
     value = get_secret_str(key_env, "").strip()
     if not value:
-        logger.warning("%s: key_env %s is set but the variable is empty/unset — unless another credential "
-                       "is configured for it, the request carries the placeholder no-key-required and the "
-                       "endpoint will reject it", label, key_env)
+        logger.warning("%s: key_env %s is set but the variable is empty/unset", label, key_env)
     return value
 
 
@@ -193,7 +188,10 @@ def _match_legacy_custom_provider(requested_norm: str, custom_providers) -> Opti
         model_name = _clean(entry.get("model", ""))
         if model_name:
             result["model"] = model_name
-        _lift_common_custom_fields(entry, result, provider_key=provider_key, key_env=_clean(entry.get("key_env", "")),
+        if key_cmd := _clean(entry.get("key_cmd")):
+            result["key_cmd"] = key_cmd
+        _lift_common_custom_fields(entry, result, provider_key=provider_key,
+                                   key_env=_clean(entry.get("key_env") or entry.get("api_key_env")),
                                    api_mode=_rp()._parse_api_mode(entry.get("api_mode")))
         return result, entry
     return None
@@ -505,6 +503,11 @@ def _owning_entry_credential(rp, base_url: str) -> tuple[bool, Any]:
     return True, _entry_credential(rp, entry, str(entry.get("name") or "custom"))
 
 
+def _usable_custom_key(rp, value: Any) -> bool:
+    """Unexpanded config references are declarations, never wire credentials."""
+    return rp.has_usable_secret(value) and value != "no-key-required" and "${" not in value
+
+
 def _entry_credential(rp, entry: dict[str, Any], name: str) -> Any:
     """A ``providers:`` entry's own credential, for the named and the URL-matched bare routes alike:
     ``key_cmd`` (minted per request) first, else the first usable of ``api_key`` / ``key_env``, else "".
@@ -515,7 +518,7 @@ def _entry_credential(rp, entry: dict[str, Any], name: str) -> Any:
         if (token_provider := build_command_token_provider(key_cmd, name)) is not None:
             return token_provider
     candidates = (_clean(entry.get("api_key")), _key_env_secret(entry, f"custom provider '{name}'"))
-    return next((c for c in candidates if rp.has_usable_secret(c)), "")
+    return next((c for c in candidates if _usable_custom_key(rp, c)), "")
 
 
 def _try_resolve_from_custom_pool(
@@ -555,6 +558,53 @@ def _try_resolve_from_custom_pool(
                                base_url, pool_api_key, source=f"pool:{pool_key}", credential_pool=pool)
         except Exception:
             continue
+    return None
+
+
+def _resolve_named_custom_credential(
+    custom_provider: dict[str, Any], base_url: str, requested_provider: str,
+    explicit_api_key: Any = None, *, require_api_key: bool = True,
+) -> tuple[Any, Optional[dict[str, Any]]]:
+    """Share main/aux credential resolution, retaining main's explicit > pool > config order.
+
+    A declaration is not an intentional keyless endpoint, even on loopback. Only this entry's
+    usable credential (including its owned pool or a per-request command) can satisfy it.
+    """
+    rp = _rp()
+    explicit_key = explicit_api_key if callable(explicit_api_key) else _clean(explicit_api_key)
+    if callable(explicit_key) or _usable_custom_key(rp, explicit_key):
+        return explicit_key, None
+    declared = entry_declares_credential(custom_provider)
+    pool_result = rp._try_resolve_from_custom_pool(
+        base_url, "custom", custom_provider.get("api_mode"),
+        provider_name=custom_provider.get("provider_key") or custom_provider.get("name"),
+    )
+    if pool_result and (not declared or _usable_custom_key(rp, pool_result.get("api_key"))):
+        return pool_result["api_key"], pool_result
+    provider_name = str(custom_provider.get("name") or requested_provider)
+    api_key = _entry_credential(rp, custom_provider, provider_name)
+    if api_key:
+        return api_key, None
+    if declared and require_api_key:
+        key_env = _clean(custom_provider.get("key_env") or custom_provider.get("api_key_env"))
+        from hermes_cli.runtime_provider_missing_key import where_to_set_key
+        remedy = f"Set {key_env}. {where_to_set_key(key_env)}" if key_env else "Configure a usable api_key or key_cmd."
+        message = f"No usable credentials found for named custom provider '{provider_name}'. {remedy}"
+        logger.warning(message)
+        raise rp.AuthError(message, provider=requested_provider, code="missing_api_key")
+    return "", None
+
+
+def named_custom_credential_unavailable(requested_provider: str, base_url: Optional[str] = None) -> Optional[str]:
+    """A local fallback skip reason, using the same credential resolver without minting a key_cmd."""
+    entry = _get_named_custom_provider(requested_provider)
+    if entry is not None:
+        try:
+            _resolve_named_custom_credential(entry, base_url or entry["base_url"], requested_provider)
+        except _rp().AuthError as exc:
+            if exc.code == "missing_api_key":
+                return "missing_api_key"
+            raise
     return None
 
 
@@ -718,7 +768,10 @@ def _resolve_named_custom_runtime(*, requested_provider: str, explicit_api_key: 
         if not custom_provider:
             return _resolve_llamacpp_runtime(requested_provider, explicit_api_key)
     if requested_norm and requested_norm != "custom" and rp._resolves_to_custom(requested_norm):
-        requested_norm = "custom"
+        custom_provider = (rp._get_named_custom_provider(requested_provider) if config is None
+                           else _get_named_custom_provider(requested_provider, config=config))
+        if custom_provider is None:
+            requested_norm = "custom"
     if requested_norm == "custom" and explicit_base_url:
         return _resolve_direct_alias_runtime(requested_provider, explicit_api_key, explicit_base_url)
     if custom_provider is None:
@@ -729,28 +782,23 @@ def _resolve_named_custom_runtime(*, requested_provider: str, explicit_api_key: 
     base_url = ((explicit_base_url or "").strip() or custom_provider.get("base_url", "")).rstrip("/")
     if not base_url:
         return None
-    explicit_key = (explicit_api_key or "").strip()
-    # The credential pool is the profile's auth store (``hermes auth add``), not config: a frozen
-    # config snapshot still owes a pooled ``providers:`` entry its keys, or the turn ships the
-    # ``no-key-required`` placeholder to a host that wants one (C11 pool rows). An explicit launch
-    # key is the operator's credential for this route and wins over the pool (R2-M1). An entry
-    # that names its own credential never borrows a same-named built-in's env-seeded pool rows.
-    pool_result = None if rp.has_usable_secret(explicit_key) else rp._try_resolve_from_custom_pool(
-        base_url, "custom", custom_provider.get("api_mode"),
-        provider_name=custom_provider.get("provider_key") or custom_provider.get("name"),
+    from hermes_cli.runtime_provider_missing_key import _KEYLESS_API_MODES
+    api_mode = rp._maybe_apply_codex_app_server_runtime(
+        provider="custom", api_mode=custom_provider.get("api_mode") or "chat_completions",
+        model_cfg=rp._get_model_config() if config is None else config.get("model", {}),
+        requested_provider=requested_provider,
+    )
+    # These transports authenticate with their own login/SDK chain, not the HTTP API key.
+    api_key, pool_result = _resolve_named_custom_credential(
+        custom_provider, base_url, requested_provider, explicit_api_key,
+        require_api_key=api_mode not in _KEYLESS_API_MODES,
     )
     if pool_result:
-        # The pool doesn't know the custom_providers fields — propagate them here too.
         _apply_custom_provider_extras(custom_provider, target_model, pool_result)
         return pool_result
-    # An explicit --api-key wins as the one-off recovery escape hatch. ``key_cmd`` credentials are
-    # minted per request (short-lived bearers would go stale mid-session); both wire clients accept a
-    # callable api_key (the Entra ID contract). A declared credential that resolves to nothing gets no
-    # implicit host-gated env key: on the entry's built-in's host that is another account's key.
-    api_key: Any = explicit_key if rp.has_usable_secret(explicit_key) else (
-        _entry_credential(rp, custom_provider, str(custom_provider.get("name", requested_provider) or "custom"))
-        or next((c for c in ([] if entry_declares_credential(custom_provider)
-                             else rp._host_gated_env_key_candidates(base_url, ollama=False)) if rp.has_usable_secret(c)), ""))
+    if not api_key and not entry_declares_credential(custom_provider):
+        api_key = next((c for c in rp._host_gated_env_key_candidates(base_url, ollama=False)
+                        if rp.has_usable_secret(c)), "")
     result = _custom_runtime(rp, base_url, api_key, custom_provider.get("api_mode"),
                              source=f"custom_provider:{custom_provider.get('name', requested_provider)}",
                              requested_provider=requested_provider)

@@ -1765,9 +1765,9 @@ def _fallback_entry_key(fb: dict) -> tuple[str, str, str]:
 
 
 def _fallback_entry_unavailable_without_network(agent, fb: dict) -> Optional[str]:
-    """Return a skip reason for fallback entries known to be unusable locally."""
     if (fb.get("provider") or "").strip().lower() != "nous":
-        return None
+        from hermes_cli.runtime_provider_custom import named_custom_credential_unavailable
+        return named_custom_credential_unavailable(fb.get("provider") or "", fb.get("base_url"))
     try:
         from hermes_cli.auth import get_provider_auth_state
         state = get_provider_auth_state("nous") or {}

@@ -123,7 +123,7 @@ def aux_probe_mode():
 
 
 from agent.credential_pool import load_pool
-from agent.custom_entry_pool import entry_scoped_pool, pool_for_aux_provider
+from agent.custom_entry_pool import pool_for_aux_provider
 from agent.message_metadata import data_use_requirement
 from agent.model_metadata import MINIMUM_CONTEXT_LENGTH, get_model_context_length
 from hermes_cli.config import get_hermes_home
@@ -4664,35 +4664,13 @@ def _normalize_resolved_model(model_name: Optional[str], provider: str) -> Optio
         return model_name
 
 
-def _named_custom_api_key(custom_entry: dict[str, Any], provider: str, custom_base: str) -> Any:
-    """Credential for a named custom provider: inline api_key → key_env → key_cmd → credential pool → placeholder.
-    Aux resolves named custom providers here, not via _resolve_named_custom_runtime, so key_cmd must be
-    honoured at the same precedence or every aux call 401s."""
-    custom_key: Any = (custom_entry.get("api_key") or "").strip()
-    custom_key_env = (custom_entry.get("key_env") or custom_entry.get("api_key_env") or "").strip()
-    if not custom_key and custom_key_env:
-        custom_key = _scoped_key_env(custom_key_env)
-    custom_key_cmd = str(custom_entry.get("key_cmd", "") or "").strip()
-    if custom_key_cmd:
-        from agent.command_token_source import build_command_token_provider
-        custom_key = build_command_token_provider(custom_key_cmd, custom_entry.get("name") or provider) or custom_key
-    if not custom_key:
-        with contextlib.suppress(Exception):
-            from agent.credential_pool import custom_provider_pool_key_candidates
-            pool_name = custom_entry.get("provider_key") or custom_entry.get("name") or provider
-            for pool_key in custom_provider_pool_key_candidates(custom_base, pool_name):
-                try:
-                    pool = load_pool(pool_key)
-                except Exception:
-                    continue
-                if (pool := entry_scoped_pool(pool, pool_key, custom_entry)) is None or not pool.has_credentials():
-                    continue
-                if (pool_entry := pool.select()) is None:
-                    continue
-                pool_api_key = getattr(pool_entry, "runtime_api_key", None) or getattr(pool_entry, "access_token", "") or ""
-                if str(pool_api_key).strip():
-                    custom_key = str(pool_api_key).strip()
-                    break
+def _named_custom_api_key(custom_entry: dict[str, Any], provider: str, custom_base: str,
+                          explicit_api_key: Any = None) -> Any:
+    """Resolve declared credentials identically for main and auxiliary callers."""
+    from hermes_cli.runtime_provider_custom import _resolve_named_custom_credential
+    custom_key, _pool_result = _resolve_named_custom_credential(
+        custom_entry, custom_base, provider, explicit_api_key,
+    )
     return custom_key or "no-key-required"
 
 
@@ -5071,11 +5049,7 @@ def _resolve_named_custom_branch(req: _ResolveRequest) -> Optional[_ResolveResul
     # whatever the caller left blank, never replaces what the caller set (compression prompts carry
     # conversation history, so a silently swapped destination is a data-routing bug, not a nuisance).
     custom_base = (req.explicit_base_url or custom_entry.get("base_url") or "").strip()
-    custom_key = _normalize_api_key(req.explicit_api_key) or _named_custom_api_key(custom_entry, provider, custom_base)
-    if custom_key == "no-key-required":
-        logger.warning("resolve_provider_client: named custom provider %r has no resolvable "
-                       "api_key — request will be sent with placeholder no-key-required "
-                       "and will 401 on auth-required endpoints", custom_entry.get("name") or provider)
+    custom_key = _named_custom_api_key(custom_entry, provider, custom_base, req.explicit_api_key)
     # Actual's wire protocol takes precedence over persisted task/provider modes.
     entry_api_mode = (req.api_mode or custom_entry.get("api_mode") or "").strip()
     if _is_actual_auxiliary_route(req, custom_base):

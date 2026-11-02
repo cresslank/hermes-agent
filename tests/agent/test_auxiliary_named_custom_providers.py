@@ -48,7 +48,7 @@ class TestResolveProviderClientMainAlias:
         _write_config(tmp_path, {
             "model": {"default": "my-model", "provider": "beans"},
             "custom_providers": [
-                {"name": "beans", "base_url": "http://beans.local/v1", "api_key": "k"},
+                {"name": "beans", "base_url": "http://beans.local/v1", "api_key": "synthetic-key"},
             ],
         })
         from agent.auxiliary_client import resolve_provider_client
@@ -61,7 +61,7 @@ class TestResolveProviderClientMainAlias:
         _write_config(tmp_path, {
             "model": {"default": "my-model", "provider": "custom:beans"},
             "custom_providers": [
-                {"name": "beans", "base_url": "http://beans.local/v1", "api_key": "k"},
+                {"name": "beans", "base_url": "http://beans.local/v1", "api_key": "synthetic-key"},
             ],
         })
         from agent.auxiliary_client import resolve_provider_client
@@ -109,7 +109,7 @@ class TestResolveProviderClientNamedCustom:
         _write_config(tmp_path, {
             "model": {"default": "test-model"},
             "custom_providers": [
-                {"name": "beans", "base_url": "http://beans.local/v1", "api_key": "k"},
+                {"name": "beans", "base_url": "http://beans.local/v1", "api_key": "synthetic-key"},
             ],
         })
         from agent.auxiliary_client import resolve_provider_client
@@ -583,7 +583,7 @@ class TestAuxInheritsCustomProviderExtraBody:
         return {
             "model": {"default": "some-model", "provider": "custom:my-proxy"},
             "custom_providers": [
-                {"name": "my-proxy", "base_url": self._PROXY, "model": "some-model", "api_key": "sk-x",
+                {"name": "my-proxy", "base_url": self._PROXY, "model": "some-model", "api_key": "synthetic-proxy-key",
                  "extra_body": {"user": "proxy-user", "metadata": {"tier": "entry"}}},
                 {"name": "other-proxy", "base_url": "https://other.example/v1", "api_key": "sk-y",
                  "extra_body": {"user": "other-user"}},
@@ -607,7 +607,7 @@ class TestAuxInheritsCustomProviderExtraBody:
 
     @pytest.mark.parametrize("main_runtime", [
         None,
-        {"provider": "custom", "model": "some-model", "base_url": _PROXY, "api_key": "sk-x"},
+        {"provider": "custom", "model": "some-model", "base_url": _PROXY, "api_key": "synthetic-proxy-key"},
     ], ids=["config-main", "live-runtime"])
     def test_approval_with_empty_task_extra_body_inherits_entry_body(self, tmp_path, main_runtime):
         _write_config(tmp_path, self._config(approval={"extra_body": {}}))
